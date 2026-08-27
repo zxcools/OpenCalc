@@ -1,0 +1,23 @@
+# ===== 本地数据与配置（含个人交易记录，勿上传）=====
+data/
+config.json
+*.opcalc
+
+# ===== 打包中间产物（每次打包自动生成）=====
+build/
+build_old*/
+build_tmp*/
+__pycache__/
+*.pyc
+
+# ===== 历史版本备份（保留本地即可）=====
+backup/
+archive/
+
+# ===== 本地工作记忆 =====
+.workbuddy/
+
+# ===== 系统文件 =====
+Thumbs.db
+.DS_Store
+Desktop.ini
