@@ -1,0 +1,3 @@
+# 禁止 LFS / 文本转换: 确保 exe 以完整文件提交, 别人能直接下载运行
+dist/*.exe -filter -text
+*.exe -filter -text
