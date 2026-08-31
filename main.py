@@ -586,57 +586,73 @@ def set_window_pin(pin):
 
 def browse_folder():
     """弹出 Windows 原生文件夹选择对话框, 返回选中的绝对路径(取消返回 None)
-    用 ctypes 调 shell32.SHBrowseForFolder, 不依赖 tkinter
+    用 IFileOpenDialog (Vista+ 现代 COM 接口), 原生 Unicode 解决 SHBrowseForFolder 在 Win10/11 1809+ 上的中文乱码
     """
     if os.name != "nt":
         return None
     try:
         import ctypes
-        from ctypes import wintypes
-
-        shell32 = ctypes.windll.shell32
+        from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_ulong, c_ushort, c_ubyte, c_int, c_uint, c_long
         ole32 = ctypes.windll.ole32
         ole32.CoInitialize(None)
 
-        class BROWSEINFO(ctypes.Structure):
+        class GUID(ctypes.Structure):
             _fields_ = [
-                ("hwndOwner", wintypes.HWND),
-                ("pidlRoot", ctypes.c_void_p),
-                ("pszDisplayName", wintypes.LPWSTR),
-                ("lpszTitle", wintypes.LPWSTR),
-                ("ulFlags", wintypes.UINT),
-                ("lpfn", ctypes.c_void_p),
-                ("lParam", ctypes.c_void_p),
-                ("iImage", ctypes.c_int),
+                ("Data1", c_ulong),
+                ("Data2", c_ushort),
+                ("Data3", c_ushort),
+                ("Data4", c_ubyte * 8),
             ]
+        def G(d1, d2, d3, b):
+            return GUID(d1, d2, d3, (c_ubyte * 8)(*b))
 
-        # 显式签名, 避免 64 位指针截断
-        shell32.SHBrowseForFolder.argtypes = [ctypes.POINTER(BROWSEINFO)]
-        shell32.SHBrowseForFolder.restype = ctypes.c_void_p
-        shell32.SHGetPathFromIDListW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR]
-        shell32.SHGetPathFromIDListW.restype = wintypes.BOOL
-        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        CLSID_FileOpenDialog = G(0xDC1C5A9C, 0xE88A, 0x4DDE, (0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7))
+        IID_IUnknown        = G(0x00000000, 0x0000, 0x0000, (0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
+        IID_IShellItem      = G(0x43826D1E, 0xE718, 0x42EE, (0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B, 0xFE))
 
-        # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE (Vista+ 新版样式)
-        flags = 0x00000001 | 0x00000040
-        display = ctypes.create_unicode_buffer(260)
-        # 关键: create_unicode_buffer 是 c_wchar_Array, 需 cast 成 LPWSTR 才能赋给结构体字段
-        bi = BROWSEINFO(
-            None, None,
-            ctypes.cast(display, ctypes.c_wchar_p),
-            ctypes.c_wchar_p("请选择资金数据目录"),
-            flags, None, None, 0,
-        )
-        pidl = shell32.SHBrowseForFolder(ctypes.byref(bi))
+        # CoCreateInstance(CLSID_FileOpenDialog) → IUnknown*
+        ppv = c_void_p()
+        hr = ole32.CoCreateInstance(byref(CLSID_FileOpenDialog), None, 0x1, byref(IID_IUnknown), byref(ppv))
+        if hr < 0 or not ppv.value:
+            ole32.CoUninitialize()
+            return None
+        p = ppv.value
+        vt = ctypes.cast(p, POINTER(c_void_p))
+
+        FOS_PICKFOLDERS    = 0x00000020
+        FOS_FORCEFILESYSTEM= 0x00000040
+        SIGDN_FILESYSPATH  = 0x80058000
+
+        # vtable 槽位 (IFileOpenDialog + 父接口继承顺序):
+        # 0-2 IUnknown; 3 IModalWindow::Show; 4-20 IFileDialog(17 个); 21-22 IFileOpenDialog::GetResults/GetSelectedItems
+        # IFileDialog 方法顺序: SetFileTypes..SetFilter(17 项) + SetOptions(19) + GetOptions(20) + SetTitle(21)
+        IFileDialog_SetOptions = ctypes.WINFUNCTYPE(c_long, c_void_p, c_uint)(vt[19])
+        IFileDialog_SetOptions(p, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+        IFileDialog_SetTitle   = ctypes.WINFUNCTYPE(c_long, c_void_p, c_wchar_p)(vt[21])
+        IFileDialog_SetTitle(p, c_wchar_p("请选择资金数据目录"))
+        IModalWindow_Show      = ctypes.WINFUNCTYPE(c_long, c_void_p, c_void_p)(vt[3])
+        hr = IModalWindow_Show(p, None)
         path = None
-        if pidl:
-            buf = ctypes.create_unicode_buffer(260)
-            if shell32.SHGetPathFromIDListW(pidl, buf):
-                path = buf.value
-            ole32.CoTaskMemFree(pidl)
+        if hr == 0:   # 用户选了文件夹
+            IFileOpenDialog_GetResult = ctypes.WINFUNCTYPE(c_long, c_void_p, POINTER(c_void_p))(vt[22])
+            pItem = c_void_p()
+            if IFileOpenDialog_GetResult(p, byref(pItem)) == 0 and pItem.value:
+                # IShellItem vtable: 5=GetDisplayName
+                sit = ctypes.cast(pItem.value, POINTER(c_void_p))
+                IShellItem_GetDisplayName = ctypes.WINFUNCTYPE(c_long, c_void_p, c_int, POINTER(c_wchar_p))(sit[5])
+                pStr = c_wchar_p()
+                if IShellItem_GetDisplayName(pItem.value, SIGDN_FILESYSPATH, ctypes.byref(pStr)) == 0 and pStr.value:
+                    path = pStr.value
+                ole32.CoTaskMemFree(pStr)
+                ctypes.WINFUNCTYPE(c_ulong, c_void_p)(sit[2])(pItem.value)  # Release
+        ctypes.WINFUNCTYPE(c_ulong, c_void_p)(vt[2])(p)  # Release
         ole32.CoUninitialize()
         return path
     except Exception:  # noqa: BLE001
+        try:
+            ole32.CoUninitialize()
+        except Exception:
+            pass
         return None
 
 
@@ -702,14 +718,15 @@ def _fund_record_to_dict(r):
 
 def fund_list_records(strategy=None):
     db = _fund_db()
+    # 默认按年月降序: 最新在最上(用户阅读顺序)
     if strategy:
         rows = db.execute(
-            "SELECT * FROM records WHERE strategy=? ORDER BY year, month",
+            "SELECT * FROM records WHERE strategy=? ORDER BY year DESC, month DESC",
             (strategy,),
         ).fetchall()
     else:
         rows = db.execute(
-            "SELECT * FROM records ORDER BY strategy, year, month"
+            "SELECT * FROM records ORDER BY strategy, year DESC, month DESC"
         ).fetchall()
     return [_fund_record_to_dict(r) for r in rows]
 
@@ -769,6 +786,47 @@ def fund_clear_all():
     return db.execute("SELECT COUNT(*) FROM records").fetchone()[0]  # 返回剩余(应为0)
 
 
+def fund_clear_all_safe():
+    """带错误检测的清除, 返回 (ok, msg); 区分只读/被锁等具体原因"""
+    import os as _os
+    db_path = FUND_DB_PATH
+    db_dir = _os.path.dirname(db_path)
+    # 1. 目录可写?
+    if not _os.access(db_dir, _os.W_OK):
+        return False, "数据目录不可写（可能指向了网盘或被锁的路径）：%s\n请在「⚙ 数据位置」里改回默认（%%APPDATA%%\\OpenCalc\\data）" % db_dir
+    # 2. 文件存在?
+    if _os.path.exists(db_path):
+        if not _os.access(db_path, _os.W_OK):
+            return False, "数据库文件被设为只读或被其他程序占用：%s\n请关闭其他 OpenCalc.exe 实例后重试，或右键文件去掉「只读」属性" % db_path
+    # 3. SQLite 检测: 试写一行再回滚, 确认连接可写
+    try:
+        db = _fund_db()
+        # SQLite PRAGMA quick_check + journal_mode
+        row = db.execute("PRAGMA quick_check").fetchone()
+        if row and row[0] != "ok":
+            return False, "数据库已损坏: %s\n请尝试「⬇ 导出备份」后改用其他数据目录" % (row[0],)
+        # 试执行 DELETE 后立刻 ROLLBACK, 检测是否只读
+        try:
+            db.execute("BEGIN")
+            db.execute("DELETE FROM records")
+            db.execute("ROLLBACK")
+        except Exception as e:
+            db.execute("ROLLBACK")
+            err = str(e).lower()
+            if "readonly" in err or "locked" in err or "lock" in err:
+                return False, "数据库被锁/只读: %s\n请检查:\n① 是否多个 OpenCalc.exe 在运行(任务管理器结束重复进程)\n② 数据目录文件属性是否有「只读」\n③ 数据目录是否在网盘(网盘未同步会临时锁文件)" % str(e)
+            raise
+    except Exception as e:
+        return False, "数据库连接失败: %s" % str(e)
+    # 4. 实际执行清除
+    try:
+        db.execute("DELETE FROM records")
+        n = db.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+        return True, n
+    except Exception as e:
+        return False, "清除失败: %s" % str(e)
+
+
 def fund_yearly_summary(strategy):
     """年度汇总 = 由月度明细自动累加
     年初权益 = 该年首个有记录的月份的"月初权益"
@@ -782,7 +840,8 @@ def fund_yearly_summary(strategy):
     for r in rows:
         by_year.setdefault(r["year"], []).append(r)
     summary = []
-    for year in sorted(by_year.keys()):
+    # 年度按降序: 最新年份在最上
+    for year in sorted(by_year.keys(), reverse=True):
         recs = sorted(by_year[year], key=lambda x: x["month"])
         if not recs:
             continue
@@ -873,6 +932,21 @@ def fund_dashboard(strategy):
     monthly = fund_list_records(strategy)
     yearly = fund_yearly_summary(strategy)
     return {"monthly": monthly, "yearly": yearly}
+
+
+def fund_withdrawal_summary():
+    """各策略累计提现(出金为正的 cash_flow 合计) + 汇总
+    约定: cash_flow 正 = 出金(提现), 负 = 入金; 只累加出金
+    """
+    db = _fund_db()
+    result = {}
+    for strategy in FUND_STRATEGIES:
+        rows = db.execute(
+            "SELECT cash_flow FROM records WHERE strategy=?", (strategy,)
+        ).fetchall()
+        result[strategy] = round(sum(max(float(r[0] or 0), 0.0) for r in rows), 2)
+    result["combined"] = round(result.get(FUND_STRATEGIES[0], 0) + result.get(FUND_STRATEGIES[1], 0), 2)
+    return result
 
 
 def fund_export_backup():
@@ -1050,6 +1124,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/funds/strategies":
             self._send(200, _json({"ok": True, "strategies": FUND_STRATEGIES}))
 
+        elif path == "/api/funds/withdrawals":
+            self._send(200, _json({"ok": True, **fund_withdrawal_summary()}))
+
         elif path == "/api/funds/records":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             strategy = (qs.get("strategy") or [None])[0]
@@ -1131,8 +1208,11 @@ class Handler(BaseHTTPRequestHandler):
                 }))
                 return
             elif path == "/api/funds/clear-all":
-                remaining = fund_clear_all()
-                self._send(200, _json({"ok": True, "remaining": remaining, "msg": "已清除全部记录"}))
+                ok, info = fund_clear_all_safe()
+                if ok:
+                    self._send(200, _json({"ok": True, "remaining": info, "msg": "已清除全部记录"}))
+                else:
+                    self._send(200, _json({"ok": False, "error": info}))
                 return
             elif path == "/api/funds/data-dir":
                 migrated, status = fund_set_data_dir(params.get("dir", ""))
@@ -1466,13 +1546,19 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 }
 
 /* 资金曲线 */
-.funds-bar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+.funds-bar{display:flex;gap:8px;align-items:center;margin-bottom:18px;flex-wrap:nowrap;white-space:nowrap}
+.funds-bar .btn.sm{padding:5px 10px;font-size:12px}
+.funds-bar .seg button{padding:6px 12px;font-size:12.5px}
 .funds-bar .seg{display:flex;gap:4px;background:var(--panel);border:1px solid var(--border);
   border-radius:12px;padding:4px}
 .funds-bar .seg button{padding:8px 16px;border-radius:8px;cursor:pointer;border:0;
   background:transparent;color:var(--sub);font-weight:600;font-size:13px;transition:all .2s}
 .funds-bar .seg button.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff}
 .funds-bar .seg button:not(.active):hover{background:var(--panel2);color:var(--text)}
+/* 累计提现展示 */
+.wchip{padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--panel2);
+  color:var(--text);font-weight:600;font-size:11.5px;white-space:nowrap}
+.wchip b{color:var(--accent)}
 .btn{padding:10px 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel2);
   color:var(--text);font-weight:600;cursor:pointer;transition:all .2s;font-size:13.5px}
 .btn:hover{transform:translateY(-1px);background:var(--panel);border-color:var(--accent)}
@@ -1507,6 +1593,10 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   opacity:0;transition:opacity .15s;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.3)}
 .fchip:hover .x{opacity:1}
 .fchip .x:hover{background:#c93b3b}
+/* 资金曲线表头点击排序 */
+.tbl th.sortable{cursor:pointer;user-select:none}
+.tbl th.sortable:hover{color:var(--accent)}
+.tbl th .sort-arrow{font-size:10px;margin-left:4px;opacity:.7}
 
 /* 左下角浮动联系作者按钮 */
 .floating-contact{position:fixed;bottom:20px;left:20px;width:50px;height:50px;border-radius:50%;
@@ -1678,6 +1768,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             </div>
           </div>
         </div>
+        <button class="btn xs ghost" id="btnClearPrices" title="一键清空开仓价、止损价、止盈价，重新输入" style="margin-top:10px">🧹 清空价格</button>
         <div class="tip">合约乘数、保证金占用等数据已内置常用品种，选择标的后自动带出。<b>价格请手动输入最新行情。</b>开仓/止损/止盈价可点输入框上下箭头，按该品种最小变动价位（1 跳）步进调节。</div>
         <div class="wanhint" id="tickHint" style="color:var(--sub)"></div>
       </div>
@@ -1806,12 +1897,19 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <button data-strategy="威科夫">威科夫</button>
         <button data-strategy="combined">汇总</button>
       </div>
-      <div style="margin-left:auto;display:flex;gap:8px">
+      <!-- 各策略累计提现(出金) 展示 -->
+      <div id="withdrawBox" style="display:flex;gap:6px;align-items:center;flex-wrap:nowrap;margin-left:8px;font-size:11.5px;white-space:nowrap">
+        <span style="color:var(--sub)">提现</span>
+        <span class="wchip" id="wdAbe">abe ¥0</span>
+        <span class="wchip" id="wdWk">威科夫 ¥0</span>
+        <span class="wchip" id="wdAll">汇总 ¥0</span>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:nowrap">
         <button class="btn danger sm" id="btnClearAll" title="一键清除所有策略的全部记录(不可恢复)">🗑 清除全部</button>
-        <button class="btn" id="btnDataDir" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙ 数据位置</button>
-        <button class="btn" id="btnExport" title="导出全部记录为备份文件（可用于换电脑迁移/定期备份）">⬇ 导出备份</button>
-        <button class="btn" id="btnImport" title="从备份文件恢复记录（相同年月会覆盖）">⬆ 导入备份</button>
-        <button class="btn primary" id="btnAddRecord">＋ 记录月度</button>
+        <button class="btn sm" id="btnDataDir" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙ 数据位置</button>
+        <button class="btn sm" id="btnExport" title="导出全部记录为备份文件（可用于换电脑迁移/定期备份）">⬇ 导出</button>
+        <button class="btn sm" id="btnImport" title="从备份文件恢复记录（相同年月会覆盖）">⬆ 导入</button>
+        <button class="btn primary sm" id="btnAddRecord">＋ 记录月度</button>
         <input type="file" id="importFile" accept=".opcalc,.json,application/json" class="hidden">
       </div>
     </div>
@@ -1824,7 +1922,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="tbl-scroll">
         <table class="tbl" id="tblMonthly">
           <thead><tr>
-            <th>年月</th>
+            <th class="sortable" id="thSortMonthly">年月 <span class="sort-arrow">↓</span></th>
             <th class="num">月初权益</th>
             <th class="num">本月末权益</th>
             <th class="num">出入金</th>
@@ -1846,7 +1944,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div style="overflow-x:auto">
         <table class="tbl" id="tblYearly">
           <thead><tr>
-            <th>年份</th>
+            <th class="sortable" id="thSortYearly">年份 <span class="sort-arrow">↓</span></th>
             <th class="num">年初权益</th>
             <th class="num">年末权益</th>
             <th class="num">总出入金</th>
@@ -2039,6 +2137,12 @@ function init(){
   $('btnDefEquity').addEventListener('click', saveDefaultEquity);
   $('btnDefRisk').addEventListener('click', ()=>saveDefaultRisk('futures'));
   $('btnDefRiskO').addEventListener('click', ()=>saveDefaultRisk('options'));
+  // 一键清空开仓/止损/止盈价
+  $('btnClearPrices').addEventListener('click', ()=>{
+    ['entry','stop','target'].forEach(id=>{ $(id).value=''; });
+    updateTickHint();
+    onInput();
+  });
   updateRiskHint('futures');
   updateRiskHint('options');
 }
@@ -2788,6 +2892,19 @@ const FundUI = {
       this.showAllRows = !this.showAllRows;
       this.renderTables();
     });
+    // 年月/年份列点击排序: desc ↔ asc 来回切换
+    const toggleSort = ()=>{
+      this.sortDir = (this.sortDir === 'desc') ? 'asc' : 'desc';
+      this.renderTables();
+    };
+    ['thSortMonthly','thSortYearly'].forEach(id=>{
+      const el = $(id);
+      if (!el) return;
+      el.addEventListener('click', toggleSort);
+      // 同步箭头(默认 desc ↓)
+      const arrow = el.querySelector('.sort-arrow');
+      if (arrow) arrow.textContent = this.sortDir === 'desc' ? '↓' : '↑';
+    });
     this.bindWanHints();
   },
 
@@ -2848,10 +2965,25 @@ const FundUI = {
     }
     this.renderTables();
     this.renderCharts();
+    this.loadWithdrawals();
+  },
+
+  /* ---- 各策略累计提现(出金) ---- */
+  async loadWithdrawals(){
+    try {
+      const r = await fetchT('/api/funds/withdrawals');
+      const d = await r.json();
+      if (!d.ok) return;
+      const fmt = v => '¥' + Math.round(v).toLocaleString('en-US');
+      $('wdAbe').innerHTML = 'abe <b>' + fmt(d.abe || 0) + '</b>';
+      $('wdWk').innerHTML = '威科夫 <b>' + fmt(d['威科夫'] || 0) + '</b>';
+      $('wdAll').innerHTML = '汇总 <b>' + fmt(d.combined || 0) + '</b>';
+    } catch (e) { /* 静默 */ }
   },
 
   /* ---- 渲染表格 ---- */
   renderTables(){
+    this.sortDir = this.sortDir || 'desc';   // 默认最新在顶
     const fmtMoney = v => v==null ? '—' : (v<0?'-':'') + '¥' + Math.abs(Math.round(v)).toLocaleString('en-US');
     const fmtPct = v => v==null ? '—' : (v>=0?'':'−') + (Math.abs(v)*100).toFixed(2) + '%';
     const isCombined = this.strategy === 'combined';
@@ -2861,7 +2993,10 @@ const FundUI = {
     const tb = document.querySelector('#tblMonthly tbody');
     tb.innerHTML = '';
     const MAX_SHOW = 5;
-    const sorted = [...this.monthly].sort((a,b)=> (a.year-b.year) || (a.month-b.month));
+    // sortDir: 'desc' 最新在顶(默认) / 'asc' 最早在顶
+    const sd = this.sortDir || 'desc';
+    const sgn = sd === 'desc' ? -1 : 1;
+    const sorted = [...this.monthly].sort((a,b)=> sgn * ((a.year-b.year) || (a.month-b.month)));
     const hasMore = sorted.length > MAX_SHOW;
     for (let i = 0; i < sorted.length; i++) {
       const r = sorted[i];
@@ -2881,9 +3016,10 @@ const FundUI = {
            '<button class="btn sm" data-edit="' + r.year + ',' + r.month + '">修改</button>' +
            '<button class="btn danger sm" data-del="' + r.year + ',' + r.month + '">删除</button>' +
          '</td>');
-      // 较早的记录默认隐藏(仅显示最近 MAX_SHOW 条)
-      if (hasMore && i < sorted.length - MAX_SHOW && !this.showAllRows) {
-        tr.classList.add('hidden');
+      // 记录多时: 降序 → 隐藏末尾旧记录(索引 >= MAX_SHOW); 升序 → 隐藏开头旧记录(索引 < length-MAX_SHOW)
+      if (hasMore && !this.showAllRows) {
+        const hidden = sd === 'desc' ? (i >= MAX_SHOW) : (i < sorted.length - MAX_SHOW);
+        if (hidden) tr.classList.add('hidden');
       }
       tb.appendChild(tr);
     }
@@ -2911,7 +3047,7 @@ const FundUI = {
     // 年度汇总
     const tb2 = document.querySelector('#tblYearly tbody');
     tb2.innerHTML = '';
-    const sorted2 = [...this.yearly].sort((a,b)=>a.year-b.year);
+    const sorted2 = [...this.yearly].sort((a,b)=> sgn * (a.year-b.year));
     for (const r of sorted2) {
       const cls = r.yearly_pnl >= 0 ? 'pos' : 'neg';
       const tr = document.createElement('tr');
@@ -2931,6 +3067,12 @@ const FundUI = {
     // 图表标题
     $('chartMonthlyTitle').textContent = titleStr + ' · 月收益图';
     $('chartYearlyTitle').textContent = titleStr + ' · 年盈亏分析';
+    // 同步排序箭头
+    const arrow = sd === 'desc' ? '↓' : '↑';
+    ['thSortMonthly','thSortYearly'].forEach(id=>{
+      const a = $(id) && $(id).querySelector('.sort-arrow');
+      if (a) a.textContent = arrow;
+    });
   },
 
   /* ---- 渲染图表 ---- */
