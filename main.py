@@ -15,6 +15,7 @@
 """
 
 import json
+import math
 import os
 import re
 import socket
@@ -222,6 +223,33 @@ def calc_futures(params):
     per_lot_risk = risk_dist * mult              # 每手风险金额(止损价差 × 乘数)
     per_lot_reward = reward_dist * mult          # 每手止盈金额(名义)
 
+    # 阶梯止盈: 以止损价差为 1R, 按 2R~5R 推算逐级止盈价(供分批止盈/移动止损参考)
+    # 做多: 止盈价 = 开仓价 + N×风险距离; 做空: 止盈价 = 开仓价 - N×风险距离
+    # 价格按最小变动价位对齐: 做多向上取整(价格更高才触发), 做空向下取整(价格更低才触发)
+    # per_lot_profit 为理论价(N×每手风险)的名义浮盈, 仅作参考
+    tick = 0.0
+    try:
+        tick = float(contract["tick"])
+    except (KeyError, TypeError, ValueError):
+        tick = 0.0
+    ladder = []
+    for n in (2, 3, 4, 5):
+        raw = entry + n * risk_dist if direction == "long" else entry - n * risk_dist
+        if tick > 0:
+            steps = raw / tick
+            if direction == "long":
+                aligned = (math.ceil(steps - 1e-9)) * tick   # 整除时保持不变
+            else:
+                aligned = (math.floor(steps + 1e-9)) * tick
+            price = round(aligned, 6)
+        else:
+            price = round(raw, 2)
+        ladder.append({
+            "r": n,
+            "price": price,
+            "per_lot_profit": round(n * per_lot_risk, 2),   # 该档每手名义浮盈(≈N×每手风险)
+        })
+
     # 风险额度(占权益的百分比, 如 1.5 = 1.5%): 用户可自定义; 留空则默认 1.5%
     risk_percent = params.get("risk_percent")
     if risk_percent not in (None, ""):
@@ -260,6 +288,9 @@ def calc_futures(params):
         "mult": mult,
         "unit": contract["unit"],
         "direction": direction,
+        "entry": entry,
+        "stop": stop,
+        "target": target,
         "risk_percent": risk_pct_used,
         "budget": budget,
         "margin_rate": margin_rate,
@@ -271,6 +302,7 @@ def calc_futures(params):
         "per_lot_reward": per_lot_reward,
         "risk_used": risk_used,
         "max_reward": max_reward,
+        "ladder": ladder,
         "enough_lots": max_lots >= 1,
         "participate": pl_ratio >= MIN_PROFIT_LOSS_RATIO,
         "min_ratio": MIN_PROFIT_LOSS_RATIO,
@@ -1257,7 +1289,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def find_free_port(prefer=8765):
-    """优先使用 prefer 端口, 被占用则随机分配"""
+    """优先使用 prefer 端口, 被占用则随机分配; 支持环境变量 OC_PORT 强制指定(测试/多开用)"""
+    try:
+        prefer = int(os.environ.get("OC_PORT") or prefer)
+    except (TypeError, ValueError):
+        pass
     for port in (prefer, 0):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1504,6 +1540,30 @@ select{cursor:pointer;appearance:none;
 .details .k{color:var(--sub)}
 .details .v{font-weight:600}
 .details .v.good{color:var(--good)} .details .v.bad{color:var(--bad)} .details .v.warn{color:var(--warn)} .details .v.gold{color:var(--gold)}
+
+/* 阶梯止盈 (期货, 独立方块) */
+.ladder-block{border:1px solid var(--border);border-radius:16px;padding:14px 16px;
+  background:linear-gradient(135deg,rgba(91,140,255,.07),transparent 60%)}
+.ladder-hd{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
+  flex-wrap:wrap;margin-bottom:10px}
+.ladder-hd .lb{font-size:13px;font-weight:700;letter-spacing:.4px}
+.ladder-hd .ladder-sub{font-size:11.5px;color:var(--sub);font-weight:400;margin-left:4px}
+.ladder-hd .ladder-note{font-size:11px;color:var(--sub)}
+.ladder-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:680px){.ladder-grid{grid-template-columns:repeat(2,1fr)}}
+.rung{background:var(--panel2);border:1px solid var(--border);border-radius:12px;
+  padding:10px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.rung .rt{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--sub)}
+.rung .rt b{font-size:12.5px;color:var(--text)}
+.rung .rt .ad{font-size:13px}
+.rung .rq{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;
+  line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rung .rq.long{color:#ff6b6b}
+.rung .rq.short{color:#46d6ea}
+[data-theme="light"] .rung .rq.long{color:#e05252}
+[data-theme="light"] .rung .rq.short{color:#0e9fc8}
+.rung .rp{font-size:10.5px;color:var(--sub)}
+.rung .rp b{color:var(--bad);font-weight:600}
 
 /* 最近方案 (期货, 最多3组) */
 .plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
@@ -1895,6 +1955,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="drow"><span class="k">实际最大风险金额（每手风险 × 手数，≤ 预算）</span><span class="v money good" id="rRiskUsedF">—</span></div>
           <div class="drow"><span class="k">按最大手数止盈可盈利（每手止盈 × 手数）</span><span class="v money bad" id="rMaxRewardF">—</span></div>
           <div class="drow"><span class="k">最大占用保证金（每手 × 手数）</span><span class="v money gold" id="rMarginUsedF">—</span></div>
+        </div>
+        <!-- 阶梯止盈: 以止损价差为 1R, 2R~5R 逐级目标价 (独立方块) -->
+        <div class="ladder-block anim" id="rLadderF">
+          <div class="ladder-hd">
+            <span class="lb">🪜 阶梯止盈参考<span class="ladder-sub" id="rLadderDirF"></span></span>
+            <span class="ladder-note" id="rLadderNoteF"></span>
+          </div>
+          <div class="ladder-grid" id="rLadderGridF"></div>
         </div>
       </div>
 
@@ -2577,6 +2645,28 @@ function renderF(d){
   $('rMaxRewardF').textContent = fmtMoney(d.max_reward);
   $('rMarginUsedF').textContent = fmtMoney(d.margin_used);
   $('rBadgeLabel').textContent = d.direction==='long' ? '做多决策' : '做空决策';
+
+  /* 阶梯止盈: 2R~5R 逐级止盈价, 按方向对齐颜色 (做多红/做空青) */
+  const dirLong = d.direction === 'long';
+  $('rLadderDirF').textContent = dirLong ? '（做多 · 逐级上移）' : '（做空 · 逐级下移）';
+  $('rLadderNoteF').textContent = '1R = 止损价差' + (d.entry != null ? ' · 开仓 ' + fmtTrim(d.entry) : '');
+  const grid = $('rLadderGridF');
+  if (d.ladder && d.ladder.length){
+    grid.innerHTML = d.ladder.map(s=>{
+      const p = s.price;
+      const lvl = s.r + 'R';
+      const cls = dirLong ? 'long' : 'short';
+      const arrow = dirLong ? '↗' : '↘';
+      const profitTxt = fmtMoney(s.per_lot_profit);
+      return '<div class="rung" title="分批止盈：每达一档平一部分，剩余仓位目标移到下一档">' +
+        '<div class="rt"><b>' + lvl + '</b><span class="ad">' + arrow + '</span></div>' +
+        '<div class="rq ' + cls + '">' + fmtTrim(p) + '</div>' +
+        '<div class="rp">每手浮盈 <b>' + profitTxt + '</b></div>' +
+      '</div>';
+    }).join('');
+  } else {
+    grid.innerHTML = '<div class="plans-empty">暂无阶梯止盈数据</div>';
+  }
 
   const good = $('rBadgeGood'), bad = $('rBadgeBad'), warn = $('rWarn');
   if(!d.enough_lots){
