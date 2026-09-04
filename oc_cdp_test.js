@@ -1,4 +1,10 @@
-// OpenCalc v49 UI E2E: 填参数→计算→阶梯→保存方案→刷新→调出方案
+// OpenCalc v49 UI E2E: 填参数→计算→阶梯→保存方案→刷新→调出方案 (13 项断言)
+// 运行前置:
+//   1. 软件服务运行在 8765 (启动 dist/OpenCalc.exe 或 python main.py)
+//   2. Chrome headless 调试端口 9222:
+//      "C:\...\chrome.exe" --headless=new --disable-gpu --no-first-run \
+//        --remote-debugging-port=9222 --user-data-dir=<临时目录> about:blank
+//   3. node oc_cdp_test.js   (退出码 0=全过; 1=有断言失败; 2=脚本错误)
 const BASE = 'http://127.0.0.1:8765';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
