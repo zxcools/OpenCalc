@@ -77,7 +77,7 @@ pyinstaller --onefile --windowed --name OpenCalc --icon icon.ico \
 ## 🧪 测试
 
 ```bash
-python tests.py   # 121 项自动化测试
+python tests.py   # 134 项自动化测试
 ```
 
 ## ⚠️ 免责声明
