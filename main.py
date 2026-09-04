@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
+APP_VERSION = 49              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1135,6 +1136,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, _json({"ok": True, "contracts": contract_list()}))
         elif path == "/api/health":
             self._send(200, _json({"ok": True, "app": APP_NAME}))
+        elif path == "/api/version":
+            self._send(200, _json({"ok": True, "app": APP_NAME, "version": APP_VERSION}))
         elif path == "/favicon.ico":
             try:
                 self._send(200, _favicon_bytes(), "image/x-icon")
@@ -1289,7 +1292,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def find_free_port(prefer=8765):
-    """优先使用 prefer 端口, 被占用则随机分配; 支持环境变量 OC_PORT 强制指定(测试/多开用)"""
+    """优先使用 prefer 端口, 被占用则随机分配; 支持环境变量 OC_PORT 强制指定(测试/多开用)
+    ⚠ 不再设置 SO_REUSEADDR: Windows 上该选项允许多进程同绑一端口, 会导致 HTTP 请求
+    随机路由到旧实例(页面/接口版本错配)。默认独占绑定, 第二个实例会绑定失败自动换端口。"""
     try:
         prefer = int(os.environ.get("OC_PORT") or prefer)
     except (TypeError, ValueError):
@@ -1297,7 +1302,6 @@ def find_free_port(prefer=8765):
     for port in (prefer, 0):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("127.0.0.1", port))
             actual = s.getsockname()[1]
             s.close()
@@ -1305,6 +1309,36 @@ def find_free_port(prefer=8765):
         except OSError:
             continue
     return 0
+
+
+def _peer_info(port=8765):
+    """探测 port 上是否运行着本应用实例(单实例接管用)。
+    返回: None=无本应用(空闲或被他程序占用); 0=本应用旧版(无 /api/version); >0=该实例版本号"""
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/version" % port, timeout=1.5) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+            if d.get("ok") and d.get("app") == APP_NAME:
+                v = d.get("version")
+                return int(v) if str(v).isdigit() else 0
+    except Exception:  # noqa: BLE001
+        pass
+    # 旧版本实例没有 /api/version 路由 → 用 /api/health 兜底识别(响应体小, 避免大 HTML 中断)
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/health" % port, timeout=1.5) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+            if d.get("app") == APP_NAME:
+                return 0
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _ask_shutdown(port=8765):
+    """请已运行的实例退出(供新版本接管端口); /api/shutdown 为 GET 路由, 响应后 0.5s 自杀"""
+    try:
+        urllib.request.urlopen("http://127.0.0.1:%d/api/shutdown" % port, timeout=1.5)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _find_browser():
@@ -1371,6 +1405,19 @@ def idle_watchdog(server, timeout=IDLE_EXIT_SECONDS):
 
 
 def main():
+    # 单实例接管: 若 8765 已有实例在跑 → 旧版(<本版)请其退出后本实例接管; 同版/更新版则直接复用其窗口
+    peer = _peer_info()
+    if peer is not None:
+        if peer == 0 or peer < APP_VERSION:
+            _ask_shutdown()
+            for _ in range(10):            # 最多等 ~2s 让旧实例退出释放端口
+                time.sleep(0.2)
+                if _peer_info() is None:
+                    break
+        else:
+            open_browser("http://127.0.0.1:8765/")
+            return
+
     port = find_free_port()
     url = "http://127.0.0.1:%d/" % port
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
