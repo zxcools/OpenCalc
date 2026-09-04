@@ -2502,6 +2502,7 @@ function initContractSearch(inputId, listId, freqId, favBtnId, mode, onPick){
 }
 
 function pickContract(c, which){
+  selCode[which] = c.code;   // 统一标记选中(所有调用路径生效; 搜索点击路径此前已赋值, 幂等)
   if(which==='F'){
     $('unitF').textContent = c.unit.replace('吨/手','元/吨').replace('克/手','元/克').replace('千克/手','元/千克').replace('桶/手','元/桶');
     // 按品种最小变动价位设置价格步进(上下箭头 1 跳)
