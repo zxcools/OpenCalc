@@ -238,6 +238,13 @@ def calc_futures(params):
                 raise ValueError("风险额度必须大于 0")
         else:
             budget = equity * risk_ratio
+    # 实际使用的风险百分比(回显用, 如 权益 × 1.5%)
+    if risk_percent not in (None, ""):
+        risk_pct_used = float(rp)
+    elif params.get("risk_amount") not in (None, ""):
+        risk_pct_used = budget / equity * 100.0
+    else:
+        risk_pct_used = risk_ratio * 100.0
     margin_per_lot = entry * mult * margin_rate  # 每手保证金(展示用, 不参与推手数)
     max_lots = int(budget // per_lot_risk)      # 最大手数=按风险金额倒推
     margin_used = max_lots * margin_per_lot      # 最大占用保证金
@@ -253,6 +260,7 @@ def calc_futures(params):
         "mult": mult,
         "unit": contract["unit"],
         "direction": direction,
+        "risk_percent": risk_pct_used,
         "budget": budget,
         "margin_rate": margin_rate,
         "margin_per_lot": margin_per_lot,
@@ -1444,11 +1452,25 @@ select{cursor:pointer;appearance:none;
   background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;
   background-size:5px 5px;background-repeat:no-repeat}
 
+/* 持仓方向 双按钮(与标题同行, 做多红 / 做空青) */
+.dirrow{display:flex;align-items:center;gap:14px;margin:16px 0 2px}
+.dirrow .dirlabel{font-size:12.5px;color:var(--sub);flex:none}
+.dseg{flex:1;display:flex;gap:4px;background:var(--panel);border:1px solid var(--border);
+  padding:3px;border-radius:11px}
+.dseg button{flex:1;border:0;background:transparent;padding:7px 0;border-radius:8px;cursor:pointer;
+  font-size:13.5px;font-weight:700;color:var(--sub);transition:background .15s,color .15s}
+.dseg button:hover{color:var(--text)}
+.dseg button[data-dir="long"].active{background:rgba(255,91,91,.16);color:#ff6b6b}
+.dseg button[data-dir="short"].active{background:rgba(70,214,234,.15);color:#46d6ea}
+[data-theme="light"] .dseg button[data-dir="long"].active{background:rgba(224,82,82,.14);color:#e05252}
+[data-theme="light"] .dseg button[data-dir="short"].active{background:rgba(14,159,200,.13);color:#0e9fc8}
+
 /* 结果区 */
 .results{display:flex;flex-direction:column;gap:16px}
 .budgetbar{display:flex;align-items:baseline;justify-content:space-between;
   background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:14px 18px}
 .budgetbar .k{font-size:12.5px;color:var(--sub)}
+.budgetbar .k .fml{display:block;margin-top:3px;font-size:11px;color:var(--accent);font-weight:600;letter-spacing:.2px}
 .budgetbar .v{font-size:24px;font-weight:700;color:var(--accent2)}
 .budgetbar .v small{font-size:12px;color:var(--sub);font-weight:400;margin-left:4px}
 
@@ -1482,6 +1504,25 @@ select{cursor:pointer;appearance:none;
 .details .k{color:var(--sub)}
 .details .v{font-weight:600}
 .details .v.good{color:var(--good)} .details .v.bad{color:var(--bad)} .details .v.warn{color:var(--warn)} .details .v.gold{color:var(--gold)}
+
+/* 最近方案 (期货, 最多3组) */
+.plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
+  border-radius:10px;padding:10px 14px;line-height:1.6}
+.plans-item{display:flex;align-items:center;gap:12px;background:var(--panel2);
+  border:1px solid var(--border);border-radius:12px;padding:9px 14px;cursor:pointer;
+  transition:border-color .15s,transform .15s}
+.plans-item:hover{border-color:var(--accent);transform:translateY(-1px)}
+.plans-item .nm{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plans-item .nm .d{font-weight:800;margin:0 2px}
+.plans-item .nm .d.long{color:#ff6b6b}
+.plans-item .nm .d.short{color:#46d6ea}
+[data-theme="light"] .plans-item .nm .d.long{color:#e05252}
+[data-theme="light"] .plans-item .nm .d.short{color:#0e9fc8}
+.plans-item .meta{font-size:11px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plans-item .go{margin-left:auto;flex:none;font-size:12px;font-weight:600;color:var(--accent);
+  background:rgba(91,140,255,.1);border:1px solid rgba(91,140,255,.35);border-radius:8px;padding:4px 12px}
+.plans-item:hover .go{background:rgba(91,140,255,.2)}
+.plans-item .go:active{transform:scale(.96)}
 
 .tip{margin-top:16px;font-size:12px;color:var(--sub);line-height:1.8;
   background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:12px 16px}
@@ -1684,7 +1725,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <div id="calcArea">
     <div class="modes">
       <div class="mode active" data-mode="futures">期货模式<small>风险额度 0.5%~3% 可选 · 盈亏比决策</small></div>
-      <div class="mode" data-mode="options">期权模式<small>统一 权益 × 3% · 权利金占用</small></div>
+      <div class="mode" data-mode="options">期权模式<small>风险额度 0.5%~3% 可选 · 权利金占用</small></div>
     </div>
 
   <div class="grid">
@@ -1729,11 +1770,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <button class="qref" id="qRefF">刷新</button>
         </div>
 
-        <label>持仓方向</label>
-        <select id="direction">
-          <option value="long">做多（买开）</option>
-          <option value="short">做空（卖开）</option>
-        </select>
+        <div class="dirrow">
+          <span class="dirlabel">持仓方向</span>
+          <div class="dseg" id="dirSeg">
+            <button type="button" class="active" data-dir="long">做多</button>
+            <button type="button" data-dir="short">做空</button>
+          </div>
+        </div>
 
         <div class="row2">
           <div>
@@ -1817,8 +1860,12 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       </div>
 
       <div id="resultF" class="hidden">
+        <div class="ratio-strip anim">
+          <span class="l">开仓额度 · 当前风险额度</span>
+          <span class="badge good" id="rIvBadgeF"><span class="ico">◈</span>权益 × 1%</span>
+        </div>
         <div class="budgetbar anim">
-          <span class="k">可投入开仓金额（风险额度 / 预算）</span>
+          <span class="k">可投入开仓金额（预算）<span class="fml" id="rFormulaF"></span></span>
           <span class="v money" id="rBudgetF">—</span>
         </div>
         <div class="hud">
@@ -1879,6 +1926,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </div>
         <div class="warnbox hidden" id="rWarnO"></div>
         <div class="tip">期权买入不占用保证金，资金按权利金全额占用。期权乘数请以交易所最新规定为准。</div>
+      </div>
+
+      <!-- 最近保存的期货方案 (最多3组, 一键调出; 仅期货模式显示) -->
+      <div id="recentPlans" class="hidden" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:2px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+          <span style="font-size:12.5px;color:var(--sub);letter-spacing:.5px">最近方案 <small style="opacity:.75">（最多保留最近 3 组）</small></span>
+          <button class="btn xs ghost" id="btnSavePlan" style="margin-left:auto" title="把当前开仓参数（标的/方向/价格/保证金率/风险额度/权益）保存为方案，点击「调出」一键恢复并重算">💾 保存当前方案</button>
+        </div>
+        <div id="planList" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
     </div>
   </div>
@@ -2091,9 +2147,16 @@ const $ = id => document.getElementById(id);
 let CONTRACTS = [];
 let curMode = 'futures';
 const selCode = {F: null, O: null};   // 当前选中的标的代码
+let dirF = 'long';                     // 期货持仓方向(做多红/做空青 双按钮)
 
 const fmt = v => (v==null||isNaN(v)) ? '—' : Number(v).toLocaleString('zh-CN',{maximumFractionDigits:2,minimumFractionDigits:0});
 const fmtMoney = v => (v==null||isNaN(v)) ? '—' : '¥ ' + Number(v).toLocaleString('zh-CN',{maximumFractionDigits:0});
+/* 数字 → 精简显示: 3800 → "3800", 3800.50 → "3800.5", 1.0 → "1" */
+const fmtTrim = v => {
+  const n = Number(v);
+  if (!isFinite(n)) return '—';
+  return n.toFixed(2).replace(/\.?0+$/, '');
+};
 
 /* fetch 带超时(默认8秒), 避免行情网络慢时界面卡住 */
 function fetchT(url, opts, ms){
@@ -2395,16 +2458,17 @@ function loadQuote(code, which, silent){
 $('qRefF').addEventListener('click',()=>{ if(selCode.F) loadQuote(selCode.F,'F'); });
 $('qRefO').addEventListener('click',()=>{ if(selCode.O) loadQuote(selCode.O,'O'); });
 
-/* 模式切换 */
+/* 模式切换 (期货/期权); 调出方案时也走这里 */
+function setMode(m){
+  document.querySelectorAll('.mode').forEach(x=>x.classList.toggle('active', x.dataset.mode===m));
+  curMode = m;
+  $('futuresFields').classList.toggle('hidden', curMode!=='futures');
+  $('optionsFields').classList.toggle('hidden', curMode!=='options');
+  if (typeof renderPlans === 'function') renderPlans();   // 最近方案区仅期货显示
+  onInput();
+}
 document.querySelectorAll('.mode').forEach(m=>{
-  m.addEventListener('click',()=>{
-    document.querySelectorAll('.mode').forEach(x=>x.classList.remove('active'));
-    m.classList.add('active');
-    curMode = m.dataset.mode;
-    $('futuresFields').classList.toggle('hidden', curMode!=='futures');
-    $('optionsFields').classList.toggle('hidden', curMode!=='options');
-    onInput();
-  });
+  m.addEventListener('click', ()=>setMode(m.dataset.mode));
 });
 
 /* 主题 */
@@ -2452,7 +2516,15 @@ $('exitBtn').addEventListener('click',()=>{
 ['equity','entry','stop','target','marginRate','entryO'].forEach(id=>{
   $(id).addEventListener('input',onInput);
 });
-$('direction').addEventListener('change',onInput);
+/* 持仓方向 双按钮: 做多(红) / 做空(青) */
+document.querySelectorAll('#dirSeg button').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    if (b.dataset.dir === dirF) return;
+    dirF = b.dataset.dir;
+    document.querySelectorAll('#dirSeg button').forEach(x=>x.classList.toggle('active', x===b));
+    onInput();
+  });
+});
 
 /* 计算 */
 function onInput(){
@@ -2474,7 +2546,7 @@ function calcFutures(){
     return;
   }
   fetchT('/api/calc/futures',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({equity:eq,code:selCode.F,direction:$('direction').value,
+    body:JSON.stringify({equity:eq,code:selCode.F,direction:dirF,
       entry,stop,target,margin_rate:mr/100,
       risk_percent: $('riskAmount').value ? parseFloat($('riskAmount').value) : 1})})
     .then(r=>r.json()).then(d=>{
@@ -2488,6 +2560,12 @@ function renderF(d){
   $('resultO').classList.add('hidden');
   $('resultF').classList.remove('hidden');
   $('rBudgetF').textContent = fmtMoney(d.budget);
+  // 当前风险额度核对: 徽章 权益 × X% + 预算公式行(如 权益 9万 × 1.5%)
+  const pctUsed = d.risk_percent != null ? d.risk_percent : (parseFloat($('riskAmount').value) || 1);
+  const pctTxt = fmtTrim(pctUsed);
+  const eqWanTxt = fmtTrim(parseFloat($('equity').value) || 0);
+  $('rIvBadgeF').innerHTML = '<span class="ico">◈</span>权益 × ' + pctTxt + '%';
+  $('rFormulaF').innerHTML = '＝ 权益 <b>' + eqWanTxt + ' 万</b> × ' + pctTxt + '%';
   $('rLotsF').textContent = d.max_lots;
   $('rRatioF').textContent = d.pl_ratio.toFixed(2);
   $('rContractF').textContent = d.contract+'（'+d.code+' · '+d.exchange+'）';
@@ -2577,6 +2655,102 @@ function showError(msg){
   $('empty').classList.remove('hidden');
   $('empty').innerHTML = '<span style="color:var(--bad)">⚠ '+msg+'</span>';
 }
+
+/* =================================================================
+   最近方案 (期货): 保存当前参数, 最多保留 3 组; 平铺列表, 一键调出
+   ================================================================= */
+const PLAN_KEY = 'oc_futures_plans';
+const PLAN_MAX = 3;
+let planList = [];
+function escHtml(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function loadPlans(){
+  try { planList = JSON.parse(localStorage.getItem(PLAN_KEY) || '[]') || []; }
+  catch(e){ planList = []; }
+}
+function persistPlans(){
+  if (planList.length > PLAN_MAX) planList.length = PLAN_MAX;
+  try { localStorage.setItem(PLAN_KEY, JSON.stringify(planList)); } catch(e){}
+  renderPlans();
+}
+function renderPlans(){
+  const box = $('planList');
+  if (!box) return;
+  const show = curMode === 'futures';
+  $('recentPlans').classList.toggle('hidden', !show);
+  if (!show) return;
+  if (!planList.length){
+    box.innerHTML = '<div class="plans-empty">暂无保存方案 — 完成一次期货测算后点「💾 保存当前方案」，这里平铺显示最近 ' + PLAN_MAX + ' 组，点任意一条「调出」一键恢复并重算。</div>';
+    return;
+  }
+  box.innerHTML = planList.map((p,i)=>{
+    const dCls = p.dir === 'short' ? 'short' : 'long';
+    const dTxt = p.dir === 'short' ? '空' : '多';
+    return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' ' + dTxt + ' @' + escHtml(p.entry) + '">' +
+      '<span class="nm">' + escHtml(p.contract) + ' <span class="d ' + dCls + '">' + dTxt + '</span> ' + escHtml(p.entry) + '</span>' +
+      '<span class="meta">' + escHtml(String(p.code||'').toUpperCase()) + ' · 止损 ' + escHtml(p.stop) + ' → 止盈 ' + escHtml(p.target) + ' · 风险 ' + escHtml(p.riskPct) + '%</span>' +
+      '<span class="go">调出</span>' +
+    '</div>';
+  }).join('');
+}
+function saveCurrentPlan(){
+  if (curMode !== 'futures') return;
+  if (!selCode.F){ alert('请先选择开仓标的'); return; }
+  const eqWan = parseFloat($('equity').value);
+  const entry = parseFloat($('entry').value);
+  const stop = parseFloat($('stop').value);
+  const target = parseFloat($('target').value);
+  if (!(eqWan > 0 && entry > 0 && stop > 0 && target > 0)){
+    alert('请先完整填写：总权益、开仓价、止损价、止盈价，再保存方案');
+    return;
+  }
+  const c = CONTRACTS.find(x=>x.code.toLowerCase() === String(selCode.F).toLowerCase())
+    || {name: selCode.F, code: selCode.F};
+  const sig = String(c.code).toLowerCase() + '|' + dirF + '|' + entry;
+  planList = planList.filter(x => (String(x.code).toLowerCase() + '|' + x.dir + '|' + parseFloat(x.entry)) !== sig);
+  planList.unshift({
+    code: c.code,
+    contract: c.name,
+    dir: dirF,
+    entry: fmtTrim(entry),
+    stop: fmtTrim(stop),
+    target: fmtTrim(target),
+    mr: parseFloat($('marginRate').value) || 16,
+    riskPct: fmtTrim(parseFloat($('riskAmount').value) || 1),
+    eqWan: fmtTrim(eqWan),
+  });
+  persistPlans();
+}
+function recallPlan(p){
+  if (!p) return;
+  const c = CONTRACTS.find(x=>x.code.toLowerCase() === String(p.code).toLowerCase());
+  if (!c){ alert('当前品种表中找不到 ' + p.code + '，请重新搜索选择标的'); return; }
+  setMode('futures');                                   // 切回期货模式(也会刷新方案区)
+  $('cSearch').value = c.name + ' ' + c.code + ' · ' + c.exchange;   // 同步搜索框显示
+  pickContract(c, 'F');                                 // 设置乘数/单位/行情(内部会触发一次计算)
+  dirF = (p.dir === 'short') ? 'short' : 'long';
+  document.querySelectorAll('#dirSeg button').forEach(b=>b.classList.toggle('active', b.dataset.dir === dirF));
+  $('equity').value = p.eqWan;
+  $('entry').value = p.entry;
+  $('stop').value = p.stop;
+  $('target').value = p.target;
+  $('marginRate').value = p.mr;
+  const want = Number(p.riskPct);
+  if ([0.5, 1, 1.5, 2, 3].indexOf(want) >= 0) $('riskAmount').value = String(want);
+  $('equity').dispatchEvent(new Event('input'));        // 刷新权益换算提示
+  updateTickHint();
+  onInput();                                            // 用方案参数重新测算
+}
+loadPlans();
+renderPlans();
+$('btnSavePlan').addEventListener('click', saveCurrentPlan);
+$('planList').addEventListener('click', e=>{
+  const it = e.target.closest('.plans-item');
+  if (!it || it.dataset.idx === undefined) return;
+  recallPlan(planList[+it.dataset.idx]);
+});
 
 init();
 
