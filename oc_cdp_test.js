@@ -122,6 +122,69 @@ async function main() {
   const ladder2Txt = (ladder2 || '').replace(/<[^>]+>/g, '|').replace(/\|+/g, '|');
   check('调出后阶梯止盈仍显示价格(核心bug2)', ladder2Txt.includes('3600') && /2R/.test(ladder2 || ''), ladder2Txt);
 
+  // ---- 场景C: 切换品种 → 开仓/止损/止盈价自动清空 ----
+  // 当前状态: rb 已选中(方案调出), 价格 3500/3450/3650。通过搜索输入 + Enter 走真实 pick() 路径
+  await evalJs(ws, `
+    (() => {
+      const inp = document.getElementById('cSearch');
+      inp.value = 'cu';
+      inp.dispatchEvent(new Event('input'));          // 渲染列表(清 selCode.F)
+      inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));  // pick(items[0]) = cu
+    })()
+  `);
+  await sleep(600);
+  const st = await evalJs(ws, `JSON.stringify({
+    sel: selCode.F,
+    entry: document.getElementById('entry').value,
+    stop: document.getElementById('stop').value,
+    target: document.getElementById('target').value,
+    last: lastPicked.F
+  })`);
+  const stO = JSON.parse(st);
+  check('切到 cu(selCode.F=cu)', String(stO.sel).toLowerCase() === 'cu', stO.sel);
+  check('切换品种→开仓价自动清空', stO.entry === '', 'entry=' + stO.entry);
+  check('切换品种→止损价自动清空', stO.stop === '', 'stop=' + stO.stop);
+  check('切换品种→止盈价自动清空', stO.target === '', 'target=' + stO.target);
+
+  // ---- 场景D: 同一品种重新选择 → 不清空(避免误伤已填参数) ----
+  await evalJs(ws, `
+    (() => {
+      document.getElementById('entry').value = '70000';
+      document.getElementById('stop').value = '69900';
+      document.getElementById('target').value = '70600';
+      onInput();
+      const inp = document.getElementById('cSearch');
+      inp.value = 'cu';
+      inp.dispatchEvent(new Event('input'));
+      inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));  // 再次选 cu
+    })()
+  `);
+  await sleep(600);
+  const st2 = await evalJs(ws, `JSON.stringify({entry: document.getElementById('entry').value,
+    stop: document.getElementById('stop').value, target: document.getElementById('target').value})`);
+  const st2O = JSON.parse(st2);
+  check('同品种重选→价格保留', st2O.entry === '70000' && st2O.stop === '69900' && st2O.target === '70600', JSON.stringify(st2O));
+
+  // ---- 场景E: 期权模式切换品种 → 开仓价(每手权利金)自动清空 ----
+  await evalJs(ws, `setMode('options')`);
+  await sleep(300);
+  await evalJs(ws, `
+    (() => {
+      const inp = document.getElementById('cSearchO');
+      inp.value = 'si';
+      inp.dispatchEvent(new Event('input'));
+      inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));  // 首选 si
+      document.getElementById('entryO').value = '800';
+      onInput();
+      inp.value = 'cu';
+      inp.dispatchEvent(new Event('input'));
+      inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));  // 切到 cu → 应清空
+    })()
+  `);
+  await sleep(600);
+  const entryO = await evalJs(ws, `document.getElementById('entryO').value`);
+  check('期权切换品种→每手权利金自动清空', entryO === '', 'entryO=' + entryO);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();

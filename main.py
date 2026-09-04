@@ -2262,7 +2262,19 @@ const $ = id => document.getElementById(id);
 let CONTRACTS = [];
 let curMode = 'futures';
 const selCode = {F: null, O: null};   // 当前选中的标的代码
+const lastPicked = {F: null, O: null}; // 上次真正选中的品种(用于"切换品种→自动清空价格"判断)
 let dirF = 'long';                     // 期货持仓方向(做多红/做空青 双按钮)
+
+/* 清空价格输入: 期货=开仓/止损/止盈价, 期权=开仓价(每手权利金); 供手动按钮与切换品种共用 */
+function clearPrices(which){
+  if (which === 'F'){
+    ['entry','stop','target'].forEach(id=>{ $(id).value=''; });
+  } else if (which === 'O'){
+    $('entryO').value='';
+  }
+  updateTickHint();
+  onInput();
+}
 
 const fmt = v => (v==null||isNaN(v)) ? '—' : Number(v).toLocaleString('zh-CN',{maximumFractionDigits:2,minimumFractionDigits:0});
 const fmtMoney = v => (v==null||isNaN(v)) ? '—' : '¥ ' + Number(v).toLocaleString('zh-CN',{maximumFractionDigits:0});
@@ -2315,12 +2327,8 @@ function init(){
   $('btnDefEquity').addEventListener('click', saveDefaultEquity);
   $('btnDefRisk').addEventListener('click', ()=>saveDefaultRisk('futures'));
   $('btnDefRiskO').addEventListener('click', ()=>saveDefaultRisk('options'));
-  // 一键清空开仓/止损/止盈价
-  $('btnClearPrices').addEventListener('click', ()=>{
-    ['entry','stop','target'].forEach(id=>{ $(id).value=''; });
-    updateTickHint();
-    onInput();
-  });
+  // 一键清空开仓/止损/止盈价(与"切换品种自动清空"共用同一逻辑)
+  $('btnClearPrices').addEventListener('click', ()=>clearPrices('F'));
   updateRiskHint('futures');
   updateRiskHint('options');
 }
@@ -2483,10 +2491,15 @@ function initContractSearch(inputId, listId, freqId, favBtnId, mode, onPick){
     if(!input.contains(e.target) && !list.contains(e.target) && !favBtn.contains(e.target)) list.classList.add('hidden');
   });
   function pick(c){
+    // 切换品种(与上次选中不同) → 自动清空开仓/止损/止盈价, 免手动点清空
+    // 注意: 用 lastPicked 而非 selCode 判断 — 搜索输入会把 selCode 置 null, 同品种重选不应清空
+    const isSwitch = !!lastPicked[mKey] && String(lastPicked[mKey]).toLowerCase() !== String(c.code).toLowerCase();
+    lastPicked[mKey] = c.code;
     input.value = c.name + ' ' + c.code + ' · ' + c.exchange;
     selCode[mKey] = c.code;
     list.classList.add('hidden');
     input.blur();
+    if (isSwitch) clearPrices(mKey);   // 先清空再加载新品种
     onPick(c);
     _freqRenderers.forEach(fn=>fn());   // 刷新 active 状态
   }
@@ -2503,6 +2516,7 @@ function initContractSearch(inputId, listId, freqId, favBtnId, mode, onPick){
 
 function pickContract(c, which){
   selCode[which] = c.code;   // 统一标记选中(所有调用路径生效; 搜索点击路径此前已赋值, 幂等)
+  lastPicked[which] = c.code;   // 同步记录(方案调出路径也在此, 使后续"切换品种"判断一致)
   if(which==='F'){
     $('unitF').textContent = c.unit.replace('吨/手','元/吨').replace('克/手','元/克').replace('千克/手','元/千克').replace('桶/手','元/桶');
     // 按品种最小变动价位设置价格步进(上下箭头 1 跳)
