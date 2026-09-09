@@ -1945,8 +1945,8 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 /* 顶部字号切换(置顶左侧, 小/中/大) */
 .fzseg{display:flex;gap:2px;background:var(--panel);border:1px solid var(--border);
   border-radius:12px;padding:3px;flex:none;align-self:center}
-.fzseg button{padding:6px 10px;border-radius:8px;cursor:pointer;border:0;
-  background:transparent;color:var(--sub);font-weight:600;font-size:12.5px;
+.fzseg button{padding:6px 11px;border-radius:8px;cursor:pointer;border:0;
+  background:transparent;color:var(--sub);font-weight:600;font-size:var(--fz-mid);
   line-height:1;transition:all .2s}
 .fzseg button.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff}
 .fzseg button:not(.active):hover{background:var(--panel2);color:var(--text)}
@@ -2230,11 +2230,11 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 
 /* 监控池 */
 .pool-block{margin-bottom:14px}
-.pool-title{font-size:13px;font-weight:600;color:var(--accent2);display:flex;align-items:center;gap:8px;cursor:pointer}
+.pool-title{font-size:var(--fz-mid);font-weight:600;color:var(--accent2);display:flex;align-items:center;gap:8px;cursor:pointer}
 .pool-title .arrow{transition:transform .15s}
 .pool-title.collapsed .arrow{transform:rotate(-90deg)}
-.pool-content{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;font-size:12.5px;line-height:1.7}
-.pool-chip{background:var(--panel2);padding:2px 8px;border-radius:6px;font-family:Consolas,monospace}
+.pool-content{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;font-size:var(--fz-small);line-height:1.7}
+.pool-chip{background:var(--panel2);padding:2px 8px;border-radius:6px;font-family:Consolas,monospace;font-size:var(--fz-small)}
 
 /* 录入对话框(共用) */
 .formgrid{display:grid;grid-template-columns:1fr 1fr;column-gap:14px;row-gap:12px;margin-top:12px}
@@ -2434,21 +2434,19 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <div class="wrap">
 
   <header>
-    <div class="hgroup" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+    <div class="brand">
+      <div class="logo">◈</div>
+      <div>
+        <h1 id="appTitle">期货开仓计算器</h1>
+        <p id="appSubtitle">风控仓位计算 · 盈亏比决策 · 保证金测算</p>
+      </div>
+    </div>
+    <div class="topbtns">
       <div class="fzseg" id="fontSeg" title="界面字号">
         <button data-fz="sm">A-</button>
         <button data-fz="md" class="active">A</button>
         <button data-fz="lg">A+</button>
       </div>
-      <div class="brand">
-        <div class="logo">◈</div>
-        <div>
-          <h1 id="appTitle">期货开仓计算器</h1>
-          <p id="appSubtitle">风控仓位计算 · 盈亏比决策 · 保证金测算</p>
-        </div>
-      </div>
-    </div>
-    <div class="topbtns">
       <button class="iconbtn" id="pinBtn" title="窗口置顶（始终显示在其他窗口之上）">📌</button>
       <button class="iconbtn" id="themeBtn" title="切换主题">🌙</button>
       <button class="iconbtn" id="exitBtn" title="退出应用">✕</button>
@@ -3742,7 +3740,7 @@ const TradeUI = {
     $('btnShowAll').addEventListener('click', () => { this.showAll = true; this.renderMain(); });
     $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
     $('btnNewPool').addEventListener('click', () => this.openPoolModal());
-    $('btnPoolHistory').addEventListener('click', () => { /* always visible when pool loaded */ });
+    $('btnPoolHistory').addEventListener('click', () => this.togglePoolHistory());
     $('tdClose').addEventListener('click', () => this.closeDetail());
     $('tdNewOpen').addEventListener('click', () => this.openEditModal('open', { underlying: this.detail ? this.detail.underlying : '' }));
     // 操作记录合约筛选
@@ -4014,6 +4012,30 @@ const TradeUI = {
       this.poolCollapsed[t.dataset.date] = !this.poolCollapsed[t.dataset.date];
       this.renderPool();
     }));
+    this.updatePoolHistoryBtn();
+  },
+
+  // 「查看历史快照」一键展开/收起历史快照(最新快照始终展开)
+  togglePoolHistory(){
+    const historical = this.pool.slice(1);   // 最新一条是 idx=0 始终展开
+    if (!historical.length) return;
+    const allExpanded = historical.every(s => this.poolCollapsed[s.snapshot_date] === true);
+    if (allExpanded){
+      // 当前全部展开 → 收起
+      historical.forEach(s => { this.poolCollapsed[s.snapshot_date] = false; });
+    } else {
+      // 当前有收起 → 全部展开
+      historical.forEach(s => { this.poolCollapsed[s.snapshot_date] = true; });
+    }
+    this.renderPool();
+  },
+
+  // 按当前折叠状态更新按钮文字
+  updatePoolHistoryBtn(){
+    const historical = this.pool.slice(1);
+    if (!historical.length){ $('btnPoolHistory').textContent = '📜 查看历史快照'; return; }
+    const allExpanded = historical.every(s => this.poolCollapsed[s.snapshot_date] === true);
+    $('btnPoolHistory').textContent = allExpanded ? '📜 收起历史快照' : '📜 查看历史快照';
   },
 
   /* ---------- 新建/编辑 开仓/平仓 弹框 (统一 modal) ---------- */

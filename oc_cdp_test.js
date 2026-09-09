@@ -295,6 +295,68 @@ async function main() {
   await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
   await sleep(300);
 
+  // ---- 场景M: 字号切换器挪到右侧 + 监控池字号 + 查看历史快照 ----
+  // 1. 字号切换器现在在 topbtns 内(顶栏右侧), 不在 brand 前
+  const fzPos = await evalJs(ws, `JSON.stringify((() => {
+    const fz = document.getElementById('fontSeg');
+    const tb = document.querySelector('.topbtns');
+    return {
+      inTopbtns: !!(fz && tb && tb.contains(fz)),
+      rect: { l: fz.getBoundingClientRect().left, vw: window.innerWidth }
+    }
+  })())`);
+  const fp = JSON.parse(fzPos);
+  check('字号切换器在顶栏右侧(topbtns 内)', fp.inTopbtns && fp.rect.l > fp.rect.vw / 2, fzPos);
+
+  // 2. 创建监控池数据, 验证「查看历史快照」按钮能展开
+  const poolToggle = await evalJs(ws, `(async () => {
+    const cleanup = async (u) => {
+      const d = await fetch('/api/trades/pool').then(r=>r.json());
+      for (const p of (d.pools||[])) await fetch('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: p.id})}).then(r=>r.json());
+    };
+    await cleanup();
+    await fetch('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({snapshot_date:'2026-09-09', contracts:['si','lc','fu']})}).then(r=>r.json());
+    await fetch('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({snapshot_date:'2026-09-08', contracts:['ao','br','cu','al']})}).then(r=>r.json());
+    await fetch('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({snapshot_date:'2026-09-07', contracts:['rb','hc','i']})}).then(r=>r.json());
+    return 'seeded';
+  })()`);
+  await sleep(300);
+  await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="trades"]').click()`);
+  await sleep(500);
+  // 切档到大号 → 切回中号 → 查监控池字号变化
+  const poolFs = await evalJs(ws, `(async () => {
+    document.querySelector('#fontSeg button[data-fz="md"]').click();
+    await new Promise(r=>setTimeout(r,200));
+    const mdTitle = getComputedStyle(document.querySelector('.pool-title')).fontSize;
+    document.querySelector('#fontSeg button[data-fz="lg"]').click();
+    await new Promise(r=>setTimeout(r,200));
+    const lgTitle = getComputedStyle(document.querySelector('.pool-title')).fontSize;
+    document.querySelector('#fontSeg button[data-fz="md"]').click();
+    await new Promise(r=>setTimeout(r,200));
+    return JSON.stringify({mdTitle, lgTitle});
+  })()`);
+  const pf = JSON.parse(poolFs);
+  check('监控池标题字号随档位变化(lg > md)', parseFloat(pf.lgTitle) > parseFloat(pf.mdTitle), JSON.stringify(pf));
+
+  // 3. 验证「查看历史快照」按钮: 点击前最新快照展开/历史收起 → 点击后全部展开 → 再点击收起
+  const histToggle = await evalJs(ws, `(async () => {
+    const before = document.querySelectorAll('.pool-content').length;
+    const btnTxt0 = document.getElementById('btnPoolHistory').textContent;
+    document.getElementById('btnPoolHistory').click();
+    await new Promise(r=>setTimeout(r,300));
+    const afterExpand = document.querySelectorAll('.pool-content').length;
+    const btnTxt1 = document.getElementById('btnPoolHistory').textContent;
+    document.getElementById('btnPoolHistory').click();
+    await new Promise(r=>setTimeout(r,300));
+    const afterCollapse = document.querySelectorAll('.pool-content').length;
+    const btnTxt2 = document.getElementById('btnPoolHistory').textContent;
+    return JSON.stringify({before, afterExpand, afterCollapse, btnTxt0, btnTxt1, btnTxt2});
+  })()`);
+  const ht = JSON.parse(histToggle);
+  check('点击「查看历史快照」展开所有', ht.afterExpand > ht.before, JSON.stringify(ht));
+  check('再点击收起', ht.afterCollapse < ht.afterExpand, JSON.stringify(ht));
+  check('按钮文字随状态切换(查看/收起)', /收起/.test(ht.btnTxt1) && /查看/.test(ht.btnTxt2), JSON.stringify(ht));
+
   // ---- 场景G: UI 结构打磨 (v50.1) ----
   // 先关掉场景 F 留下的详情面板, 保证干净的 has-detail 检测
   await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
