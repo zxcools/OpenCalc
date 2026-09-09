@@ -259,6 +259,33 @@ async function main() {
   const sb = JSON.parse(sideBtns);
   check('侧边栏导出/导入按钮 + 3个tab', sb.ex === true && sb.im === true && sb.tabs === 3, sideBtns);
 
+  // ---- 场景G: UI 结构打磨 (v50.1) ----
+  // 1. 主页面 toolbar 只保留「新建开仓」(无「新建平仓」)
+  const mainToolbar = await evalJs(ws, `JSON.stringify({newOpen: !!document.getElementById('btnNewOpen'), newClose: !!document.getElementById('btnNewClose'), onlyOpen: !!document.getElementById('tradesOnlyOpen'), showAll: !!document.getElementById('btnShowAll')})`);
+  const mt = JSON.parse(mainToolbar);
+  check('主页面 toolbar 含「只展示未平仓」+「新建开仓」+「显示全部」', mt.onlyOpen && mt.newOpen && mt.showAll, mainToolbar);
+  check('主页面 toolbar 移除「新建平仓」按钮', mt.newClose === false, mainToolbar);
+  // 2. 详情面板 tdNewOpen + tdNewClose 都存在
+  const sideBtns2 = await evalJs(ws, `JSON.stringify({tdNewOpen: !!document.getElementById('tdNewOpen'), tdNewClose: !!document.getElementById('tdNewClose')})`);
+  const sb2 = JSON.parse(sideBtns2);
+  check('分页面含「新建开仓」+「新建平仓」按钮', sb2.tdNewOpen && sb2.tdNewClose, sideBtns2);
+  // 3. 详情面板展开时 grid 等宽 1fr 1fr
+  const gridCols = await evalJs(ws, `window.getComputedStyle(document.querySelector('.trades-layout.has-detail')).gridTemplateColumns`);
+  check('详情面板与主表等宽(grid 1:1)', gridCols && gridCols.split(' ').length === 2 && Math.abs(parseFloat(gridCols.split(' ')[0]) - parseFloat(gridCols.split(' ')[1])) < 5, gridCols);
+  // 4. tradesArea 内无重复标题(全局 header 由 appTitle 驱动)
+  const tradeTitles = await evalJs(ws, `[...document.querySelectorAll('#tradesArea h1')].length`);
+  check('tradesArea 内无重复 h1(标题仅全局 header 一个)', tradeTitles === 0, 'count=' + tradeTitles);
+  // 5. 侧边栏 side-extras 含 4 个图标按钮(导出/导入/数据位置/联系作者)
+  const sideBtnsCount = await evalJs(ws, `document.querySelectorAll('.side-extras .side-btn').length`);
+  check('侧边栏底部 4 个图标按钮(导出/导入/数据位置/联系作者)', sideBtnsCount === 4, 'count=' + sideBtnsCount);
+  // 6. 资金曲线页面移除导入/导出/数据位置按钮(只保留「清除全部」, 用 fundsArea 内 querySelector 避免侧边栏 id 干扰)
+  await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="funds"]').click()`);
+  await sleep(600);
+  const fundsBtns = await evalJs(ws, `JSON.stringify({dataDir: !!document.getElementById('fundsArea').querySelector('#btnDataDir'), export: !!document.getElementById('fundsArea').querySelector('#btnExport'), import: !!document.getElementById('fundsArea').querySelector('#btnImport'), clearAll: !!document.getElementById('fundsArea').querySelector('#btnClearAll')})`);
+  const fb = JSON.parse(fundsBtns);
+  check('资金曲线页移除 导入/导出/数据位置', fb.dataDir === false && fb.export === false && fb.import === false, fundsBtns);
+  check('资金曲线页保留「清除全部」', fb.clearAll === true, fundsBtns);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();

@@ -2048,13 +2048,15 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .maintab:not(.active):hover{background:var(--panel2);color:var(--text)}
 .main{flex:1;min-width:0}
 
-/* 侧边栏额外操作区(导入/导出/联系作者) */
-.side-extras{margin-top:auto;width:100%;display:flex;flex-direction:column;gap:6px;
+/* 侧边栏额外操作区(图标按钮, 不重叠) */
+.side-extras{margin-top:auto;width:100%;display:flex;flex-direction:column;gap:8px;
   padding-top:14px;border-top:1px solid var(--panel2)}
-.side-btn{padding:8px 4px;border-radius:10px;border:1px solid var(--panel2);
-  background:var(--panel);color:var(--text);font-size:11px;cursor:pointer;
-  transition:background .15s,border-color .15s}
+.side-btn{padding:10px 4px;border-radius:10px;border:1px solid var(--panel2);
+  background:var(--panel);color:var(--text);font-size:18px;cursor:pointer;
+  text-align:center;line-height:1;min-height:36px;
+  transition:background .15s,border-color .15s,transform .1s}
 .side-btn:hover{background:var(--panel2);border-color:var(--accent)}
+.side-btn:active{transform:scale(0.94)}
 
 /* 交易记录页 */
 .trades-header{display:flex;justify-content:space-between;align-items:center;
@@ -2063,9 +2065,10 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer}
 .chk input{accent-color:var(--accent)}
 .trades-layout{display:grid;grid-template-columns:1fr;gap:18px}
-.trades-layout.has-detail{grid-template-columns:minmax(0,1.4fr) minmax(380px,1fr)}
-@media (max-width:1080px){.trades-layout.has-detail{grid-template-columns:1fr}}
+.trades-layout.has-detail{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+@media (max-width:900px){.trades-layout.has-detail{grid-template-columns:1fr}}
 .trades-side{animation:fadeSlide .25s ease}
+.trades-side .card{max-height:calc(100vh - 80px);overflow:auto}
 @keyframes fadeSlide{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
 .trades-tbl th{font-size:11px}
 .trades-tbl td{font-size:12px;padding:6px 8px}
@@ -2226,9 +2229,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="maintab" data-tab="trades"><span class="mi">📋</span><span class="mt">交易记录</span><small>abe 期权</small></div>
     <div class="maintab" data-tab="funds"><span class="mi">📈</span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
     <div class="side-extras">
-      <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬇ 导出</button>
-      <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬆ 导入</button>
-      <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬 联系作者</button>
+      <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬇</button>
+      <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬆</button>
+      <button class="side-btn" id="btnDataDir" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙</button>
+      <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
     </div>
   </aside>
   <div class="main">
@@ -2496,10 +2500,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <span class="wchip" id="wdAll">汇总 ¥0</span>
       </div>
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:nowrap">
-        <button class="btn danger sm" id="btnClearAll" title="一键清除所有策略的全部记录(不可恢复)">🗑 清除全部</button>
-        <button class="btn sm" id="btnDataDir" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙ 数据位置</button>
-        <button class="btn sm" id="btnExport" title="导出全部记录为备份文件（可用于换电脑迁移/定期备份）">⬇ 导出</button>
-        <button class="btn sm" id="btnImport" title="从备份文件恢复记录（相同年月会覆盖）">⬆ 导入</button>
+        <button class="btn danger sm" id="btnClearAll" title="一键清除资金曲线记录(不影响交易记录)">🗑 清除全部</button>
         <button class="btn primary sm" id="btnAddRecord">＋ 记录月度</button>
         <input type="file" id="importFile" accept=".opcalc,.json,application/json" class="hidden">
       </div>
@@ -2578,17 +2579,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <div id="tradesArea" class="hidden">
     <div class="wrap">
       <header class="trades-header">
-        <div class="brand">
-          <div class="logo">◈</div>
-          <div>
-            <h1 style="color:var(--accent2)">abe 期权交易记录</h1>
-            <p>策略: abe · 期权买方代替期货开仓 · 逐笔记录 + 自动汇总</p>
-          </div>
-        </div>
         <div class="trades-toolbar">
           <label class="chk"><input type="checkbox" id="tradesOnlyOpen"> 只展示未平仓</label>
           <button class="btn xs" id="btnNewOpen">➕ 新建开仓</button>
-          <button class="btn xs" id="btnNewClose">➖ 新建平仓</button>
           <button class="btn xs" id="btnShowAll" hidden>📜 显示全部</button>
         </div>
       </header>
@@ -2625,7 +2618,11 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               <button class="btn xs ghost" id="tdClose">✕ 关闭</button>
             </div>
             <div class="tip" id="tdMeta" style="margin:6px 0 10px"></div>
-            <h3 style="font-size:13px;margin:14px 0 8px;color:var(--accent2)">当前持仓(按合约汇总, 仅算未平仓部分)</h3>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 14px">
+              <button class="btn xs" id="tdNewOpen">➕ 新建开仓</button>
+              <button class="btn xs" id="tdNewClose">➖ 新建平仓</button>
+            </div>
+            <h3 style="font-size:13px;margin:6px 0 8px;color:var(--accent2)">当前持仓(按合约汇总, 仅算未平仓部分)</h3>
             <div class="tblwrap">
               <table class="tbl trades-tbl">
                 <thead><tr>
@@ -2720,6 +2717,86 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="modal-actions">
         <button class="btn" id="setCancel">取消</button>
         <button class="btn primary" id="setSave">保存并迁移</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 期权交易记录 录入/修改 弹窗 -->
+  <div class="modalbg hidden" id="tradeModalBg">
+    <div class="modal" style="max-width:680px">
+      <h3><span class="dot"></span><span id="tmTitle">新建开仓</span></h3>
+      <div class="formgrid">
+        <label>开仓标的 <span style="color:#ff8484">*</span>
+          <input id="tmUnderlying" type="text" placeholder="如 ao611(合约代码)">
+        </label>
+        <label id="tmContractWrap">合约代码 <span style="color:#ff8484">*</span>
+          <input id="tmContract" type="text" placeholder="如 ao611P2500">
+        </label>
+        <label id="tmOpTypeWrap" style="display:none">
+          <span style="font-size:11px;color:var(--sub)">操作类型</span>
+          <select id="tmOpType">
+            <option value="open">开仓</option>
+            <option value="close">平仓</option>
+          </select>
+        </label>
+
+        <label>开仓日期 <span style="color:#ff8484">*</span>
+          <input id="tmOpenDate" type="date">
+        </label>
+        <label>平仓日期
+          <input id="tmCloseDate" type="date">
+        </label>
+
+        <label>看涨/看跌
+          <select id="tmCallPut">
+            <option value="">—</option>
+            <option value="C">看涨</option>
+            <option value="P">看跌</option>
+          </select>
+        </label>
+        <label>方向 <span style="color:#ff8484">*</span>
+          <select id="tmDirection">
+            <option value="buy">买入</option>
+            <option value="sell">卖出</option>
+          </select>
+        </label>
+
+        <label>开仓 delta
+          <input id="tmOpenDelta" type="number" step="0.01" min="0" max="1" placeholder="0.19">
+        </label>
+        <label>目标 delta
+          <input id="tmTargetDelta" type="number" step="0.01" min="0" max="1" placeholder="0.45">
+        </label>
+
+        <label>开仓价
+          <input id="tmOpenPrice" type="number" step="0.0001" min="0" placeholder="700">
+        </label>
+        <label id="tmClosePriceWrap">平仓价
+          <input id="tmClosePrice" type="number" step="0.0001" min="0" placeholder="510">
+        </label>
+
+        <label>数量 <span style="color:#ff8484">*</span>
+          <input id="tmQty" type="number" step="1" min="1" placeholder="4">
+        </label>
+        <label id="tmCloseQtyWrap">平仓数量
+          <input id="tmCloseQty" type="number" step="1" min="1" placeholder="4">
+        </label>
+
+        <label>权利金(元)
+          <input id="tmPremium" type="number" step="0.01" min="0" placeholder="1400">
+        </label>
+        <label id="tmPnlWrap">平仓盈亏
+          <input id="tmPnl" type="number" step="0.01" placeholder="-760">
+        </label>
+
+        <label class="full">备注
+          <input id="tmNote" type="text" placeholder="可选">
+        </label>
+      </div>
+      <div id="tmError" style="color:#ff8484;font-size:12px;min-height:18px;margin-top:8px"></div>
+      <div class="modal-actions">
+        <button class="btn" id="tmCancel">取消</button>
+        <button class="btn primary" id="tmSave">保存</button>
       </div>
     </div>
   </div>
@@ -3427,10 +3504,19 @@ const TradeUI = {
     $('tradesOnlyOpen').addEventListener('change', e => { this.onlyOpen = e.target.checked; this.renderMain(); });
     $('btnShowAll').addEventListener('click', () => { this.showAll = true; this.renderMain(); });
     $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
-    $('btnNewClose').addEventListener('click', () => this.openEditModal('close'));
     $('btnNewPool').addEventListener('click', () => this.openPoolModal());
     $('btnPoolHistory').addEventListener('click', () => { /* always visible when pool loaded */ });
     $('tdClose').addEventListener('click', () => this.closeDetail());
+    $('tdNewOpen').addEventListener('click', () => this.openEditModal('open', { underlying: this.detail ? this.detail.underlying : '' }));
+    $('tdNewClose').addEventListener('click', () => {
+      if (!this.detail){ alert('请先在主表点开一个标的的详情'); return; }
+      if (!this.detail.holdings || !this.detail.holdings.length){ alert('当前持仓为空, 无可平仓的合约'); return; }
+      this.openEditModal('close', { underlying: this.detail.underlying });
+    });
+    // modal 关闭/保存
+    $('tmCancel').addEventListener('click', () => $('tradeModalBg').classList.add('hidden'));
+    $('tradeModalBg').addEventListener('click', e => { if (e.target === $('tradeModalBg')) $('tradeModalBg').classList.add('hidden'); });
+    $('tmSave').addEventListener('click', () => this.submitModal());
     // 侧边栏全局按钮: 委托给 FundUI(导出已含交易记录)
     const se = $('btnExport'); const si = $('btnImport');
     if (se) se.addEventListener('click', () => FundUI.exportBackup());
@@ -3666,67 +3752,145 @@ const TradeUI = {
     }));
   },
 
-  /* ---------- 新建/编辑 开仓/平仓 弹框 ---------- */
+  /* ---------- 新建/编辑 开仓/平仓 弹框 (统一 modal) ---------- */
   openEditModal(type, preset){
     preset = preset || {};
+    const bg = $('tradeModalBg');
+    if (!bg) return;
+    // 重置
+    ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
+     'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote'].forEach(id=>{ $(id).value=''; });
+    $('tmCallPut').value = preset.call_put || '';
+    $('tmDirection').value = preset.direction || 'buy';
+    $('tmOpType').value = type;
+    $('tmError').textContent = '';
     const isOpen = type === 'open';
-    const u = preset.underlying || prompt('请输入开仓标的(如 ao611):') || '';
-    if (!u) return;
-    const contract = preset.contract || prompt('请输入完整合约代码(如 ao611P2500):') || '';
-    if (!contract) return;
-    if (isOpen){
-      const date = preset.open_date || prompt('开仓日期 (YYYY-MM-DD):', new Date().toISOString().slice(0,10)) || '';
-      const cp = (preset.call_put || prompt('看涨/看跌 (C/P):', 'P') || '').toUpperCase();
-      const dir = (preset.direction || prompt('方向 (buy/sell):', 'buy') || '').toLowerCase();
-      const price = parseFloat(prompt('开仓价格:', preset.open_price || '') || '');
-      const qty = parseInt(prompt('数量:', preset.qty || 1) || 0, 10);
-      const premium = parseFloat(prompt('权利金(元/手 × 数量):', preset.premium || '') || '');
-      const delta = parseFloat(prompt('开仓 delta (0~1, 可空):', preset.open_delta || '') || '');
-      const target = parseFloat(prompt('目标 delta (可空):', preset.target_delta || '') || '');
-      if (!cp || !dir || !(price>=0) || !(qty>0) || !(premium>=0)) { alert('必填字段缺失, 已取消'); return; }
-      const payload = {
-        id: preset.id || null,
-        op_type: 'open', underlying: u, contract, open_date: date,
-        open_delta: isNaN(delta) ? null : delta, target_delta: isNaN(target) ? null : target,
-        call_put: cp, direction: dir, open_price: price, qty, premium, note: '',
-      };
-      this._saveOp(payload);
+    $('tmTitle').textContent = preset.id ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
+
+    // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取)
+    const contractInput = $('tmContract');
+    if (!isOpen && this.detail && this.detail.holdings && this.detail.holdings.length){
+      // 平仓 + 在详情页面 → 从 holdings 取下拉
+      const sel = document.createElement('select');
+      sel.id = 'tmContract';
+      this.detail.holdings.forEach((h, i) => {
+        const o = document.createElement('option');
+        o.value = h.contract;
+        o.textContent = `${h.contract} 看${h.call_put==='P'?'跌':'涨'} ${h.direction==='buy'?'买入':'卖出'} 余${h.qty}手 @均价${h.open_price}`;
+        if (i === 0) o.selected = true;
+        sel.appendChild(o);
+      });
+      contractInput.replaceWith(sel);
+      $('tmUnderlying').value = this.detail.underlying;
+      $('tmUnderlying').readOnly = true;
+    } else if (!isOpen){
+      // 平仓但没有 detail (一般不会发生, 因为主页面没有"新建平仓"按钮)
+      alert('请先在详情页里打开一个标的, 再点击「新建平仓」');
+      return;
     } else {
-      // close: 合约必须来自已开仓的合约
-      if (!this.detail){
-        alert('请先在主表点开该标的的详情, 再点「新建平仓」按钮');
-        return;
-      }
-      const avail = this.detail.holdings;
-      if (!avail.length) { alert('该标的当前无持仓可平'); return; }
-      const opts = avail.map((h, i) => `${i+1}. ${h.contract} 看${h.call_put==='P'?'跌':'涨'} ${h.direction==='buy'?'买入':'卖出'} 余${h.qty}手 @均价${h.open_price}`).join('\n');
-      const pick = prompt('选择要平仓的合约编号:\n' + opts, '1');
-      const idx = parseInt(pick || '-1', 10) - 1;
-      if (idx < 0 || idx >= avail.length) { alert('选择无效, 已取消'); return; }
-      const h = avail[idx];
-      const maxQty = h.qty;
-      const qty = parseInt(prompt('平仓数量 (≤' + maxQty + '):', String(maxQty)) || 0, 10);
-      if (qty <= 0 || qty > maxQty) { alert('平仓数量必须在 1~' + maxQty + ', 已取消'); return; }
-      const price = parseFloat(prompt('平仓价格:', preset.close_price || '') || '');
-      const pnl = parseFloat(prompt('平仓盈亏 (按逐笔盈计算):', preset.pnl || '') || '');
-      const date = preset.close_date || new Date().toISOString().slice(0,10);
-      const payload = {
-        id: preset.id || null,
-        op_type: 'close', underlying: u, contract: h.contract,
-        open_date: date, close_date: date, close_qty: qty, close_price: price,
-        pnl, qty, premium: 0, direction: h.direction, call_put: h.call_put,
-      };
-      this._saveOp(payload);
+      // 开仓: contract 是文本输入
+      const inp = document.createElement('input');
+      inp.id = 'tmContract';
+      inp.type = 'text';
+      inp.placeholder = '如 ao611P2500';
+      contractInput.replaceWith(inp);
+      $('tmUnderlying').value = preset.underlying || '';
+      $('tmUnderlying').readOnly = !!preset.underlying;   // 行内 + 时锁定
     }
+
+    // 字段显示: 开仓需要 open_date/qty/premium/open_price; 平仓需要 close_date/close_qty/close_price/pnl
+    document.getElementById('tmOpenDate').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmOpenDelta').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmTargetDelta').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmOpenPrice').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmQty').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmPremium').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmCallPut').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmCloseDate').parentElement.style.display = isOpen ? 'none' : '';
+    document.getElementById('tmCloseQtyWrap').style.display = isOpen ? 'none' : '';
+    document.getElementById('tmClosePriceWrap').style.display = isOpen ? 'none' : '';
+    document.getElementById('tmPnlWrap').style.display = isOpen ? 'none' : '';
+
+    // 预设值(编辑模式)
+    if (preset.id){
+      $('tmUnderlying').value = preset.underlying || '';
+      $('tmContract').value = preset.contract || '';
+      $('tmOpenDate').value = preset.open_date || '';
+      $('tmCloseDate').value = preset.close_date || '';
+      $('tmOpenDelta').value = preset.open_delta != null ? preset.open_delta : '';
+      $('tmTargetDelta').value = preset.target_delta != null ? preset.target_delta : '';
+      $('tmOpenPrice').value = preset.open_price != null ? preset.open_price : '';
+      $('tmClosePrice').value = preset.close_price != null ? preset.close_price : '';
+      $('tmQty').value = preset.qty || '';
+      $('tmCloseQty').value = preset.close_qty || '';
+      $('tmPremium').value = preset.premium || '';
+      $('tmPnl').value = preset.pnl != null ? preset.pnl : '';
+      $('tmCallPut').value = preset.call_put || '';
+      $('tmDirection').value = preset.direction || 'buy';
+      $('tmNote').value = preset.note || '';
+    } else {
+      // 默认日期
+      const today = new Date().toISOString().slice(0,10);
+      if (isOpen) $('tmOpenDate').value = today;
+      else $('tmCloseDate').value = today;
+      // 开仓默认 contract = underlying (用户可改)
+      if (isOpen && preset.underlying) $('tmContract').value = preset.underlying;
+      // 行内+开仓默认 delta 0.3, 目标 0.45
+      if (isOpen && preset.underlying){
+        $('tmOpenDelta').value = '0.3';
+        $('tmTargetDelta').value = '0.45';
+      }
+    }
+    $('tmUnderlying').readOnly = preset.id ? true : (preset.underlying ? true : false);
+    bg.classList.remove('hidden');
+    bg.dataset.editing = preset.id || '';
   },
 
-  async _saveOp(payload){
+  collectFromModal(){
+    const isOpen = $('tmOpType').value === 'open';
+    const fields = {
+      id: $('tradeModalBg').dataset.editing || null,
+      op_type: isOpen ? 'open' : 'close',
+      underlying: $('tmUnderlying').value.trim(),
+      contract: $('tmContract').value.trim(),
+      open_date: $('tmOpenDate').value,
+      open_delta: $('tmOpenDelta').value === '' ? null : parseFloat($('tmOpenDelta').value),
+      target_delta: $('tmTargetDelta').value === '' ? null : parseFloat($('tmTargetDelta').value),
+      call_put: $('tmCallPut').value,
+      direction: $('tmDirection').value,
+      open_price: $('tmOpenPrice').value === '' ? null : parseFloat($('tmOpenPrice').value),
+      qty: parseInt($('tmQty').value || '0', 10),
+      premium: parseFloat($('tmPremium').value || '0') || 0,
+      close_qty: parseInt($('tmCloseQty').value || '0', 10),
+      close_price: $('tmClosePrice').value === '' ? null : parseFloat($('tmClosePrice').value),
+      pnl: $('tmPnl').value === '' ? null : parseFloat($('tmPnl').value),
+      close_date: $('tmCloseDate').value,
+      note: $('tmNote').value,
+    };
+    return fields;
+  },
+
+  async submitModal(){
+    const f = this.collectFromModal();
+    const errBox = $('tmError');
+    if (!f.underlying) return errBox.textContent = '请填写开仓标的', false;
+    if (!f.contract) return errBox.textContent = '请填写合约代码', false;
+    if (f.op_type === 'open'){
+      if (!f.open_date) return errBox.textContent = '请填写开仓日期', false;
+      if (!(f.qty > 0)) return errBox.textContent = '请填写有效数量(>0)', false;
+    } else {
+      if (!f.close_date) return errBox.textContent = '请填写平仓日期', false;
+      if (!(f.close_qty > 0)) return errBox.textContent = '请填写平仓数量(>0)', false;
+    }
+    errBox.textContent = '';
     try {
-      const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(f)});
       const d = await r.json();
-      if (!d.ok) { alert('保存失败: ' + d.error); return; }
+      if (!d.ok) { errBox.textContent = '保存失败: ' + d.error; return false; }
+      $('tradeModalBg').classList.add('hidden');
       await this.refresh();
-    } catch (e) { alert('保存失败: ' + e); }
+      return true;
+    } catch (e) { errBox.textContent = '保存失败: ' + e; return false; }
   },
 
   async deleteOp(id){

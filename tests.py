@@ -293,9 +293,11 @@ except ValueError:
 print("\n== 导出/导入备份 (fund_export/import_backup) ==")
 from main import fund_export_backup, fund_import_backup
 
-# 准备数据
+# 准备数据(先清空全部表, 避免之前的 trade 测试残留影响 records 计数)
 _conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
-_conn3.execute("DELETE FROM records"); _conn3.commit(); _conn3.close()
+for t in ("records", "trade_records", "trade_pool_snapshots"):
+    _conn3.execute(f"DELETE FROM {t}")
+_conn3.commit(); _conn3.close()
 fund_upsert("abe", 2025, 8, 60000, 70000, 1000, "8月")
 fund_upsert("威科夫", 2025, 9, 60000, 50000, 0, "9月")
 
@@ -305,7 +307,9 @@ check("导出含版本/时间戳", "backup_version" in backup and "exported_at" 
 
 # 清空再导入 (模拟换电脑)
 _conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
-_conn3.execute("DELETE FROM records"); _conn3.commit(); _conn3.close()
+for t in ("records", "trade_records", "trade_pool_snapshots"):
+    _conn3.execute(f"DELETE FROM {t}")
+_conn3.commit(); _conn3.close()
 n, strategies = fund_import_backup(backup)
 check("导入条数 = 2", n == 2)
 check("导入策略 = [abe, 威科夫]", set(strategies) == {"abe", "威科夫"})
