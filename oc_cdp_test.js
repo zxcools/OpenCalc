@@ -352,7 +352,8 @@ async function main() {
   })())`);
   const raObj = JSON.parse(rowActs);
   check('主表行操作列含 edit(✎) 和 del(🗑)', raObj.e2e.length >= 1 && raObj.e2e[0].btns.some(b => b.startsWith('edit:')) && raObj.e2e[0].btns.some(b => b.startsWith('del:')), JSON.stringify(raObj));
-  // 7. 详情布局: 主表约半屏(46%), 分页面更宽(54%), grid 两列同时显示
+  // 7. 详情布局: 主表保持原宽(不被挤压), 分页面 fixed 浮在右侧
+  // 先关掉 detail 取主表无 detail 时的宽度, 再开 detail 后对比(应近似相等 → "不变")
   await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
   await sleep(400);
   const mainWidthNoDetail = await evalJs(ws, `Math.round(document.querySelector('.trades-main').getBoundingClientRect().width)`);
@@ -363,17 +364,17 @@ async function main() {
     const main = document.querySelector('.trades-main');
     const side = document.querySelector('.trades-side');
     if (!layout) return null;
+    const sideCS = getComputedStyle(side);
     return {
-      display: getComputedStyle(layout).display,
-      gridCols: getComputedStyle(layout).gridTemplateColumns,
-      mainWidth: Math.round(main.getBoundingClientRect().width),
+      sidePosition: sideCS.position,
       sideWidth: Math.round(side.getBoundingClientRect().width),
+      mainWidth: Math.round(main.getBoundingClientRect().width),
       sideVisible: side.getBoundingClientRect().width > 100,
     };
   })())`);
   const li = JSON.parse(layoutInfo);
-  check('详情布局 grid 两列(主表半屏+分页面更宽同时显示)', li && li.display === 'grid' && li.sideVisible && li.sideWidth >= li.mainWidth, layoutInfo);
-  check(`分页面宽度 > 主表(54% > 46%)`, li && li.sideWidth > li.mainWidth, layoutInfo);
+  check('分页面 fixed 浮在右侧(不挤压主表)', li && li.sidePosition === 'fixed' && li.sideVisible && li.sideWidth >= 900, layoutInfo);
+  check(`主表宽度保持不变(无详情 ${mainWidthNoDetail}px ≈ 有详情 ${li.mainWidth}px)`, li && Math.abs(li.mainWidth - mainWidthNoDetail) < 5, layoutInfo);
   // 操作记录合约筛选下拉存在且选项正确
   const filterInfo = await evalJs(ws, `JSON.stringify((() => {
     const sel = document.getElementById('tdContractFilter');

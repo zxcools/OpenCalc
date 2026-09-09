@@ -2101,18 +2101,23 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-toolbar > .spacer{flex:1}
 .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer}
 .chk input{accent-color:var(--accent)}
-/* 交易记录页 - 主表约半屏, 分页面略宽(54%); 表格内容不换行, 超出容器在表格内横滚 */
-.trades-layout{display:block}
-.trades-layout.has-detail{display:grid;grid-template-columns:minmax(0,46%) minmax(0,54%);gap:16px;align-items:flex-start}
-.trades-main{min-width:0}
-.trades-side{min-width:0}
+/* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
+.trades-layout{display:block;position:relative}
+.trades-layout.has-detail .trades-main{width:100%;min-width:0}
+.trades-layout.has-detail .trades-side{
+  position:fixed;top:60px;right:0;width:min(940px,64vw);height:calc(100vh - 60px);
+  z-index:50;background:var(--panel);border-left:1px solid var(--panel2);
+  box-shadow:-4px 0 18px rgba(0,0,0,.4);overflow:auto;animation:fadeSlide .25s ease
+}
+@media (max-width:1100px){
+  .trades-layout.has-detail .trades-side{
+    position:relative;top:auto;right:auto;width:100%;height:auto;
+    border-left:none;box-shadow:none
+  }
+}
 .trades-side{animation:fadeSlide .25s ease}
-.trades-tbl{width:100%;border-collapse:collapse}
 .trades-tbl th,.trades-tbl td{white-space:nowrap}
 .tblwrap{overflow-x:auto}
-@media (max-width:900px){
-  .trades-layout.has-detail{display:block}
-}
 @keyframes fadeSlide{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
 
 /* 详情面板 header: 左标题 + 右操作按钮组(新建开仓/新建平仓/关闭) */
