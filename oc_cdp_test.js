@@ -650,6 +650,29 @@ async function main() {
   const rb = JSON.parse(refreshBtn);
   check('顶栏刷新按钮在 fzseg 后、pinBtn 前', rb.has && /🔄/.test(rb.txt) && rb.between, refreshBtn);
 
+  // ---- 场景O: 刷新后停留在原 tab(不跳回开仓计算) ----
+  await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="trades"]').click()`);
+  await sleep(400);
+  const savedTab = await evalJs(ws, `localStorage.getItem('oc-last-tab')`);
+  await send(ws, 'Page.reload');
+  // reload 期间 CDP 会短暂不可用, 轮询须 try/catch
+  let readyR = false;
+  for (let i = 0; i < 30; i++) {
+    await sleep(700);
+    try {
+      const st = await evalJs(ws, `JSON.stringify({cl: typeof CONTRACTS !== 'undefined' ? CONTRACTS.length : -1, hasEq: !!document.getElementById('equity')})`);
+      const so = JSON.parse(st);
+      if (so && so.cl > 0 && so.hasEq) { readyR = true; break; }
+    } catch (e) { /* 导航期间忽略 */ }
+  }
+  const restoredTab = await evalJs(ws, `JSON.stringify({
+    active: document.querySelector('#mainTabs .maintab.active')?.dataset.tab,
+    tradesVisible: !document.getElementById('tradesArea').classList.contains('hidden'),
+    saved: localStorage.getItem('oc-last-tab')
+  })`);
+  const rt = JSON.parse(restoredTab);
+  check('刷新后恢复原 tab(trades)', readyR && savedTab === 'trades' && rt.active === 'trades' && rt.tradesVisible && rt.saved === 'trades', restoredTab);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();

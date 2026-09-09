@@ -4363,6 +4363,7 @@ const FundUI = {
         document.querySelectorAll('#mainTabs .maintab').forEach(x=>x.classList.remove('active'));
         t.classList.add('active');
         const tab = t.dataset.tab;
+        localStorage.setItem('oc-last-tab', tab);
         $('calcArea').classList.toggle('hidden', tab !== 'calc');
         $('fundsArea').classList.toggle('hidden', tab !== 'funds');
         $('tradesArea').classList.toggle('hidden', tab !== 'trades');
@@ -4380,6 +4381,11 @@ const FundUI = {
         }
       });
     });
+    // 刷新后恢复上次所在页面(默认 calc)
+    const saved = localStorage.getItem('oc-last-tab');
+    if (saved && saved !== 'calc' && ['trades','funds'].includes(saved)) {
+      document.querySelector('#mainTabs .maintab[data-tab="' + saved + '"]').click();
+    }
   },
 
   /* ---- 策略切换 ---- */
