@@ -352,8 +352,7 @@ async function main() {
   })())`);
   const raObj = JSON.parse(rowActs);
   check('主表行操作列含 edit(✎) 和 del(🗑)', raObj.e2e.length >= 1 && raObj.e2e[0].btns.some(b => b.startsWith('edit:')) && raObj.e2e[0].btns.some(b => b.startsWith('del:')), JSON.stringify(raObj));
-  // 7. 详情布局: 主表保持原宽(不被挤压), 分页面 fixed 浮在右侧
-  // 先关掉 detail 取主表无 detail 时的宽度, 再开 detail 后对比(应近似相等 → "不变")
+  // 7. 详情布局: 主表约半屏(46%), 分页面更宽(54%), grid 两列同时显示
   await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
   await sleep(400);
   const mainWidthNoDetail = await evalJs(ws, `Math.round(document.querySelector('.trades-main').getBoundingClientRect().width)`);
@@ -364,18 +363,25 @@ async function main() {
     const main = document.querySelector('.trades-main');
     const side = document.querySelector('.trades-side');
     if (!layout) return null;
-    const sideCS = getComputedStyle(side);
     return {
-      sidePosition: sideCS.position,
-      sideRight: sideCS.right,
-      sideWidth: Math.round(side.getBoundingClientRect().width),
+      display: getComputedStyle(layout).display,
+      gridCols: getComputedStyle(layout).gridTemplateColumns,
       mainWidth: Math.round(main.getBoundingClientRect().width),
+      sideWidth: Math.round(side.getBoundingClientRect().width),
       sideVisible: side.getBoundingClientRect().width > 100,
     };
   })())`);
   const li = JSON.parse(layoutInfo);
-  check('分页面 fixed 浮在右侧(width ≈ 720px, z-index 浮层)', li && li.sidePosition === 'fixed' && li.sideWidth >= 600, layoutInfo);
-  check(`主表宽度保持不变(无详情 ${mainWidthNoDetail}px ≈ 有详情 ${li.mainWidth}px)`, li && Math.abs(li.mainWidth - mainWidthNoDetail) < 5, layoutInfo);
+  check('详情布局 grid 两列(主表半屏+分页面更宽同时显示)', li && li.display === 'grid' && li.sideVisible && li.sideWidth >= li.mainWidth, layoutInfo);
+  check(`分页面宽度 > 主表(54% > 46%)`, li && li.sideWidth > li.mainWidth, layoutInfo);
+  // 操作记录合约筛选下拉存在且选项正确
+  const filterInfo = await evalJs(ws, `JSON.stringify((() => {
+    const sel = document.getElementById('tdContractFilter');
+    const opts = [...sel.options].map(o => o.value);
+    return {count: opts.length, first: opts[0] || '', hasContract: opts.some(v => v.startsWith('e2e3jd100'))};
+  })())`);
+  const fi = JSON.parse(filterInfo);
+  check('操作记录合约筛选下拉(全部 + 合约选项)', fi.count >= 2 && fi.first === '' && fi.hasContract, filterInfo);
   // 8. 详情面板 header: 左标题 + 右三按钮(新建开仓/新建平仓/关闭)
   const headerStructure = await evalJs(ws, `JSON.stringify((() => {
     const head = document.querySelector('#tradeDetailPanel .td-head');
@@ -402,6 +408,69 @@ async function main() {
   const mc = JSON.parse(modalCols);
   check('modal 输入框标签同列等宽', mc && mc.ok, JSON.stringify(mc));
   await evalJs(ws, `document.getElementById('tmCancel').click()`);
+
+  // ---- 场景I: 开仓合约自动推断P/C + 平仓方向/call_put联动 + 平仓行权利金/ ----
+  // 1. 开仓 modal: 输入合约代码自动推断看涨看跌(带 P→看跌, 带 C→看涨)
+  await evalJs(ws, `TradeUI.openEditModal('open', {underlying: 'e2e3jd100'})`);
+  await sleep(300);
+  const cpInfer = await evalJs(ws, `(async () => {
+    const inp = document.getElementById('tmContract');
+    inp.value = 'ao611P2500';
+    inp.dispatchEvent(new Event('input'));
+    const pVal = document.getElementById('tmCallPut').value;
+    inp.value = 'fu2611C3000';
+    inp.dispatchEvent(new Event('input'));
+    const cVal = document.getElementById('tmCallPut').value;
+    document.getElementById('tmCancel').click();
+    return JSON.stringify({pVal, cVal});
+  })()`);
+  const cpi = JSON.parse(cpInfer);
+  check('开仓合约带 P → 默认看跌', cpi.pVal === 'P', cpInfer);
+  check('开仓合约带 C → 默认看涨', cpi.cVal === 'C', cpInfer);
+  // 2. 平仓 modal: 看涨看跌与原合约一致 + 方向取反(卖出开仓→买入平仓)
+  //    先造一个卖出开仓 e2e4fu
+  await evalJs(ws, `(async () => {
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2e4fu', contract:'e2e4fuC3000', op_type:'open', direction:'sell',
+      open_date:'2026-08-10', call_put:'C', open_price:100, qty:3, premium:300
+    })}).then(r=>r.json());
+  })()`);
+  await evalJs(ws, `TradeUI.refresh()`);
+  await sleep(500);
+  await evalJs(ws, `[...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2e4fu')?.click()`);
+  await sleep(600);
+  const closeSync = await evalJs(ws, `(async () => {
+    document.getElementById('tdNewClose').click();
+    await new Promise(r=>setTimeout(r,300));
+    const callPut = document.getElementById('tmCallPut').value;
+    const direction = document.getElementById('tmDirection').value;
+    const dirDisabled = document.getElementById('tmDirection').disabled;
+    const cpDisabled = document.getElementById('tmCallPut').disabled;
+    document.getElementById('tmCancel').click();
+    return JSON.stringify({callPut, direction, dirDisabled, cpDisabled});
+  })()`);
+  const cs = JSON.parse(closeSync);
+  check('平仓: 看涨看跌自动与原合约一致(C)', cs.callPut === 'C', closeSync);
+  check('平仓: 卖出开仓 → 方向自动为买入(buy)', cs.direction === 'buy' && cs.dirDisabled, closeSync);
+  // 3. 平仓后操作记录行: 权利金显示 / ; 看涨看跌与原合约一致
+  await evalJs(ws, `(async () => {
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2e4fu', contract:'e2e4fuC3000', op_type:'close', direction:'buy',
+      close_date:'2026-08-20', open_date:'2026-08-20', close_qty:3, qty:3,
+      close_price:90, pnl:-30, premium:0, call_put:'C'
+    })}).then(r=>r.json());
+  })()`);
+  await evalJs(ws, `TradeUI.refresh()`);
+  await sleep(600);
+  const closeRow = await evalJs(ws, `JSON.stringify((() => {
+    const rows = [...document.querySelectorAll('#tdOps tr')];
+    // 操作=平仓的行(排除状态"已平仓"的开仓行): 文本含"平仓"且不含"开仓"
+    const r = rows.find(x => x.innerText.includes('平仓') && !x.innerText.includes('开仓'));
+    return r ? {txt: r.innerText.replace(/\\s+/g, ' ')} : null;
+  })())`);
+  const cr = JSON.parse(closeRow);
+  check('平仓操作行显示权利金 /', cr && cr.txt.includes('/'), cr ? cr.txt : 'null');
+  check('平仓操作行看涨看跌与原合约一致(看涨)', cr && /看涨/.test(cr.txt), cr ? cr.txt : 'null');
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
