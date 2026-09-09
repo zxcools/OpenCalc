@@ -1875,7 +1875,7 @@ body{
     radial-gradient(900px 420px at 85% -10%, rgba(91,140,255,.16), transparent 60%),
     radial-gradient(700px 380px at -10% 30%, rgba(125,227,255,.10), transparent 55%);
 }
-.wrap{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
+.wrap{max-width:1320px;margin-left:0;margin-right:auto;padding:28px 20px 60px}
 
 /* 顶部 */
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:26px;flex-wrap:wrap}
@@ -2105,7 +2105,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-layout{display:block;position:relative}
 .trades-layout.has-detail .trades-main{width:100%;min-width:0}
 .trades-layout.has-detail .trades-side{
-  position:fixed;top:60px;right:0;width:min(720px,52vw);height:calc(100vh - 60px);
+  position:fixed;top:60px;right:0;width:min(900px,62vw);height:calc(100vh - 60px);
   z-index:50;background:var(--panel);border-left:1px solid var(--panel2);
   box-shadow:-4px 0 18px rgba(0,0,0,.4);overflow:auto;animation:fadeSlide .25s ease
 }
@@ -3847,15 +3847,19 @@ const TradeUI = {
       contractInput.replaceWith(sel);
       $('tmUnderlying').value = this.detail.underlying;
       $('tmUnderlying').readOnly = true;
-      // 方向: 自动取反(开仓买→平仓卖, 开仓卖→平仓买)
-      const h = this.detail.holdings[0];
-      const closeDir = h.direction === 'buy' ? 'sell' : 'buy';
-      $('tmDirection').value = closeDir;
+      // 方向: 自动取反(跟随所选合约的开仓方向; 开仓买→平仓卖, 开仓卖→平仓买)
+      const _syncDir = () => {
+        const selEl = $('tmContract');
+        const opt = selEl.options[selEl.selectedIndex];
+        const openDir = opt ? (opt.dataset.opendir || 'buy') : 'buy';
+        $('tmDirection').value = openDir === 'buy' ? 'sell' : 'buy';
+      };
+      _syncDir();
       $('tmDirectionWrap').classList.add('disabled');
       $('tmDirection').disabled = true;
+      $('tmContract').addEventListener('change', () => { _syncDir(); this._refreshCloseQtyHint(); });
       // 提示 close_qty 上限
       this._refreshCloseQtyHint();
-      $('tmContract').addEventListener('change', () => this._refreshCloseQtyHint());
     } else if (!isOpen){
       alert('请先在详情页里打开一个标的, 再点击「新建平仓」');
       return;

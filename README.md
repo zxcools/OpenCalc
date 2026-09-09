@@ -52,6 +52,11 @@
 
 ## 📦 版本更新
 
+### v50.5（2026-09-09）
+- **📌 拉宽窗口主页面位置不变**: `.wrap` 从 `margin:0 auto` 居中改为左对齐(`margin-left:0; margin-right:auto`), 拉宽窗口时主内容固定在左侧不漂移, 右侧留白
+- **🪟 分页面更宽**: width 从 `min(720px,52vw)` 增到 `min(900px,62vw)`, 表格内合约/方向等选项水平完整展示无需横向滚动
+- **🔁 平仓方向跟随所选合约**: 修复平仓 modal 切换合约下拉时方向不更新的 bug — 方向取反由所选合约的持仓方向(openDir)决定并实时联动(卖出开仓→买入平仓, 买入开仓→卖出平仓)
+
 ### v50.4（2026-09-09）
 - **🪟 主表保持原宽不变, 分页面 fixed 浮在右侧**: 详情布局改 `display:fixed`, 主表始终 100% 视口宽(不变), 分页面 `position:fixed; top:60px; right:0; width: min(720px, 52vw); z-index: 50; box-shadow` 浮在右侧, 不挤压主表; 窄屏(≤1100px)fallback normal 流
 - **✳ 必填项 * 与文字同一行**: modal 必填 label 把"文字 + *"包在同一个 `<span class="req">` 内, CSS `inline-flex + nowrap`, 避免 flex column 把 text-node 和 inline-span blockify 成两行
