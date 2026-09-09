@@ -1878,10 +1878,15 @@ HTML = r"""<!DOCTYPE html>
 <script src="/chart.min.js"></script>
 <style>
 :root{
-  --bg:#0b1020; --panel:#141b33; --panel2:#1a2342; --border:rgba(148,163,255,.14);
-  --text:#e8ecff; --sub:#9aa6c8; --accent:#5b8cff; --accent2:#7de3ff;
+  /* 护眼暗色(夜间): 低蓝光墨绿黑, 减少刺激 */
+  --bg:#0e1612; --panel:#152019; --panel2:#1b2920; --border:rgba(150,205,175,.13);
+  --text:#e2efe6; --sub:#93a898; --accent:#5b8cff; --accent2:#7de3ff;
   --good:#2ecc8f; --bad:#ff6b6b; --warn:#ffb86b; --gold:#f5c76b;
   --shadow:0 18px 50px rgba(0,0,0,.45);
+  --glow1:rgba(90,190,150,.14);   /* 背景右上光晕(护眼绿) */
+  --glow2:rgba(130,210,170,.08);  /* 背景左下光晕 */
+  --chart-grid:rgba(150,205,175,.12); --chart-tick:#9db3a2;  /* 图表网格/刻度 */
+  --chart-stroke:rgba(11,16,32,.85); --chart-label:#d9e6dc;    /* 数值标签描边/填充 */
   /* ===== 字号档位变量 (默认=中) =====
      切换: <body class="fz-sm|fz-md|fz-lg">, 覆盖整组变量即整体放大/缩小 */
   --fz-th:14px;      /* 表格表头 */
@@ -1923,10 +1928,15 @@ body.fz-lg{
   --fz-legend:14.5px; --fz-chart:15px; --fz-chart2:16px;
 }
 [data-theme="light"]{
-  --bg:#eef1f8; --panel:#ffffff; --panel2:#f4f6fd; --border:#dfe4f2;
-  --text:#1c2340; --sub:#66708f; --accent:#3b6cf6; --accent2:#0e9fc8;
+  /* 护眼浅色(白天): 柔豆绿底, 卡片去纯白避免刺眼 */
+  --bg:#eef5ec; --panel:#f7fbf5; --panel2:#e6f0e3; --border:#d3e3cf;
+  --text:#2c3a2e; --sub:#5f7663; --accent:#3b6cf6; --accent2:#0e9fc8;
   --good:#16a06b; --bad:#e05252; --warn:#d98a1f; --gold:#b8860b;
-  --shadow:0 18px 44px rgba(30,50,120,.10);
+  --shadow:0 18px 44px rgba(50,90,60,.10);
+  --glow1:rgba(120,190,130,.18);  /* 背景右上光晕(柔和绿) */
+  --glow2:rgba(170,215,160,.16);  /* 背景左下光晕 */
+  --chart-grid:rgba(90,130,100,.14); --chart-tick:#54685a;  /* 图表网格/刻度(浅底深字) */
+  --chart-stroke:rgba(50,80,58,.65); --chart-label:#ffffff;   /* 数值标签: 深绿描边+白字(浅色柱顶) */
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{
@@ -1934,8 +1944,8 @@ body{
   background:var(--bg);color:var(--text);min-height:100vh;
   transition:background .35s,color .35s;
   background-image:
-    radial-gradient(900px 420px at 85% -10%, rgba(91,140,255,.16), transparent 60%),
-    radial-gradient(700px 380px at -10% 30%, rgba(125,227,255,.10), transparent 55%);
+    radial-gradient(900px 420px at 85% -10%, var(--glow1), transparent 60%),
+    radial-gradient(700px 380px at -10% 30%, var(--glow2), transparent 55%);
 }
 .wrap{max-width:1100px;margin-left:0;margin-right:auto;padding:28px 20px 60px}
 
@@ -4317,6 +4327,11 @@ function cssFz(name, fallback){
   const n = parseFloat(v);
   return isNaN(n) ? fallback : n;
 }
+// 读 CSS 变量颜色值, 供 Chart.js 随明暗主题联动
+function cssClr(name, fallback){
+  const v = getComputedStyle(document.body).getPropertyValue(name).trim();
+  return v || fallback;
+}
 const valueLabelPlugin = {
   id: 'valueLabel',
   afterDatasetsDraw(chart, args, opts){
@@ -4337,9 +4352,9 @@ const valueLabelPlugin = {
         const v = ds.data[i];
         if (v == null || isNaN(v)) return;
         const label = isLine ? v.toFixed(1) + '%' : fmtWan(v);
-        ctx.strokeStyle = 'rgba(11,16,32,0.85)';   // 描边色(深底)
+        ctx.strokeStyle = cssClr('--chart-stroke','rgba(11,16,32,.85)');   // 描边色(随主题)
         ctx.strokeText(label, pt.x, pt.y + (isLine ? -10 : (v >= 0 ? -5 : 16)));
-        ctx.fillStyle = isLine ? '#ff5b9b' : (v >= 0 ? '#c8d4ff' : '#ff8a8a');
+        ctx.fillStyle = isLine ? '#ff5b9b' : cssClr('--chart-label','#d9e6dc');
         ctx.fillText(label, pt.x, pt.y + (isLine ? -10 : (v >= 0 ? -5 : 16)));
       });
     });
@@ -4848,9 +4863,9 @@ const FundUI = {
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
+          y:  {position:'left',  grid:{color:cssClr('--chart-grid','rgba(150,205,175,.12)')}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
           y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}, autoSkip: true, maxRotation: 0}},
+          x:  {grid:{display:false}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}, autoSkip: true, maxRotation: 0}},
         },
       },
     });
@@ -4885,9 +4900,9 @@ const FundUI = {
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
+          y:  {position:'left',  grid:{color:cssClr('--chart-grid','rgba(150,205,175,.12)')}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
           y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}}},
+          x:  {grid:{display:false}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}}},
         },
       },
     });
@@ -4966,9 +4981,9 @@ const FundUI = {
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toLocaleString()}},
+          y:  {position:'left',  grid:{color:cssClr('--chart-grid','rgba(150,205,175,.12)')}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toLocaleString()}},
           y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13) + 0.5}, autoSkip: true, maxRotation: 0}},
+          x:  {grid:{display:false}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13) + 0.5}, autoSkip: true, maxRotation: 0}},
         },
       },
     });
