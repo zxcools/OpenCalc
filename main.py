@@ -2769,9 +2769,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="ct"><span class="dot"></span><span id="chartMonthlyTitle">abe · 月收益图</span>
           <button class="btn sm zoombtn" data-zoom="monthly" title="放大查看">⤢ 放大</button></div>
         <div class="legend">
-          <span class="lg"><i style="background:#9669ff"></i>本月末权益（扣掉出入金之后）</span>
-          <span class="lg"><i style="background:#ff4691"></i>本月盈亏</span>
-          <span class="lg"><i style="background:#ffcf4d"></i>本月收益率（折线，右轴）</span>
+          <span class="lg"><i style="background:#a58ae0"></i>本月末权益（扣掉出入金之后）</span>
+          <span class="lg"><i style="background:#e78fb5"></i>本月盈亏</span>
+          <span class="lg"><i style="background:#e2c985"></i>本月收益率（折线，右轴）</span>
         </div>
         <canvas id="chartMonthly"></canvas>
       </div>
@@ -2779,9 +2779,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="ct"><span class="dot"></span><span id="chartYearlyTitle">abe · 年盈亏分析</span>
           <button class="btn sm zoombtn" data-zoom="yearly" title="放大查看">⤢ 放大</button></div>
         <div class="legend">
-          <span class="lg"><i style="background:#9669ff"></i>年末权益</span>
-          <span class="lg"><i style="background:#ff4691"></i>年度总盈亏</span>
-          <span class="lg"><i style="background:#ffcf4d"></i>年化收益率（折线，右轴）</span>
+          <span class="lg"><i style="background:#a58ae0"></i>年末权益</span>
+          <span class="lg"><i style="background:#e78fb5"></i>年度总盈亏</span>
+          <span class="lg"><i style="background:#e2c985"></i>年化收益率（折线，右轴）</span>
         </div>
         <canvas id="chartYearly"></canvas>
       </div>
@@ -4356,7 +4356,7 @@ const valueLabelPlugin = {
         const label = isLine ? v.toFixed(1) + '%' : fmtWan(v);
         ctx.strokeStyle = cssClr('--chart-stroke','rgba(11,16,32,.85)');   // 描边色(随主题)
         ctx.strokeText(label, pt.x, pt.y + (isLine ? -10 : (v >= 0 ? -5 : 16)));
-        ctx.fillStyle = isLine ? '#ffcf4d' : cssClr('--chart-label','#d9e6dc');
+        ctx.fillStyle = isLine ? '#e2c985' : cssClr('--chart-label','#d9e6dc');
         ctx.fillText(label, pt.x, pt.y + (isLine ? -10 : (v >= 0 ? -5 : 16)));
       });
     });
@@ -4850,9 +4850,9 @@ const FundUI = {
       data: {
         labels,
         datasets: [
-          {label: '本月末权益', data: equity, backgroundColor: 'rgba(150,105,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: '本月盈亏',  data: pnl,    backgroundColor: 'rgba(255,70,145,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: '本月收益率(%)', data: rate, type: 'line', borderColor: '#ffcf4d', backgroundColor: '#ffcf4d',
+          {label: '本月末权益', data: equity, backgroundColor: 'rgba(165,138,224,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '本月盈亏',  data: pnl,    backgroundColor: 'rgba(231,143,181,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '本月收益率(%)', data: rate, type: 'line', borderColor: '#e2c985', backgroundColor: '#e2c985',
             tension: 0.35, pointRadius: 4, borderWidth: 2.5, order: 1, yAxisID: 'y1'},
         ],
       },
@@ -4866,7 +4866,7 @@ const FundUI = {
         },
         scales: {
           y:  {position:'left',  grid:{color:cssClr('--chart-grid','rgba(150,205,175,.12)')}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ffcf4d', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#e2c985', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
           x:  {grid:{display:false}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}, autoSkip: true, maxRotation: 0}},
         },
       },
@@ -4887,9 +4887,9 @@ const FundUI = {
       data: {
         labels: labelsY,
         datasets: [
-          {label: '年末权益',   data: endEq, backgroundColor: 'rgba(150,105,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: '年度总盈亏', data: yPnl,  backgroundColor: 'rgba(255,70,145,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: '年化收益率(%)', data: yRate, type: 'line', borderColor: '#ffcf4d', backgroundColor: '#ffcf4d',
+          {label: '年末权益',   data: endEq, backgroundColor: 'rgba(165,138,224,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '年度总盈亏', data: yPnl,  backgroundColor: 'rgba(231,143,181,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '年化收益率(%)', data: yRate, type: 'line', borderColor: '#e2c985', backgroundColor: '#e2c985',
             tension: 0.35, pointRadius: 5, borderWidth: 2.5, order: 1, yAxisID: 'y1'},
         ],
       },
@@ -4903,7 +4903,7 @@ const FundUI = {
         },
         scales: {
           y:  {position:'left',  grid:{color:cssClr('--chart-grid','rgba(150,205,175,.12)')}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ffcf4d', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#e2c985', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
           x:  {grid:{display:false}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13)}}},
         },
       },
@@ -4926,8 +4926,8 @@ const FundUI = {
     const titleStr = isCombined ? '汇总账户' : this.strategy;
     $('chartZoomTitle').textContent = titleStr + ' · ' + (isMonthly ? '月收益图' : '年盈亏分析');
     $('chartZoomLegend').innerHTML = isMonthly
-      ? '<span class="lg"><i style="background:#9669ff"></i>本月末权益（扣掉出入金之后）</span><span class="lg"><i style="background:#ff4691"></i>本月盈亏</span><span class="lg"><i style="background:#ffcf4d"></i>本月收益率（折线，右轴）</span>'
-      : '<span class="lg"><i style="background:#9669ff"></i>年末权益</span><span class="lg"><i style="background:#ff4691"></i>年度总盈亏</span><span class="lg"><i style="background:#ffcf4d"></i>年化收益率（折线，右轴）</span>';
+      ? '<span class="lg"><i style="background:#a58ae0"></i>本月末权益（扣掉出入金之后）</span><span class="lg"><i style="background:#e78fb5"></i>本月盈亏</span><span class="lg"><i style="background:#e2c985"></i>本月收益率（折线，右轴）</span>'
+      : '<span class="lg"><i style="background:#a58ae0"></i>年末权益</span><span class="lg"><i style="background:#e78fb5"></i>年度总盈亏</span><span class="lg"><i style="background:#e2c985"></i>年化收益率（折线，右轴）</span>';
     this.zoomKind = kind;
     $('chartZoomBg').classList.remove('hidden');
     // modal 显示后再渲染, 否则 canvas 尺寸为 0
@@ -4966,9 +4966,9 @@ const FundUI = {
       data: {
         labels,
         datasets: [
-          {label: t1, data: d1, backgroundColor: 'rgba(150,105,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: t2, data: d2, backgroundColor: 'rgba(255,70,145,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: t3, data: d3, type: 'line', borderColor: '#ffcf4d', backgroundColor: '#ffcf4d',
+          {label: t1, data: d1, backgroundColor: 'rgba(165,138,224,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: t2, data: d2, backgroundColor: 'rgba(231,143,181,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: t3, data: d3, type: 'line', borderColor: '#e2c985', backgroundColor: '#e2c985',
             tension: 0.35, pointRadius: 6, borderWidth: 3, order: 1, yAxisID: 'y1'},
         ],
       },
@@ -4984,7 +4984,7 @@ const FundUI = {
         },
         scales: {
           y:  {position:'left',  grid:{color:cssClr('--chart-grid','rgba(150,205,175,.12)')}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ffcf4d', font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toFixed(0)+'%'}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#e2c985', font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toFixed(0)+'%'}},
           x:  {grid:{display:false}, ticks:{color:cssClr('--chart-tick','#9db3a2'), font:{size: cssFz('--fz-chart',13) + 0.5}, autoSkip: true, maxRotation: 0}},
         },
       },
