@@ -1880,8 +1880,9 @@ HTML = r"""<!DOCTYPE html>
 :root{
   /* 护眼暗色(夜间): 低蓝光墨绿黑, 减少刺激 */
   --bg:#0e1612; --panel:#152019; --panel2:#1b2920; --border:rgba(150,205,175,.13);
-  --text:#e2efe6; --sub:#93a898; --accent:#5b8cff; --accent2:#7de3ff;
+  --text:#e2efe6; --sub:#93a898; --accent:#4cd493; --accent2:#93e6b8;
   --good:#2ecc8f; --bad:#ff6b6b; --warn:#ffb86b; --gold:#f5c76b;
+  --modal-mask:rgba(8,14,10,.62);
   --shadow:0 18px 50px rgba(0,0,0,.45);
   --glow1:rgba(90,190,150,.14);   /* 背景右上光晕(护眼绿) */
   --glow2:rgba(130,210,170,.08);  /* 背景左下光晕 */
@@ -1930,8 +1931,9 @@ body.fz-lg{
 [data-theme="light"]{
   /* 护眼浅色(白天): 柔豆绿底, 卡片去纯白避免刺眼 */
   --bg:#eef5ec; --panel:#f7fbf5; --panel2:#e6f0e3; --border:#d3e3cf;
-  --text:#2c3a2e; --sub:#5f7663; --accent:#3b6cf6; --accent2:#0e9fc8;
+  --text:#2c3a2e; --sub:#5f7663; --accent:#18a163; --accent2:#0f9e6e;
   --good:#16a06b; --bad:#e05252; --warn:#d98a1f; --gold:#b8860b;
+  --modal-mask:rgba(40,60,44,.35);
   --shadow:0 18px 44px rgba(50,90,60,.10);
   --glow1:rgba(120,190,130,.18);  /* 背景右上光晕(柔和绿) */
   --glow2:rgba(170,215,160,.16);  /* 背景左下光晕 */
@@ -1958,12 +1960,12 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .fzseg button{padding:6px 11px;border-radius:8px;cursor:pointer;border:0;
   background:transparent;color:var(--sub);font-weight:600;font-size:var(--fz-mid);
   line-height:1;transition:all .2s}
-.fzseg button.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff}
+.fzseg button.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .fzseg button:not(.active):hover{background:var(--panel2);color:var(--text)}
 .logo{width:46px;height:46px;border-radius:14px;flex:none;
-  background:linear-gradient(135deg,#5b8cff,#7de3ff);
+  background:linear-gradient(135deg,#3ecf8f,#93e6b8);
   display:flex;align-items:center;justify-content:center;font-size:22px;
-  box-shadow:0 8px 24px rgba(91,140,255,.4)}
+  box-shadow:0 8px 24px rgba(62,207,143,.4)}
 .brand h1{font-size:21px;letter-spacing:.5px}
 .brand p{font-size:var(--fz-mid);color:var(--sub);margin-top:2px}
 .topbtns{display:flex;align-items:center;gap:10px}
@@ -1999,7 +2001,7 @@ label{display:block;font-size:var(--fz-lbl);color:var(--sub);margin:14px 0 6px}
 input,select{width:100%;padding:11px 13px;border-radius:11px;border:1px solid var(--border);
   background:var(--panel2);color:var(--text);font-size:var(--fz-input);outline:none;
   transition:border .2s,box-shadow .2s;font-family:inherit}
-input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(91,140,255,.18)}
+input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(62,207,143,.18)}
 input::placeholder{color:var(--sub);opacity:.55}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:stretch}
 .row2>div{display:flex;flex-direction:column}
@@ -2039,11 +2041,11 @@ select{cursor:pointer;appearance:none;
 .bignum{background:var(--panel2);border:1px solid var(--border);border-radius:18px;
   padding:20px;text-align:center;position:relative;overflow:hidden}
 .bignum::before{content:"";position:absolute;inset:0;
-  background:radial-gradient(160px 90px at 50% -10%,rgba(91,140,255,.22),transparent 70%)}
+  background:radial-gradient(160px 90px at 50% -10%,rgba(62,207,143,.22),transparent 70%)}
 .bignum .t{font-size:12px;color:var(--sub);position:relative}
 .bignum .n{font-size:46px;font-weight:800;position:relative;line-height:1.15;
   background:linear-gradient(135deg,#fff,#b9ccff);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-[data-theme="light"] .bignum .n{background:linear-gradient(135deg,#24356e,#3b6cf6);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+[data-theme="light"] .bignum .n{background:linear-gradient(135deg,#1e5f3c,#18a163);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
 .bignum .s{font-size:11px;color:var(--sub);position:relative}
 
 .badge{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:14px;
@@ -2068,7 +2070,7 @@ select{cursor:pointer;appearance:none;
 
 /* 阶梯止盈 (期货, 独立方块) */
 .ladder-block{border:1px solid var(--border);border-radius:16px;padding:14px 16px;
-  background:linear-gradient(135deg,rgba(91,140,255,.07),transparent 60%)}
+  background:linear-gradient(135deg,rgba(62,207,143,.07),transparent 60%)}
 .ladder-hd{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
   flex-wrap:wrap;margin-bottom:10px}
 .ladder-hd .lb{font-size:13px;font-weight:700;letter-spacing:.4px}
@@ -2105,8 +2107,8 @@ select{cursor:pointer;appearance:none;
 [data-theme="light"] .plans-item .nm .d.short{color:#0e9fc8}
 .plans-item .meta{font-size:11px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .plans-item .go{margin-left:auto;flex:none;font-size:12px;font-weight:600;color:var(--accent);
-  background:rgba(91,140,255,.1);border:1px solid rgba(91,140,255,.35);border-radius:8px;padding:4px 12px}
-.plans-item:hover .go{background:rgba(91,140,255,.2)}
+  background:rgba(62,207,143,.1);border:1px solid rgba(62,207,143,.35);border-radius:8px;padding:4px 12px}
+.plans-item:hover .go{background:rgba(62,207,143,.2)}
 .plans-item .go:active{transform:scale(.96)}
 
 .tip{margin-top:16px;font-size:var(--fz-tip);color:var(--sub);line-height:1.8;
@@ -2159,8 +2161,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   display:flex;flex-direction:column;align-items:center;gap:6px;line-height:1.2}
 .maintab .mi{font-size:22px;line-height:1}
 .maintab small{font-weight:400;font-size:10px;opacity:.72}
-.maintab.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff;
-  box-shadow:0 10px 26px rgba(91,140,255,.35)}
+.maintab.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff;
+  box-shadow:0 10px 26px rgba(62,207,143,.35)}
 .maintab.active small{opacity:.92}
 .maintab:not(.active):hover{background:var(--panel2);color:var(--text)}
 .main{flex:1;min-width:0}
@@ -2219,18 +2221,18 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   background:var(--panel2);color:var(--text);font-size:12px;max-width:180px}
 .trades-tbl th{font-size:11px}
 .trades-tbl td{font-size:12px;padding:6px 8px}
-.trades-tbl tr.row-open td{background:rgba(91,140,255,.04)}
+.trades-tbl tr.row-open td{background:rgba(62,207,143,.04)}
 .trades-tbl tr.row-close td{background:rgba(255,107,155,.04)}
 .trades-tbl tr.clickable{cursor:pointer}
 .trades-tbl tr.clickable:hover{background:var(--panel2)}
 .tag{display:inline-block;padding:2px 7px;border-radius:6px;font-size:var(--fz-tag);font-weight:600}
 .tag.long{background:rgba(255,107,107,.18);color:#ff8484}
 .tag.short{background:rgba(70,214,234,.18);color:#46d6ea}
-.tag.open{background:rgba(91,140,255,.18);color:#7da3ff}
+.tag.open{background:rgba(62,207,143,.18);color:#63d89c}
 .tag.close{background:rgba(255,107,155,.18);color:#ff84b9}
 .tag.closed{background:rgba(120,200,150,.18);color:#78c896}
 .tag.partial{background:rgba(255,180,80,.18);color:#ffb450}
-.tag.unclosed{background:rgba(91,140,255,.18);color:#7da3ff}
+.tag.unclosed{background:rgba(62,207,143,.18);color:#63d89c}
 /* 方向色(中国习惯): 买入红 / 卖出青; 看涨红 / 看跌青 */
 .tag.buy{background:rgba(255,107,107,.18);color:#ff8484}
 .tag.sell{background:rgba(70,214,234,.18);color:#46d6ea}
@@ -2272,7 +2274,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   border-radius:12px;padding:4px}
 .funds-bar .seg button{padding:8px 16px;border-radius:8px;cursor:pointer;border:0;
   background:transparent;color:var(--sub);font-weight:600;font-size:13px;transition:all .2s}
-.funds-bar .seg button.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff}
+.funds-bar .seg button.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .funds-bar .seg button:not(.active):hover{background:var(--panel2);color:var(--text)}
 /* 累计提现展示 */
 .wchip{padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--panel2);
@@ -2281,9 +2283,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .btn{padding:10px 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel2);
   color:var(--text);font-weight:600;cursor:pointer;transition:all .2s;font-size:var(--fz-btn)}
 .btn:hover{transform:translateY(-1px);background:var(--panel);border-color:var(--accent)}
-.btn.primary{background:linear-gradient(135deg,#5b8cff,#3b6cf6);border:0;color:#fff;
-  box-shadow:0 6px 18px rgba(59,108,246,.3)}
-.btn.primary:hover{box-shadow:0 10px 24px rgba(59,108,246,.45)}
+.btn.primary{background:linear-gradient(135deg,#3ecf8f,#28b470);border:0;color:#fff;
+  box-shadow:0 6px 18px rgba(40,180,112,.3)}
+.btn.primary:hover{box-shadow:0 10px 24px rgba(40,180,112,.45)}
 .btn.danger{background:rgba(255,107,107,.12);border-color:rgba(255,107,107,.3);color:var(--bad)}
 .btn.danger:hover{background:rgba(255,107,107,.22)}
 .btn.sm{padding:6px 12px;font-size:var(--fz-btn2)}
@@ -2304,8 +2306,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   color:var(--text);font-weight:600;font-size:12.5px;cursor:pointer;transition:all .2s;user-select:none}
 .chip small{display:block;font-weight:400;font-size:var(--fz-micro);opacity:.65;margin-top:1px}
 .chip:hover{border-color:var(--accent);transform:translateY(-1px)}
-.chip.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);border-color:transparent;color:#fff;
-  box-shadow:0 6px 16px rgba(59,108,246,.35)}
+.chip.active{background:linear-gradient(135deg,#3ecf8f,#28b470);border-color:transparent;color:#fff;
+  box-shadow:0 6px 16px rgba(40,180,112,.35)}
 .chip.active small{opacity:.85}
 /* 常用区 (favorites): 横向 chip 列表, 悬停右上角 X 可删除 */
 .freq{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 6px;align-items:center}
@@ -2313,7 +2315,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .fchip{position:relative;padding:6px 24px 6px 12px;border-radius:9px;border:1px solid var(--border);
   background:var(--panel2);color:var(--text);font-size:12.5px;cursor:pointer;transition:all .2s;user-select:none}
 .fchip:hover{border-color:var(--accent)}
-.fchip.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);border-color:transparent;color:#fff}
+.fchip.active{background:linear-gradient(135deg,#3ecf8f,#28b470);border-color:transparent;color:#fff}
 .fchip .x{position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;
   background:var(--bad);color:#fff;font-size:11px;line-height:18px;text-align:center;
   opacity:0;transition:opacity .15s;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.3)}
@@ -2326,9 +2328,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 
 /* 左下角浮动联系作者按钮 */
 .floating-contact{position:fixed;bottom:20px;left:20px;width:50px;height:50px;border-radius:50%;
-  background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff;border:0;cursor:pointer;
-  box-shadow:0 6px 20px rgba(91,140,255,.45);font-size:22px;z-index:100;transition:transform .2s,box-shadow .2s}
-.floating-contact:hover{transform:scale(1.1);box-shadow:0 8px 26px rgba(91,140,255,.6)}
+  background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff;border:0;cursor:pointer;
+  box-shadow:0 6px 20px rgba(62,207,143,.45);font-size:22px;z-index:100;transition:transform .2s,box-shadow .2s}
+.floating-contact:hover{transform:scale(1.1);box-shadow:0 8px 26px rgba(62,207,143,.6)}
 
 .tbl{width:100%;border-collapse:collapse;font-size:var(--fz-td2);margin-top:6px}
 .tbl th{text-align:left;padding:10px 10px;color:var(--sub);font-weight:600;font-size:var(--fz-th);
@@ -2405,8 +2407,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .chartbox .legend .lg i{display:inline-block;width:11px;height:11px;border-radius:3px}
 .chartbox canvas{width:100%!important;height:260px!important}
 
-.modalbg{position:fixed;inset:0;background:rgba(8,12,28,.55);backdrop-filter:blur(6px);
-  z-index:999;display:flex;align-items:center;justify-content:center;animation:pop .18s ease}
+.modalbg{position:fixed;inset:0;background:var(--modal-mask);z-index:999;
+  display:flex;align-items:center;justify-content:center;animation:pop .18s ease}
 .modal{background:var(--panel);border:1px solid var(--border);border-radius:18px;
   padding:22px 24px;width:min(480px,90vw);box-shadow:var(--shadow);animation:pop .25s cubic-bezier(.16,1,.3,1)}
 .modal h3{margin-bottom:16px;font-size:16px;display:flex;align-items:center;gap:8px}
@@ -2414,7 +2416,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .modal .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
 .selpill{padding:6px 14px;border-radius:20px;background:var(--panel2);border:1px solid var(--border);
   font-size:12.5px;color:var(--sub);cursor:pointer;transition:.2s}
-.selpill.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff;border:0}
+.selpill.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff;border:0}
 
 /* 金额自动换算"万"提示 */
 .wanhint{font-size:11px;color:var(--sub);margin-top:5px;min-height:15px;letter-spacing:.3px}
@@ -2767,8 +2769,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="ct"><span class="dot"></span><span id="chartMonthlyTitle">abe · 月收益图</span>
           <button class="btn sm zoombtn" data-zoom="monthly" title="放大查看">⤢ 放大</button></div>
         <div class="legend">
-          <span class="lg"><i style="background:#5b8cff"></i>本月末权益（扣掉出入金之后）</span>
-          <span class="lg"><i style="background:#7de3ff"></i>本月盈亏</span>
+          <span class="lg"><i style="background:#3ecf8f"></i>本月末权益（扣掉出入金之后）</span>
+          <span class="lg"><i style="background:#f7c66b"></i>本月盈亏</span>
           <span class="lg"><i style="background:#ff5b9b"></i>本月收益率（折线，右轴）</span>
         </div>
         <canvas id="chartMonthly"></canvas>
@@ -2777,8 +2779,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="ct"><span class="dot"></span><span id="chartYearlyTitle">abe · 年盈亏分析</span>
           <button class="btn sm zoombtn" data-zoom="yearly" title="放大查看">⤢ 放大</button></div>
         <div class="legend">
-          <span class="lg"><i style="background:#5b8cff"></i>年末权益</span>
-          <span class="lg"><i style="background:#7de3ff"></i>年度总盈亏</span>
+          <span class="lg"><i style="background:#3ecf8f"></i>年末权益</span>
+          <span class="lg"><i style="background:#f7c66b"></i>年度总盈亏</span>
           <span class="lg"><i style="background:#ff5b9b"></i>年化收益率（折线，右轴）</span>
         </div>
         <canvas id="chartYearly"></canvas>
@@ -4848,8 +4850,8 @@ const FundUI = {
       data: {
         labels,
         datasets: [
-          {label: '本月末权益', data: equity, backgroundColor: 'rgba(91,140,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: '本月盈亏',  data: pnl,    backgroundColor: 'rgba(125,227,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '本月末权益', data: equity, backgroundColor: 'rgba(62,207,143,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '本月盈亏',  data: pnl,    backgroundColor: 'rgba(247,198,107,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
           {label: '本月收益率(%)', data: rate, type: 'line', borderColor: '#ff5b9b', backgroundColor: '#ff5b9b',
             tension: 0.35, pointRadius: 4, borderWidth: 2.5, order: 1, yAxisID: 'y1'},
         ],
@@ -4885,8 +4887,8 @@ const FundUI = {
       data: {
         labels: labelsY,
         datasets: [
-          {label: '年末权益',   data: endEq, backgroundColor: 'rgba(91,140,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: '年度总盈亏', data: yPnl,  backgroundColor: 'rgba(125,227,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '年末权益',   data: endEq, backgroundColor: 'rgba(62,207,143,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: '年度总盈亏', data: yPnl,  backgroundColor: 'rgba(247,198,107,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
           {label: '年化收益率(%)', data: yRate, type: 'line', borderColor: '#ff5b9b', backgroundColor: '#ff5b9b',
             tension: 0.35, pointRadius: 5, borderWidth: 2.5, order: 1, yAxisID: 'y1'},
         ],
@@ -4924,8 +4926,8 @@ const FundUI = {
     const titleStr = isCombined ? '汇总账户' : this.strategy;
     $('chartZoomTitle').textContent = titleStr + ' · ' + (isMonthly ? '月收益图' : '年盈亏分析');
     $('chartZoomLegend').innerHTML = isMonthly
-      ? '<span class="lg"><i style="background:#5b8cff"></i>本月末权益（扣掉出入金之后）</span><span class="lg"><i style="background:#7de3ff"></i>本月盈亏</span><span class="lg"><i style="background:#ff5b9b"></i>本月收益率（折线，右轴）</span>'
-      : '<span class="lg"><i style="background:#5b8cff"></i>年末权益</span><span class="lg"><i style="background:#7de3ff"></i>年度总盈亏</span><span class="lg"><i style="background:#ff5b9b"></i>年化收益率（折线，右轴）</span>';
+      ? '<span class="lg"><i style="background:#3ecf8f"></i>本月末权益（扣掉出入金之后）</span><span class="lg"><i style="background:#f7c66b"></i>本月盈亏</span><span class="lg"><i style="background:#ff5b9b"></i>本月收益率（折线，右轴）</span>'
+      : '<span class="lg"><i style="background:#3ecf8f"></i>年末权益</span><span class="lg"><i style="background:#f7c66b"></i>年度总盈亏</span><span class="lg"><i style="background:#ff5b9b"></i>年化收益率（折线，右轴）</span>';
     this.zoomKind = kind;
     $('chartZoomBg').classList.remove('hidden');
     // modal 显示后再渲染, 否则 canvas 尺寸为 0
@@ -4964,8 +4966,8 @@ const FundUI = {
       data: {
         labels,
         datasets: [
-          {label: t1, data: d1, backgroundColor: 'rgba(91,140,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
-          {label: t2, data: d2, backgroundColor: 'rgba(125,227,255,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: t1, data: d1, backgroundColor: 'rgba(62,207,143,.85)', borderRadius: 6, order: 2, yAxisID: 'y'},
+          {label: t2, data: d2, backgroundColor: 'rgba(247,198,107,.9)', borderRadius: 6, order: 2, yAxisID: 'y'},
           {label: t3, data: d3, type: 'line', borderColor: '#ff5b9b', backgroundColor: '#ff5b9b',
             tension: 0.35, pointRadius: 6, borderWidth: 3, order: 1, yAxisID: 'y1'},
         ],
