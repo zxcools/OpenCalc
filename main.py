@@ -2191,7 +2191,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 
 /* 录入对话框(共用) */
 .formgrid{display:grid;grid-template-columns:1fr 1fr;column-gap:14px;row-gap:12px;margin-top:12px}
-.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--sub);align-items:stretch;min-width:0}
+.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--sub);align-items:stretch;min-width:0}
 .formgrid label>input,
 .formgrid label>select{width:100%;margin:0;box-sizing:border-box;min-width:0}
 .formgrid .full{grid-column:1/-1}
@@ -2280,6 +2280,27 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .tbl td{padding:11px 10px;border-bottom:1px solid var(--border)}
 .tbl tr:hover td{background:var(--panel2)}
 .tbl .num{text-align:right;font-variant-numeric:tabular-nums}
+
+/* ===== 交易记录 / 资金曲线 字号放大 (2026-09-09) =====
+   作用域限定两个页面, 不影响开仓计算页 */
+#tradesArea .tbl th, #fundsArea .tbl th{font-size:13px}
+#tradesArea .tbl td, #fundsArea .tbl td{font-size:14px}
+#tradesArea .trades-tbl th{font-size:13px}
+#tradesArea .trades-tbl td{font-size:13.5px;padding:7px 10px}
+#tradesArea .tag, #fundsArea .tag{font-size:12.5px;padding:3px 8px}
+#tradesArea .btn.xs, #fundsArea .btn.xs{font-size:12.5px;padding:4px 12px}
+#tradesArea .btn.sm, #fundsArea .btn.sm{font-size:13.5px;padding:7px 14px}
+#tradesArea .btn.ghost, #fundsArea .btn.ghost{font-size:12.5px}
+#tradesArea .chk{font-size:13.5px}
+#tradesArea .op-filter{font-size:13px}
+#tradesArea .op-filter select{font-size:13px;padding:5px 8px}
+#tradesArea .iconbtn{font-size:16px}
+#tradesArea .card h2, #fundsArea .card h2{font-size:15.5px}
+#fundsArea .funds-bar .seg button{font-size:14px;padding:8px 16px}
+#fundsArea .funds-bar .btn.sm{font-size:13.5px;padding:6px 12px}
+#tradesArea .tip, #fundsArea .tip{font-size:13px}
+#tradesArea .formgrid label, #fundsArea .formgrid label{font-size:12.5px}
+#tradesArea .help-tip, #fundsArea .help-tip{font-size:inherit}
 /* 月度明细限高滚动(记录多时默认只显示最近 5 条, 其余可滚动) */
 .tbl-scroll{max-height:420px;overflow-y:auto;overflow-x:auto}
 .tbl-scroll tr.hidden{display:none}
@@ -2333,8 +2354,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="maintab" data-tab="trades"><span class="mi">📋</span><span class="mt">交易记录</span><small>abe 期权</small></div>
     <div class="maintab" data-tab="funds"><span class="mi">📈</span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
     <div class="side-extras">
-      <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬇</button>
-      <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬆</button>
+      <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬆</button>
+      <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬇</button>
       <button class="side-btn" id="btnDataDir" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙</button>
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
     </div>

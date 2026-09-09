@@ -258,6 +258,10 @@ async function main() {
   const sideBtns = await evalJs(ws, `JSON.stringify({ex: !!document.getElementById('btnExport'), im: !!document.getElementById('btnImport'), tabs: document.querySelectorAll('#mainTabs .maintab').length})`);
   const sb = JSON.parse(sideBtns);
   check('侧边栏导出/导入按钮 + 3个tab', sb.ex === true && sb.im === true && sb.tabs === 3, sideBtns);
+  // 箭头方向: 导出 ⬆(出去) / 导入 ⬇(进来)
+  const arrowDir = await evalJs(ws, `JSON.stringify({ex: document.getElementById('btnExport').textContent.trim(), im: document.getElementById('btnImport').textContent.trim()})`);
+  const ad = JSON.parse(arrowDir);
+  check('箭头方向 导出⬆ / 导入⬇', ad.ex === '⬆' && ad.im === '⬇', arrowDir);
 
   // ---- 场景G: UI 结构打磨 (v50.1) ----
   // 先关掉场景 F 留下的详情面板, 保证干净的 has-detail 检测
