@@ -1160,8 +1160,7 @@ def trade_list_records(strategy=None):
 
 def trade_upsert(payload):
     """新增/更新交易记录; 不传 id=新增; 传 id=更新. 自动维护 created_at/updated_at.
-    平仓数量校验: close_qty ≤ (同一合约 open qty 总和 - 该 close 之外 close_qty 之和).
-    策略名支持自定义(默认 abe); 自定义名随备份一并保存."""
+    平仓数量校验: close_qty ≤ (同一合约 open qty 总和 - 该 close 之外 close_qty 之和)."""
     db = _fund_db()
     now = datetime.now().isoformat(timespec="seconds")
     required = ("underlying", "contract", "op_type", "direction")
@@ -1173,9 +1172,7 @@ def trade_upsert(payload):
     if payload["direction"] not in ALLOWED_DIRECTION:
         raise ValueError("direction 必须为 buy / sell")
 
-    strategy = (payload.get("strategy") or TRADE_STRATEGY_DEFAULT).strip()
-    if not strategy:
-        raise ValueError("策略名不能为空")
+    strategy = TRADE_STRATEGY_DEFAULT   # 固定 abe(自定义策略 UI 已撤除)
 
     # 平仓数量校验: 不可超过开仓剩余
     if payload["op_type"] == "close" and not payload.get("id"):
@@ -1204,11 +1201,9 @@ def trade_upsert(payload):
     )
     vals = [payload.get(f) for f in fields]
     if rec_id:
-        # 更新
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
         if not existing:
             raise ValueError("记录不存在 id=%s" % rec_id)
-        # 更新模式下也要校验 close_qty(排除自己)
         if payload["op_type"] == "close":
             cq = int(payload.get("close_qty") or 0)
             contract = payload.get("contract")
@@ -1229,7 +1224,6 @@ def trade_upsert(payload):
             (*vals, now, rec_id),
         )
         return rec_id
-    # 新增
     cols = ", ".join(fields)
     placeholders = ", ".join("?" for _ in fields)
     db.execute(
@@ -2101,25 +2095,28 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .side-btn:hover{background:var(--panel2);border-color:var(--accent)}
 .side-btn:active{transform:scale(0.94)}
 
-/* 交易记录页 */
-.trades-header{display:flex;justify-content:space-between;align-items:center;
-  margin-bottom:18px;gap:16px;flex-wrap:wrap}
-.trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.trades-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:16px;flex-wrap:wrap}
+/* 交易记录页 toolbar: 左侧筛选, 右侧操作按钮 */
+.trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%}
+.trades-toolbar > .spacer{flex:1}
 .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer}
 .chk input{accent-color:var(--accent)}
-/* 交易记录页 - 主表保持原宽, 分页面放右侧更宽不挤压; 容器横向滚动 */
+/* 交易记录页 - 主表 + 分页面同时可见, 分页面略宽(grid 1fr 1.2fr), 无横向滚动 */
 .trades-layout{display:block}
-.trades-layout.has-detail{display:flex;flex-wrap:nowrap;gap:18px;
-  align-items:flex-start;overflow-x:auto;padding-bottom:6px}
-.trades-main{flex:0 0 auto;min-width:min(100%,760px);max-width:100%}
-.trades-side{flex:0 0 auto;min-width:880px;max-width:none}
+.trades-layout.has-detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:18px;align-items:flex-start}
+.trades-main{min-width:0}
+.trades-side{min-width:0}
+.trades-side .card{max-height:calc(100vh - 80px);overflow:auto}
+.trades-side .tblwrap{overflow-x:auto}   /* 表内可横滚(仅在分页面表格容器内) */
 @media (max-width:900px){
   .trades-layout.has-detail{display:block}
-  .trades-side{min-width:0}
 }
 .trades-side{animation:fadeSlide .25s ease}
-.trades-side .card{max-height:calc(100vh - 80px);overflow:auto}
 @keyframes fadeSlide{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
+
+/* 详情面板 header: 左标题 + 右操作按钮组(新建开仓/新建平仓/关闭) */
+.td-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.td-head-actions{display:flex;gap:8px;flex-wrap:wrap}
 .trades-tbl th{font-size:11px}
 .trades-tbl td{font-size:12px;padding:6px 8px}
 .trades-tbl tr.row-open td{background:rgba(91,140,255,.04)}
@@ -2150,9 +2147,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 
 /* 录入对话框(共用) */
 .formgrid{display:grid;grid-template-columns:1fr 1fr;column-gap:14px;row-gap:12px;margin-top:12px}
-.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--sub);align-items:stretch}
+.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--sub);align-items:stretch;min-width:0}
 .formgrid label>input,
-.formgrid label>select{width:100%;margin:0}
+.formgrid label>select{width:100%;margin:0;box-sizing:border-box;min-width:0}
 .formgrid .full{grid-column:1/-1}
 .formgrid label span{font-weight:600;color:var(--text)}
 /* 平仓时字段禁用样式 */
@@ -2636,8 +2633,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <header class="trades-header">
         <div class="trades-toolbar">
           <label class="chk"><input type="checkbox" id="tradesOnlyOpen"> 只展示未平仓</label>
-          <button class="btn xs" id="btnNewOpen">➕ 新建开仓</button>
           <button class="btn xs" id="btnShowAll" hidden>📜 显示全部</button>
+          <span class="spacer"></span>
+          <button class="btn xs" id="btnNewOpen">➕ 新建开仓</button>
         </div>
       </header>
       <div class="trades-layout">
@@ -2668,15 +2666,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
         <aside class="trades-side hidden" id="tradeDetailPanel">
           <div class="card results">
-            <div style="display:flex;justify-content:space-between;align-items:center">
+            <div class="td-head">
               <h2><span class="dot"></span><span id="tdTitle">—</span></h2>
-              <button class="btn xs ghost" id="tdClose">✕ 关闭</button>
+              <div class="td-head-actions">
+                <button class="btn xs" id="tdNewOpen">➕ 新建开仓</button>
+                <button class="btn xs" id="tdNewClose">➖ 新建平仓</button>
+                <button class="btn xs ghost" id="tdClose">✕ 关闭</button>
+              </div>
             </div>
             <div class="tip" id="tdMeta" style="margin:6px 0 10px"></div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 14px">
-              <button class="btn xs" id="tdNewOpen">➕ 新建开仓</button>
-              <button class="btn xs" id="tdNewClose">➖ 新建平仓</button>
-            </div>
             <h3 style="font-size:13px;margin:6px 0 8px;color:var(--accent2)">当前持仓(按合约汇总, 仅算未平仓部分)</h3>
             <div class="tblwrap">
               <table class="tbl trades-tbl">
@@ -2781,10 +2779,6 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="modal" style="max-width:640px">
       <h3><span class="dot"></span><span id="tmTitle">新建开仓</span></h3>
       <div class="formgrid">
-        <label>策略 <span style="color:#ff8484">*</span>
-          <input id="tmStrategy" list="tmStrategyList" placeholder="abe" autocomplete="off">
-          <datalist id="tmStrategyList"></datalist>
-        </label>
         <label>开仓标的 <span style="color:#ff8484">*</span>
           <input id="tmUnderlying" type="text" placeholder="如 ao611">
         </label>
@@ -3631,8 +3625,8 @@ const TradeUI = {
         <td class="${pnlCls}" style="font-weight:600">${pnl ? (pnl > 0 ? '+' : '') + 'CN¥' + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
         <td>${this.fmtDate(g.last_close_date)}</td>
         <td class="row-actions">
-          <button class="iconbtn" data-act="open" data-u="${escHtml(g.underlying)}" title="新增该标的的开仓">➕</button>
-          <button class="iconbtn" data-act="close" data-u="${escHtml(g.underlying)}" title="新增该标的的平仓">➖</button>
+          <button class="iconbtn" data-act="edit" data-u="${escHtml(g.underlying)}" title="修改开仓内容">✎</button>
+          <button class="iconbtn" data-act="del" data-u="${escHtml(g.underlying)}" title="删除该标的全部记录">🗑</button>
         </td>
       </tr>`;
     }).join('');
@@ -3642,7 +3636,9 @@ const TradeUI = {
         const btn = e.target.closest('[data-act]');
         if (btn) {
           e.stopPropagation();
-          this.openEditModal(btn.dataset.act, { underlying: btn.dataset.u });
+          const u = btn.dataset.u;
+          if (btn.dataset.act === 'edit') this.editUnderlying(u);
+          else if (btn.dataset.act === 'del') this.deleteUnderlying(u);
           return;
         }
         this.loadDetail(tr.dataset.u);
@@ -3818,7 +3814,7 @@ const TradeUI = {
     const bg = $('tradeModalBg');
     if (!bg) return;
     // 重置
-    ['tmStrategy','tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
+    ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
      'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote'].forEach(id=>{ $(id).value=''; });
     $('tmCallPut').value = preset.call_put || '';
     $('tmDirection').value = preset.direction || 'buy';
@@ -3826,14 +3822,6 @@ const TradeUI = {
     $('tmError').textContent = '';
     const isOpen = type === 'open';
     $('tmTitle').textContent = preset.id ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
-
-    // 策略名: 默认 abe; 已有策略名填入 datalist 作下拉候选
-    const listEl = $('tmStrategyList');
-    if (listEl && !listEl.dataset.loaded){
-      listEl.innerHTML = '<option value="abe"><option value="威科夫">';
-      listEl.dataset.loaded = '1';
-    }
-    $('tmStrategy').value = preset.strategy || 'abe';
 
     // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取); 方向自动取反且隐藏
     const contractInput = $('tmContract');
@@ -3945,7 +3933,6 @@ const TradeUI = {
     const contractVal = contractEl.tagName === 'SELECT' ? contractEl.value : contractEl.value.trim();
     const fields = {
       id: $('tradeModalBg').dataset.editing || null,
-      strategy: $('tmStrategy').value.trim(),
       op_type: isOpen ? 'open' : 'close',
       underlying: $('tmUnderlying').value.trim(),
       contract: contractVal,
@@ -3969,7 +3956,6 @@ const TradeUI = {
   async submitModal(){
     const f = this.collectFromModal();
     const errBox = $('tmError');
-    if (!f.strategy) return errBox.textContent = '请填写策略名', false;
     if (!f.underlying) return errBox.textContent = '请填写开仓标的', false;
     if (!f.contract) return errBox.textContent = '请填写合约代码', false;
     if (f.op_type === 'open'){
@@ -3996,6 +3982,34 @@ const TradeUI = {
       const r = await fetchT('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
       const d = await r.json();
       if (!d.ok) { alert('删除失败: ' + d.error); return; }
+      await this.refresh();
+    } catch (e) { alert('删除失败: ' + e); }
+  },
+
+  /* 主表行修改/删除: 编辑最新一条 open 记录 / 删除该 underlying 全部记录 */
+  async editUnderlying(underlying){
+    try {
+      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const d = await r.json();
+      if (!d.ok || !d.operations.length){ alert('无记录可编辑'); return; }
+      // 取最早一条 open 记录(代表性"开仓内容")
+      const open = d.operations.find(x => x.op_type === 'open');
+      if (!open){ alert('该标的没有开仓记录, 无需修改'); return; }
+      this.loadDetail(underlying);   // 同时展开分页面, 让用户看到全貌
+      this.openEditModal('open', open);
+    } catch (e) { alert('加载失败: ' + e); }
+  },
+
+  async deleteUnderlying(underlying){
+    if (!confirm('确认删除 ' + underlying + ' 的全部交易记录? 此操作不可恢复')) return;
+    try {
+      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const d = await r.json();
+      if (!d.ok){ alert('加载失败'); return; }
+      for (const op of d.operations){
+        await fetchT('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+      }
+      this.closeDetail();
       await this.refresh();
     } catch (e) { alert('删除失败: ' + e); }
   },

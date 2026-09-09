@@ -269,14 +269,14 @@ async function main() {
   const sideBtns2 = await evalJs(ws, `JSON.stringify({tdNewOpen: !!document.getElementById('tdNewOpen'), tdNewClose: !!document.getElementById('tdNewClose')})`);
   const sb2 = JSON.parse(sideBtns2);
   check('分页面含「新建开仓」+「新建平仓」按钮', sb2.tdNewOpen && sb2.tdNewClose, sideBtns2);
-  // 3. 详情面板布局: flex 容器, 主表不被压缩
+  // 3. 详情布局 grid 两列同时显示
   const layoutInfoG = await evalJs(ws, `JSON.stringify((() => {
     const layout = document.querySelector('.trades-layout.has-detail');
     if (!layout) return null;
-    return {display: getComputedStyle(layout).display, overflowX: getComputedStyle(layout).overflowX};
+    return {display: getComputedStyle(layout).display};
   })())`);
   const lig = JSON.parse(layoutInfoG);
-  check('详情布局改用 flex(主表不缩 + 容器水平滚动)', lig && lig.display === 'flex' && lig.overflowX === 'auto', layoutInfoG);
+  check('详情布局 grid 两列同时显示', lig && lig.display === 'grid', layoutInfoG);
   // 4. tradesArea 内无重复标题(全局 header 由 appTitle 驱动)
   const tradeTitles = await evalJs(ws, `[...document.querySelectorAll('#tradesArea h1')].length`);
   check('tradesArea 内无重复 h1(标题仅全局 header 一个)', tradeTitles === 0, 'count=' + tradeTitles);
@@ -291,46 +291,65 @@ async function main() {
   check('资金曲线页移除 导入/导出/数据位置', fb.dataDir === false && fb.export === false && fb.import === false, fundsBtns);
   check('资金曲线页保留「清除全部」', fb.clearAll === true, fundsBtns);
 
-  // ---- 场景H: v50.2 策略名自定义 + 平仓数量校验 + 分页面更宽 ----
+  // ---- 场景H: v50.3 主页面右推 + 操作列 ✎🗑 + 详情 header 三按钮右上 + grid 同时显示 + 移除策略自定义 ----
   await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="trades"]').click()`);
   await sleep(500);
-  // 1. 策略字段存在
-  const stratField = await evalJs(ws, `!!document.getElementById('tmStrategy')`);
-  check('策略名输入字段存在', stratField === true);
-  // 2. 清理 e2e2 测试数据
+  // 1. 主页面 toolbar 「新建开仓」在最右(右推)
+  const mainToolbarOrder = await evalJs(ws, `JSON.stringify((() => {
+    const tb = document.querySelector('.trades-toolbar');
+    return [...tb.children].map(c => c.id || c.tagName);
+  })())`);
+  const mto = JSON.parse(mainToolbarOrder);
+  check('主页面 toolbar「新建开仓」在最右(右推)', mto[mto.length - 1] === 'btnNewOpen', mainToolbarOrder);
+  // 2. 策略名输入字段已移除
+  const stratGone = await evalJs(ws, `!!document.getElementById('tmStrategy')`);
+  check('策略名输入字段已移除', stratGone === false);
+  // 3. 清理 e2e 测试数据
   await evalJs(ws, `(async () => {
     const gr = await fetch('/api/trades/groups').then(r=>r.json());
     for (const g of (gr.groups||[])) {
-      if (String(g.underlying).startsWith('e2e2')) {
+      if (String(g.underlying).startsWith('e2e')) {
         const d = await fetch('/api/trades/detail?underlying=' + g.underlying).then(r=>r.json());
         for (const op of (d.operations||[])) await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:op.id})}).then(r=>r.json());
       }
     }
   })()`);
   await sleep(400);
-  // 3. 自定义策略名: api upsert 接受 strategy='自定义' 并能查询
-  const customStrat = await evalJs(ws, `(async () => {
+  // 4. 传 strategy=自定义 仍被忽略(后端固定 abe)
+  const customIgnored = await evalJs(ws, `(async () => {
     await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-      strategy:'自定义策略', underlying:'e2e2jd100', contract:'e2e2jd100P2000',
+      strategy:'自定义忽略', underlying:'e2e3jd100', contract:'e2e3jd100P2000',
       op_type:'open', direction:'buy', open_date:'2026-08-01',
       open_delta:0.25, call_put:'P', open_price:80, qty:2, premium:160
     })}).then(r=>r.json());
-    const all = await fetch('/api/trades/groups').then(r=>r.json());
-    return all.groups.filter(g => String(g.underlying).startsWith('e2e2')).map(g => g.underlying);
+    const d = await fetch('/api/trades/detail?underlying=e2e3jd100').then(r=>r.json());
+    return d.operations ? d.operations[0].strategy : null;
   })()`);
-  check('自定义策略名落库 + 主表显示', /e2e2jd100/.test(JSON.stringify(customStrat || [])), JSON.stringify(customStrat));
-  // 4. 平仓数量超额被后端拒绝(5 手 > 2 手开仓)
+  check('后端固定 abe(忽略传入 strategy)', customIgnored === 'abe', 'got=' + customIgnored);
+  // 5. 平仓数量超额仍被拒绝
   const overClose = await evalJs(ws, `(async () => {
     const r = await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-      strategy:'自定义策略', underlying:'e2e2jd100', contract:'e2e2jd100P2000',
+      underlying:'e2e3jd100', contract:'e2e3jd100P2000',
       op_type:'close', direction:'buy', close_date:'2026-08-15', open_date:'2026-08-15',
       close_qty:5, qty:5, premium:0
     })}).then(x=>x.json());
     return r;
   })()`);
   check('平仓数量超额被后端拒绝', overClose && overClose.ok === false && /超过剩余可平/.test(overClose.error || ''), JSON.stringify(overClose));
-  // 5. 详情面板展开时主表宽度不缩(flex 容器 + 主表 min-width:100%)
-  await evalJs(ws, `[...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2e2jd100')?.click()`);
+  // 6. 主表行操作列改 ✎/🗑(刷新后取最新数据)
+  await evalJs(ws, `TradeUI.refresh()`);
+  await sleep(500);
+  const rowActs = await evalJs(ws, `JSON.stringify((() => {
+    const all = [...document.querySelectorAll('#tradesTable tbody tr.clickable')].map(tr => {
+      const btns = [...tr.querySelectorAll('[data-act]')].map(b => b.dataset.act + ':' + b.textContent.trim());
+      return {u: tr.dataset.u, btns};
+    });
+    return {all: all.map(a=>a.u), e2e: all.filter(a => a.u.startsWith('e2e'))};
+  })())`);
+  const raObj = JSON.parse(rowActs);
+  check('主表行操作列含 edit(✎) 和 del(🗑)', raObj.e2e.length >= 1 && raObj.e2e[0].btns.some(b => b.startsWith('edit:')) && raObj.e2e[0].btns.some(b => b.startsWith('del:')), JSON.stringify(raObj));
+  // 7. 详情布局 grid 同时显示主表和分页面
+  await evalJs(ws, `[...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2e3jd100')?.click()`);
   await sleep(700);
   const layoutInfo = await evalJs(ws, `JSON.stringify((() => {
     const layout = document.querySelector('.trades-layout.has-detail');
@@ -339,29 +358,39 @@ async function main() {
     if (!layout) return null;
     return {
       display: getComputedStyle(layout).display,
-      mainWidth: Math.round(main.getBoundingClientRect().width),
-      sideWidth: Math.round(side.getBoundingClientRect().width),
-      overflowX: getComputedStyle(layout).overflowX,
+      gridCols: getComputedStyle(layout).gridTemplateColumns,
+      mainVisible: main.getBoundingClientRect().width > 100,
+      sideVisible: side.getBoundingClientRect().width > 100,
     };
   })())`);
   const li = JSON.parse(layoutInfo);
-  check('详情布局用 flex(主表与分页面并排可独立滚动)', li && li.display === 'flex' && li.overflowX === 'auto', layoutInfo);
-  check('分页面宽度 ≥ 880px(更宽, 表格无水平滚动)', li && li.sideWidth >= 880, layoutInfo);
-  // 6. 平仓 modal 方向被禁用且自动取反(开仓是 buy → 平仓自动 sell)
-  const closeDir = await evalJs(ws, `(async () => {
-    // 模拟点详情面板"新建平仓"按钮
-    document.getElementById('tdNewClose').click();
-    await new Promise(r=>setTimeout(r,300));
-    const dirEl = document.getElementById('tmDirection');
-    const isDisabled = dirEl.disabled;
-    const dirVal = dirEl.value;
-    const contractEl = document.getElementById('tmContract');
-    const isSelect = contractEl.tagName === 'SELECT';
-    document.getElementById('tmCancel').click();
-    return JSON.stringify({disabled: isDisabled, dirVal, contractIsSelect: isSelect});
-  })()`);
-  const cd = JSON.parse(closeDir);
-  check('平仓 modal 方向禁用且自动取反(buy→sell)', cd.disabled && cd.dirVal === 'sell' && cd.contractIsSelect, closeDir);
+  check('详情布局 grid 同时显示主表和分页面', li && li.display === 'grid' && li.mainVisible && li.sideVisible, layoutInfo);
+  // 8. 详情面板 header: 左标题 + 右三按钮(新建开仓/新建平仓/关闭)
+  const headerStructure = await evalJs(ws, `JSON.stringify((() => {
+    const head = document.querySelector('#tradeDetailPanel .td-head');
+    if (!head) return null;
+    const h2 = head.querySelector('h2');
+    const acts = [...head.querySelectorAll('.td-head-actions button')].map(b => b.id);
+    return {hasH2: !!h2, actions: acts};
+  })())`);
+  const hs = JSON.parse(headerStructure);
+  check('详情面板 header: 左标题 + 右三按钮(新建开仓/新建平仓/关闭)', hs && hs.hasH2 && hs.actions.includes('tdNewOpen') && hs.actions.includes('tdNewClose') && hs.actions.includes('tdClose'), headerStructure);
+  // 9. modal 输入框等宽对齐(同列 input 宽度一致)
+  await evalJs(ws, `TradeUI.openEditModal('open', {underlying: 'e2e3jd100'})`);
+  await sleep(300);
+  const modalCols = await evalJs(ws, `JSON.stringify((() => {
+    const grid = document.querySelector('#tradeModalBg .formgrid');
+    if (!grid) return null;
+    // 跳过 display:none 的 label(如 tmOpTypeWrap 隐藏容器)
+    const labels = [...grid.querySelectorAll(':scope > label')].filter(l => getComputedStyle(l).display !== 'none');
+    // 取第一行两个 label(开仓标的 + 合约代码)
+    const widths = labels.slice(0, 2).map(l => Math.round(l.getBoundingClientRect().width));
+    const ok = widths.length === 2 && Math.abs(widths[0] - widths[1]) < 2;
+    return {widths, ok, all: labels.length};
+  })())`);
+  const mc = JSON.parse(modalCols);
+  check('modal 输入框标签同列等宽', mc && mc.ok, JSON.stringify(mc));
+  await evalJs(ws, `document.getElementById('tmCancel').click()`);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
