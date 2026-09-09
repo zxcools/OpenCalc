@@ -2281,26 +2281,49 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .tbl tr:hover td{background:var(--panel2)}
 .tbl .num{text-align:right;font-variant-numeric:tabular-nums}
 
-/* ===== 交易记录 / 资金曲线 字号放大 (2026-09-09) =====
-   作用域限定两个页面, 不影响开仓计算页 */
-#tradesArea .tbl th, #fundsArea .tbl th{font-size:13px}
-#tradesArea .tbl td, #fundsArea .tbl td{font-size:14px}
-#tradesArea .trades-tbl th{font-size:13px}
-#tradesArea .trades-tbl td{font-size:13.5px;padding:7px 10px}
-#tradesArea .tag, #fundsArea .tag{font-size:12.5px;padding:3px 8px}
-#tradesArea .btn.xs, #fundsArea .btn.xs{font-size:12.5px;padding:4px 12px}
-#tradesArea .btn.sm, #fundsArea .btn.sm{font-size:13.5px;padding:7px 14px}
-#tradesArea .btn.ghost, #fundsArea .btn.ghost{font-size:12.5px}
-#tradesArea .chk{font-size:13.5px}
-#tradesArea .op-filter{font-size:13px}
-#tradesArea .op-filter select{font-size:13px;padding:5px 8px}
-#tradesArea .iconbtn{font-size:16px}
-#tradesArea .card h2, #fundsArea .card h2{font-size:15.5px}
-#fundsArea .funds-bar .seg button{font-size:14px;padding:8px 16px}
-#fundsArea .funds-bar .btn.sm{font-size:13.5px;padding:6px 12px}
-#tradesArea .tip, #fundsArea .tip{font-size:13px}
-#tradesArea .formgrid label, #fundsArea .formgrid label{font-size:12.5px}
-#tradesArea .help-tip, #fundsArea .help-tip{font-size:inherit}
+/* ===== 交易记录 / 资金曲线 字号放大 (2026-09-09 v2, 再调大一档) ===== */
+#tradesArea .tbl th, #fundsArea .tbl th{font-size:14px}
+#tradesArea .tbl td, #fundsArea .tbl td{font-size:15px}
+#tradesArea .trades-tbl th{font-size:14px}
+#tradesArea .trades-tbl td{font-size:14.5px;padding:8px 10px}
+#tradesArea .tag, #fundsArea .tag{font-size:13.5px;padding:3px 9px}
+#tradesArea .btn.xs, #fundsArea .btn.xs{font-size:13.5px;padding:5px 13px}
+#tradesArea .btn.sm, #fundsArea .btn.sm{font-size:14.5px;padding:7px 15px}
+#tradesArea .btn.ghost, #fundsArea .btn.ghost{font-size:13.5px}
+#tradesArea .chk{font-size:14.5px}
+#tradesArea .op-filter{font-size:14px}
+#tradesArea .op-filter select{font-size:14px;padding:5px 9px}
+#tradesArea .iconbtn{font-size:17px}
+#tradesArea .card h2, #fundsArea .card h2{font-size:16.5px}
+#fundsArea .funds-bar .seg button{font-size:15px;padding:9px 18px}
+#fundsArea .funds-bar .btn.sm{font-size:14.5px;padding:7px 13px}
+#tradesArea .tip, #fundsArea .tip{font-size:14px}
+#fundsArea .chartbox .legend{font-size:13px}
+
+/* ===== 开仓计算页 字号放大 (2026-09-09) ===== */
+#calcArea label{font-size:13.5px}
+#calcArea .dirrow .dirlabel{font-size:13.5px}
+#calcArea .unit-suffix .u{font-size:13.5px}
+#calcArea .budgetbar .k{font-size:13.5px}
+#calcArea .budgetbar .k .fml{font-size:12px}
+#calcArea .budgetbar .v small{font-size:13px}
+#calcArea .bignum .t{font-size:13px}
+#calcArea .bignum .s{font-size:12.5px}
+#calcArea .ratio-strip .l{font-size:13.5px}
+#calcArea .ratio-strip .r small{font-size:13px}
+#calcArea .details .drow{font-size:14.5px;padding:12px 18px}
+#calcArea .drow .k{font-size:13px}
+#calcArea .mode small{font-size:12px}
+#calcArea .plans-item .meta{font-size:12.5px}
+#calcArea .plans-empty{font-size:13.5px}
+#calcArea .quote .qname{font-size:13px}
+#calcArea .quote .qchg{font-size:13.5px}
+#calcArea .ladder-hd .ladder-sub{font-size:12.5px}
+#calcArea .ladder-hd .ladder-note{font-size:12px}
+#calcArea .rung .rt{font-size:12px}
+#calcArea .rung .rt b{font-size:13.5px}
+#calcArea .rung .rp{font-size:12px}
+#calcArea .tip{font-size:13.5px}
 /* 月度明细限高滚动(记录多时默认只显示最近 5 条, 其余可滚动) */
 .tbl-scroll{max-height:420px;overflow-y:auto;overflow-x:auto}
 .tbl-scroll tr.hidden{display:none}
@@ -4181,7 +4204,7 @@ const valueLabelPlugin = {
   afterDatasetsDraw(chart, args, opts){
     const {ctx} = chart;
     ctx.save();
-    const fs = (chart.options.plugins && chart.options.plugins.valueLabel && chart.options.plugins.valueLabel.fontSize) || 12;
+    const fs = (chart.options.plugins && chart.options.plugins.valueLabel && chart.options.plugins.valueLabel.fontSize) || 13;
     ctx.font = 'bold ' + fs + 'px "Segoe UI","Microsoft YaHei",sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -4696,13 +4719,13 @@ const FundUI = {
         maintainAspectRatio: false,
         plugins: {
           legend: {display: false},
-          tooltip: {intersect: false, mode: 'index',
+          tooltip: {intersect: false, mode: 'index', titleFont: {size: 14}, bodyFont: {size: 13.5},
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', autoSkip: true, maxRotation: 0}},
+          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size:13}, callback:v=>v.toLocaleString()}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size:13}, callback:v=>v.toFixed(0)+'%'}},
+          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size:13}, autoSkip: true, maxRotation: 0}},
         },
       },
     });
@@ -4733,13 +4756,13 @@ const FundUI = {
         maintainAspectRatio: false,
         plugins: {
           legend: {display: false},
-          tooltip: {intersect: false, mode: 'index',
+          tooltip: {intersect: false, mode: 'index', titleFont: {size: 14}, bodyFont: {size: 13.5},
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8'}},
+          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size:13}, callback:v=>v.toLocaleString()}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size:13}, callback:v=>v.toFixed(0)+'%'}},
+          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size:13}}},
         },
       },
     });
@@ -4813,14 +4836,14 @@ const FundUI = {
         animation: {duration: 400},
         plugins: {
           legend: {display: false},
-          valueLabel: {fontSize: 15},   // 放大图数值标签更大
+          valueLabel: {fontSize: 16},   // 放大图数值标签更大
           tooltip: {intersect: false, mode: 'index', titleFont: {size: 14}, bodyFont: {size: 13},
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size:12}, callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size:12}, callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size:12}, autoSkip: true, maxRotation: 0}},
+          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size:13.5}, callback:v=>v.toLocaleString()}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size:13.5}, callback:v=>v.toFixed(0)+'%'}},
+          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size:13.5}, autoSkip: true, maxRotation: 0}},
         },
       },
     });
