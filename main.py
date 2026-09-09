@@ -3719,6 +3719,13 @@ init();
 /* =================================================================
    期权交易记录模块（命名空间 TradeUI）
    ================================================================= */
+// 网络/连接错误友好提示(TypeError: Failed to fetch 多为服务被关闭/接管)
+function fmtNetError(e){
+  if (e && (e.name === 'TypeError' || (e.message || '').includes('fetch') || (e.message || '').includes('NetworkError'))) {
+    return '网络中断或服务已退出，请刷新页面后重试';
+  }
+  return (e && e.message) ? e.message : String(e || '未知错误');
+}
 const TradeUI = {
   groups: [],           // 主表行(按 underlying 聚合)
   detail: null,         // 当前详情(underlying)
@@ -4221,7 +4228,7 @@ const TradeUI = {
       $('tradeModalBg').classList.add('hidden');
       await this.refresh();
       return true;
-    } catch (e) { errBox.textContent = '保存失败: ' + e; return false; }
+    } catch (e) { errBox.textContent = '保存失败: ' + fmtNetError(e); return false; }
   },
 
   async deleteOp(id){
@@ -4276,7 +4283,7 @@ const TradeUI = {
       .then(r => r.json()).then(d => {
         if (!d.ok) { alert('保存失败: ' + d.error); return; }
         this.refresh();
-      }).catch(e => alert('保存失败: ' + e));
+      }).catch(e => alert('保存失败: ' + fmtNetError(e)));
   },
 
   async deletePool(id){
@@ -4650,7 +4657,7 @@ const FundUI = {
       this.editing = null;
       this.refreshAll();
     } catch (e) {
-      alert('保存失败：' + e);
+      alert('保存失败：' + fmtNetError(e));
     }
   },
 
