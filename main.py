@@ -1145,17 +1145,23 @@ def _trade_record_to_dict(r):
     }
 
 
-def trade_list_records(strategy=TRADE_STRATEGY_DEFAULT):
+def trade_list_records(strategy=None):
+    """列出交易记录; strategy=None 时返回所有策略的记录."""
     db = _fund_db()
-    rows = db.execute(
-        "SELECT * FROM trade_records WHERE strategy=? ORDER BY id ASC",
-        (strategy,),
-    ).fetchall()
+    if strategy:
+        rows = db.execute(
+            "SELECT * FROM trade_records WHERE strategy=? ORDER BY id ASC",
+            (strategy,),
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM trade_records ORDER BY id ASC").fetchall()
     return [_trade_record_to_dict(r) for r in rows]
 
 
 def trade_upsert(payload):
-    """新增/更新交易记录; 不传 id=新增; 传 id=更新. 自动维护 created_at/updated_at."""
+    """新增/更新交易记录; 不传 id=新增; 传 id=更新. 自动维护 created_at/updated_at.
+    平仓数量校验: close_qty ≤ (同一合约 open qty 总和 - 该 close 之外 close_qty 之和).
+    策略名支持自定义(默认 abe); 自定义名随备份一并保存."""
     db = _fund_db()
     now = datetime.now().isoformat(timespec="seconds")
     required = ("underlying", "contract", "op_type", "direction")
@@ -1166,6 +1172,28 @@ def trade_upsert(payload):
         raise ValueError("op_type 必须为 open / close")
     if payload["direction"] not in ALLOWED_DIRECTION:
         raise ValueError("direction 必须为 buy / sell")
+
+    strategy = (payload.get("strategy") or TRADE_STRATEGY_DEFAULT).strip()
+    if not strategy:
+        raise ValueError("策略名不能为空")
+
+    # 平仓数量校验: 不可超过开仓剩余
+    if payload["op_type"] == "close" and not payload.get("id"):
+        cq = int(payload.get("close_qty") or 0)
+        contract = payload.get("contract")
+        underlying = payload.get("underlying")
+        if cq <= 0:
+            raise ValueError("平仓数量必须 > 0")
+        opened = db.execute(
+            "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND contract=?",
+            (strategy, underlying, contract),
+        ).fetchone()[0]
+        closed = db.execute(
+            "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND contract=?",
+            (strategy, underlying, contract),
+        ).fetchone()[0]
+        if cq > opened - closed:
+            raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed))
 
     rec_id = payload.get("id")
     fields = (
@@ -1180,6 +1208,21 @@ def trade_upsert(payload):
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
         if not existing:
             raise ValueError("记录不存在 id=%s" % rec_id)
+        # 更新模式下也要校验 close_qty(排除自己)
+        if payload["op_type"] == "close":
+            cq = int(payload.get("close_qty") or 0)
+            contract = payload.get("contract")
+            underlying = payload.get("underlying")
+            opened = db.execute(
+                "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND contract=?",
+                (strategy, underlying, contract),
+            ).fetchone()[0]
+            closed_ex = db.execute(
+                "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND contract=? AND id<>?",
+                (strategy, underlying, contract, rec_id),
+            ).fetchone()[0]
+            if cq > opened - closed_ex:
+                raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed_ex))
         set_clause = ", ".join("%s=?" % f for f in fields)
         db.execute(
             "UPDATE trade_records SET " + set_clause + ", updated_at=? WHERE id=?",
@@ -1192,7 +1235,7 @@ def trade_upsert(payload):
     db.execute(
         "INSERT INTO trade_records (strategy, " + cols + ", created_at, updated_at) VALUES (?, "
         + placeholders + ", ?, ?)",
-        (TRADE_STRATEGY_DEFAULT, *vals, now, now),
+        (strategy, *vals, now, now),
     )
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -1202,7 +1245,7 @@ def trade_delete(rec_id):
     db.execute("DELETE FROM trade_records WHERE id=?", (rec_id,))
 
 
-def trade_groups(strategy=TRADE_STRATEGY_DEFAULT):
+def trade_groups(strategy=None):
     """主表汇总: 按 underlying 分组(主键=开仓标的), 输出每组:
        direction(主要方向), open_date(首次开仓), close_status(未平/部分平/全平),
        total_pnl(已实现盈亏), last_close_date(最后平仓日)."""
@@ -1518,7 +1561,7 @@ class Handler(BaseHTTPRequestHandler):
         # ---- 期权交易记录 ----
         elif path == "/api/trades/groups":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
-            strategy = (qs.get("strategy") or [TRADE_STRATEGY_DEFAULT])[0]
+            strategy = (qs.get("strategy") or [None])[0]   # None → 全部策略
             self._send(200, _json({"ok": True, "groups": trade_groups(strategy)}))
 
         elif path == "/api/trades/detail":
@@ -2064,9 +2107,16 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer}
 .chk input{accent-color:var(--accent)}
-.trades-layout{display:grid;grid-template-columns:1fr;gap:18px}
-.trades-layout.has-detail{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
-@media (max-width:900px){.trades-layout.has-detail{grid-template-columns:1fr}}
+/* 交易记录页 - 主表保持原宽, 分页面放右侧更宽不挤压; 容器横向滚动 */
+.trades-layout{display:block}
+.trades-layout.has-detail{display:flex;flex-wrap:nowrap;gap:18px;
+  align-items:flex-start;overflow-x:auto;padding-bottom:6px}
+.trades-main{flex:0 0 auto;min-width:min(100%,760px);max-width:100%}
+.trades-side{flex:0 0 auto;min-width:880px;max-width:none}
+@media (max-width:900px){
+  .trades-layout.has-detail{display:block}
+  .trades-side{min-width:0}
+}
 .trades-side{animation:fadeSlide .25s ease}
 .trades-side .card{max-height:calc(100vh - 80px);overflow:auto}
 @keyframes fadeSlide{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
@@ -2099,10 +2149,15 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .pool-chip{background:var(--panel2);padding:2px 8px;border-radius:6px;font-family:Consolas,monospace}
 
 /* 录入对话框(共用) */
-.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
-.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--sub)}
-.formgrid input,.formgrid select{width:100%}
+.formgrid{display:grid;grid-template-columns:1fr 1fr;column-gap:14px;row-gap:12px;margin-top:12px}
+.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--sub);align-items:stretch}
+.formgrid label>input,
+.formgrid label>select{width:100%;margin:0}
 .formgrid .full{grid-column:1/-1}
+.formgrid label span{font-weight:600;color:var(--text)}
+/* 平仓时字段禁用样式 */
+.formgrid label.disabled{opacity:.55}
+.formgrid label.disabled input,.formgrid label.disabled select{pointer-events:none}
 @media (max-width:640px){
   .side{width:64px;padding:16px 6px;gap:10px}
   .maintab{font-size:11px;padding:12px 2px}
@@ -2723,11 +2778,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
   <!-- 期权交易记录 录入/修改 弹窗 -->
   <div class="modalbg hidden" id="tradeModalBg">
-    <div class="modal" style="max-width:680px">
+    <div class="modal" style="max-width:640px">
       <h3><span class="dot"></span><span id="tmTitle">新建开仓</span></h3>
       <div class="formgrid">
+        <label>策略 <span style="color:#ff8484">*</span>
+          <input id="tmStrategy" list="tmStrategyList" placeholder="abe" autocomplete="off">
+          <datalist id="tmStrategyList"></datalist>
+        </label>
         <label>开仓标的 <span style="color:#ff8484">*</span>
-          <input id="tmUnderlying" type="text" placeholder="如 ao611(合约代码)">
+          <input id="tmUnderlying" type="text" placeholder="如 ao611">
         </label>
         <label id="tmContractWrap">合约代码 <span style="color:#ff8484">*</span>
           <input id="tmContract" type="text" placeholder="如 ao611P2500">
@@ -2754,7 +2813,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <option value="P">看跌</option>
           </select>
         </label>
-        <label>方向 <span style="color:#ff8484">*</span>
+        <label id="tmDirectionWrap">方向 <span style="color:#ff8484">*</span>
           <select id="tmDirection">
             <option value="buy">买入</option>
             <option value="sell">卖出</option>
@@ -2780,6 +2839,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </label>
         <label id="tmCloseQtyWrap">平仓数量
           <input id="tmCloseQty" type="number" step="1" min="1" placeholder="4">
+          <span id="tmCloseQtyHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
 
         <label>权利金(元)
@@ -3758,7 +3818,7 @@ const TradeUI = {
     const bg = $('tradeModalBg');
     if (!bg) return;
     // 重置
-    ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
+    ['tmStrategy','tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
      'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote'].forEach(id=>{ $(id).value=''; });
     $('tmCallPut').value = preset.call_put || '';
     $('tmDirection').value = preset.direction || 'buy';
@@ -3767,15 +3827,26 @@ const TradeUI = {
     const isOpen = type === 'open';
     $('tmTitle').textContent = preset.id ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
 
-    // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取)
+    // 策略名: 默认 abe; 已有策略名填入 datalist 作下拉候选
+    const listEl = $('tmStrategyList');
+    if (listEl && !listEl.dataset.loaded){
+      listEl.innerHTML = '<option value="abe"><option value="威科夫">';
+      listEl.dataset.loaded = '1';
+    }
+    $('tmStrategy').value = preset.strategy || 'abe';
+
+    // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取); 方向自动取反且隐藏
     const contractInput = $('tmContract');
     if (!isOpen && this.detail && this.detail.holdings && this.detail.holdings.length){
-      // 平仓 + 在详情页面 → 从 holdings 取下拉
       const sel = document.createElement('select');
       sel.id = 'tmContract';
+      sel.dataset.contractSelect = '1';
       this.detail.holdings.forEach((h, i) => {
         const o = document.createElement('option');
         o.value = h.contract;
+        o.dataset.remaining = h.qty;
+        o.dataset.opendir = h.direction;
+        o.dataset.callput = h.call_put || '';
         o.textContent = `${h.contract} 看${h.call_put==='P'?'跌':'涨'} ${h.direction==='buy'?'买入':'卖出'} 余${h.qty}手 @均价${h.open_price}`;
         if (i === 0) o.selected = true;
         sel.appendChild(o);
@@ -3783,8 +3854,16 @@ const TradeUI = {
       contractInput.replaceWith(sel);
       $('tmUnderlying').value = this.detail.underlying;
       $('tmUnderlying').readOnly = true;
+      // 方向: 自动取反(开仓买→平仓卖, 开仓卖→平仓买)
+      const h = this.detail.holdings[0];
+      const closeDir = h.direction === 'buy' ? 'sell' : 'buy';
+      $('tmDirection').value = closeDir;
+      $('tmDirectionWrap').classList.add('disabled');
+      $('tmDirection').disabled = true;
+      // 提示 close_qty 上限
+      this._refreshCloseQtyHint();
+      $('tmContract').addEventListener('change', () => this._refreshCloseQtyHint());
     } else if (!isOpen){
-      // 平仓但没有 detail (一般不会发生, 因为主页面没有"新建平仓"按钮)
       alert('请先在详情页里打开一个标的, 再点击「新建平仓」');
       return;
     } else {
@@ -3795,7 +3874,10 @@ const TradeUI = {
       inp.placeholder = '如 ao611P2500';
       contractInput.replaceWith(inp);
       $('tmUnderlying').value = preset.underlying || '';
-      $('tmUnderlying').readOnly = !!preset.underlying;   // 行内 + 时锁定
+      $('tmUnderlying').readOnly = !!preset.underlying;
+      $('tmDirectionWrap').classList.remove('disabled');
+      $('tmDirection').disabled = false;
+      $('tmCloseQtyHint').textContent = '';
     }
 
     // 字段显示: 开仓需要 open_date/qty/premium/open_price; 平仓需要 close_date/close_qty/close_price/pnl
@@ -3814,7 +3896,9 @@ const TradeUI = {
     // 预设值(编辑模式)
     if (preset.id){
       $('tmUnderlying').value = preset.underlying || '';
-      $('tmContract').value = preset.contract || '';
+      const contractEl = $('tmContract');
+      if (contractEl.tagName === 'INPUT') contractEl.value = preset.contract || '';
+      else if (contractEl.dataset.contractSelect){ /* 平仓 select 设 value */ contractEl.value = preset.contract || ''; }
       $('tmOpenDate').value = preset.open_date || '';
       $('tmCloseDate').value = preset.close_date || '';
       $('tmOpenDelta').value = preset.open_delta != null ? preset.open_delta : '';
@@ -3846,13 +3930,25 @@ const TradeUI = {
     bg.dataset.editing = preset.id || '';
   },
 
+  _refreshCloseQtyHint(){
+    const sel = $('tmContract');
+    if (!sel || sel.tagName !== 'SELECT') return;
+    const opt = sel.options[sel.selectedIndex];
+    const remaining = opt ? +opt.dataset.remaining : 0;
+    const hint = $('tmCloseQtyHint');
+    if (hint) hint.textContent = remaining ? ('已开仓剩余 ' + remaining + ' 手, 最多可平 ' + remaining) : '该合约无可平仓余量';
+  },
+
   collectFromModal(){
     const isOpen = $('tmOpType').value === 'open';
+    const contractEl = $('tmContract');
+    const contractVal = contractEl.tagName === 'SELECT' ? contractEl.value : contractEl.value.trim();
     const fields = {
       id: $('tradeModalBg').dataset.editing || null,
+      strategy: $('tmStrategy').value.trim(),
       op_type: isOpen ? 'open' : 'close',
       underlying: $('tmUnderlying').value.trim(),
-      contract: $('tmContract').value.trim(),
+      contract: contractVal,
       open_date: $('tmOpenDate').value,
       open_delta: $('tmOpenDelta').value === '' ? null : parseFloat($('tmOpenDelta').value),
       target_delta: $('tmTargetDelta').value === '' ? null : parseFloat($('tmTargetDelta').value),
@@ -3873,6 +3969,7 @@ const TradeUI = {
   async submitModal(){
     const f = this.collectFromModal();
     const errBox = $('tmError');
+    if (!f.strategy) return errBox.textContent = '请填写策略名', false;
     if (!f.underlying) return errBox.textContent = '请填写开仓标的', false;
     if (!f.contract) return errBox.textContent = '请填写合约代码', false;
     if (f.op_type === 'open'){

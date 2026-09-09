@@ -421,6 +421,40 @@ _m2.fund_clear_all()
 check("fund_clear_all 不动 trade_records", len(trade_list_records()) == before_trades)
 check("fund_clear_all 不动 trade_pool_snapshots", len(trade_pool_list()) == before_pools)
 
+# 9. 自定义策略名: 新建 + 备份 + 导入保留
+trade_upsert({'strategy':'威科夫测试策略','underlying':'jd100','contract':'jd100P2000',
+              'op_type':'open','direction':'buy','open_date':'2026-08-01',
+              'open_delta':0.25,'call_put':'P','open_price':80,'qty':2,'premium':160})
+all_tr = trade_list_records()
+check("自定义策略名写入", any(r['strategy']=='威科夫测试策略' for r in all_tr))
+# 按策略过滤查询
+custom_recs = [r for r in all_tr if r['strategy']=='威科夫测试策略']
+check("自定义策略记录可查询", len(custom_recs) >= 1)
+
+# 10. 平仓数量校验: 超过剩余被拒绝
+try:
+    trade_upsert({'strategy':'abe','underlying':'fu2611','contract':'fu2611C3000',
+                  'op_type':'close','direction':'buy','close_date':'2026-08-25',
+                  'close_qty':99,'open_date':'2026-08-25','qty':99,'premium':0})
+    check("平仓数量超额被拒绝", False)
+except ValueError as e:
+    check("平仓数量超额被拒绝", "超过剩余可平" in str(e), str(e))
+
+# 11. 平仓数量等于剩余 → 允许(全平)
+trade_upsert({'strategy':'abe','underlying':'fu2611','contract':'fu2611C3000',
+              'op_type':'close','direction':'buy','close_date':'2026-08-30',
+              'close_qty':3,'open_date':'2026-08-30','qty':3,'premium':0})
+det = trade_detail('fu2611')
+check("fu2611 全平后持仓=0", len(det['holdings']) == 0)
+# 再平仓超额应被拒绝
+try:
+    trade_upsert({'strategy':'abe','underlying':'fu2611','contract':'fu2611C3000',
+                  'op_type':'close','direction':'buy','close_date':'2026-08-30',
+                  'close_qty':1,'open_date':'2026-08-30','qty':1,'premium':0})
+    check("全平后再平被拒绝", False)
+except ValueError as e:
+    check("全平后再平被拒绝", "超过剩余可平" in str(e), str(e))
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
