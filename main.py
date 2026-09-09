@@ -1200,6 +1200,16 @@ def trade_upsert(payload):
         "direction", "open_price", "qty", "premium",
         "close_qty", "close_price", "pnl", "close_date", "note",
     )
+    # 兜底: close 类型允许 qty/premium 为空(平仓字段用 close_qty/pnl 表达; API 直调漏传不报错)
+    if payload.get("op_type") == "close":
+        if payload.get("qty") is None:
+            payload["qty"] = 0
+        if payload.get("premium") is None:
+            payload["premium"] = 0.0
+        if payload.get("open_price") is None:
+            payload["open_price"] = 0.0
+        if payload.get("open_date") is None:
+            payload["open_date"] = ""
     vals = [payload.get(f) for f in fields]
     if rec_id:
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
@@ -3780,6 +3790,14 @@ const TradeUI = {
     $('tmCancel').addEventListener('click', () => $('tradeModalBg').classList.add('hidden'));
     $('tradeModalBg').addEventListener('click', e => { if (e.target === $('tradeModalBg')) $('tradeModalBg').classList.add('hidden'); });
     $('tmSave').addEventListener('click', () => this.submitModal());
+    // 回车保存: 在 tradeModalBg 内任意 input/select 按 Enter 直接保存(shift+enter/textarea 不触发)
+    $('tradeModalBg').addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      if ($('tradeModalBg').classList.contains('hidden')) return;
+      if (e.target.tagName === 'TEXTAREA') return;
+      e.preventDefault();
+      $('tmSave').click();
+    });
     // 侧边栏全局按钮: 委托给 FundUI(导出已含交易记录)
     const se = $('btnExport'); const si = $('btnImport');
     if (se) se.addEventListener('click', () => FundUI.exportBackup());
@@ -4074,11 +4092,26 @@ const TradeUI = {
     $('tmOpType').value = type;
     $('tmError').textContent = '';
     const isOpen = type === 'open';
-    $('tmTitle').textContent = preset.id ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
+    const isEdit = !!preset.id;
+    $('tmTitle').textContent = isEdit ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
 
     // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取); 方向自动取反且隐藏
     const contractInput = $('tmContract');
-    if (!isOpen && this.detail && this.detail.holdings && this.detail.holdings.length){
+    if (!isOpen && isEdit){
+      // 修改已有平仓记录: 直接用 preset 数据填充, 不依赖 holdings(全部平完时 holdings 为空也能编辑)
+      const inp = document.createElement('input');
+      inp.id = 'tmContract';
+      inp.type = 'text';
+      contractInput.replaceWith(inp);
+      $('tmUnderlying').value = preset.underlying || '';
+      $('tmUnderlying').readOnly = true;
+      $('tmDirectionWrap').classList.add('disabled');
+      $('tmDirection').disabled = true;
+      $('tmDirection').value = preset.direction || 'sell';
+      $('tmCallPut').value = preset.call_put || '';
+      $('tmCallPut').disabled = true;
+      $('tmCloseQtyHint').textContent = '';
+    } else if (!isOpen && this.detail && this.detail.holdings && this.detail.holdings.length){
       const sel = document.createElement('select');
       sel.id = 'tmContract';
       sel.dataset.contractSelect = '1';
