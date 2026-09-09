@@ -509,6 +509,36 @@ async function main() {
   const cf = JSON.parse(caseFix);
   check('合约大小写不一致仍能正确扣减(主表已平仓+持仓空)', cf.status === '已平仓' && cf.holdingsLen === 0, caseFix);
 
+  // ---- 场景K: 持仓均价只算未平仓部分(开5@500→平3→开5@200, 应得7手@285.71) ----
+  const avgFix = await evalJs(ws, `(async () => {
+    const cleanup = async (u) => {
+      const d = await fetch('/api/trades/detail?underlying=' + u).then(r=>r.json());
+      for (const op of (d.operations||[])) await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:op.id})}).then(r=>r.json());
+    };
+    await cleanup('e2eavg');
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2eavg', contract:'e2eavgP2500', op_type:'open', direction:'buy',
+      open_date:'2026-09-09', call_put:'P', open_price:500, qty:5, premium:2500
+    })}).then(r=>r.json());
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2eavg', contract:'e2eavgP2500', op_type:'close', direction:'sell',
+      close_date:'2026-09-09', open_date:'2026-09-09', close_qty:3, qty:3, premium:0, pnl:300
+    })}).then(r=>r.json());
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2eavg', contract:'e2eavgP2500', op_type:'open', direction:'buy',
+      open_date:'2026-09-09', call_put:'P', open_price:200, qty:5, premium:1000
+    })}).then(r=>r.json());
+    const det = await fetch('/api/trades/detail?underlying=e2eavg').then(r=>r.json());
+    return JSON.stringify({holdings: det.holdings});
+  })()`);
+  const af = JSON.parse(avgFix);
+  const h0 = af.holdings[0];
+  check('持仓均价只算未平仓部分(7手@(2×500+5×200)/7≈285.71)',
+    h0 && h0.qty === 7 && Math.abs(h0.open_price - 285.7143) < 0.01 && Math.abs(h0.premium - 2000) < 0.01,
+    JSON.stringify(h0));
+  const tipText = await evalJs(ws, `document.querySelector('.help-tip[data-tip]')?.dataset.tip || ''`);
+  check('「开仓均价 ?」含 tooltip 说明(只算未平仓部分)', /未平仓/.test(tipText), tipText);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();

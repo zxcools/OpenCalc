@@ -1319,51 +1319,66 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT):
     opens = [x for x in items if x["op_type"] == "open"]
     closes = [x for x in items if x["op_type"] == "close"]
 
-    # 按合约累计: left=剩余数量, cost_left=剩余开仓金额, premium_left=剩余权利金(大小写不敏感避免扣减失败)
+    # 按合约分组: 每个 open 维护自己的剩余手数, close 按时间 FIFO 逐单扣减(不按比例摊薄, 确保均价只算未平仓部分)
     def _k(c): return (c or "").strip().upper()
-    by_c = {}
+    groups = {}  # k -> {orig_contract, call_put, direction, opens:[{qty_left, price_each, premium_each}], left, cost_left, premium_left, last_open_date}
     for x in opens:
         k = _k(x["contract"])
-        c = by_c.setdefault(k, {
+        g = groups.setdefault(k, {
             "orig_contract": x["contract"], "call_put": x["call_put"], "direction": x["direction"],
-            "left": 0, "cost_left": 0.0, "premium_left": 0.0, "last_open_date": "",
+            "opens": [], "left": 0, "cost_left": 0.0, "premium_left": 0.0, "last_open_date": "",
         })
-        c["left"] += x["qty"]
-        c["cost_left"] += (x["open_price"] or 0) * x["qty"]
-        c["premium_left"] += x["premium"] or 0
-        c["last_open_date"] = x["open_date"] or c["last_open_date"]
+        qty = x["qty"] or 0
+        if qty <= 0:
+            continue
+        # 每手均价 + 每手权利金(平均到每手), close 时按手数精确扣减
+        g["opens"].append({
+            "qty_left": qty,
+            "price_each": (x["open_price"] or 0),
+            "premium_each": (x["premium"] or 0) / qty if qty else 0,
+        })
+        g["left"] += qty
+        g["cost_left"] += (x["open_price"] or 0) * qty
+        g["premium_left"] += x["premium"] or 0
+        if (x["open_date"] or "") > g["last_open_date"]:
+            g["last_open_date"] = x["open_date"] or g["last_open_date"]
 
-    # 遍历 close, FIFO 扣除 left + 同步扣减 cost_left / premium_left
-    for x in closes:
+    # close 按时间 FIFO(按 close_date 升序逐单扣减, 同一合约内按 open_date 升序的 opens 顺序扣)
+    closes_sorted = sorted(closes, key=lambda x: x.get("close_date") or "")
+    for x in closes_sorted:
+        g = groups.get(_k(x["contract"]))
+        if not g:
+            continue
         cq = x["close_qty"] or 0
         if cq <= 0:
             continue
-        c = by_c.get(_k(x["contract"]))
-        if not c:
-            continue
-        if c["left"] <= 0:
-            break
-        take = min(cq, c["left"])
-        if c["left"] > 0:
-            ratio = take / c["left"]
-            c["cost_left"] -= c["cost_left"] * ratio
-            c["premium_left"] -= c["premium_left"] * ratio
-        c["left"] -= take
+        for o in g["opens"]:
+            if cq <= 0:
+                break
+            if o["qty_left"] <= 0:
+                continue
+            take = min(cq, o["qty_left"])
+            o["qty_left"] -= take
+            g["left"] -= take
+            g["cost_left"] -= take * o["price_each"]
+            g["premium_left"] -= take * o["premium_each"]
+            cq -= take
 
     holdings = []
-    for cn, c in by_c.items():
-        if c["left"] <= 0:
+    for k, g in groups.items():
+        if g["left"] <= 0:
             continue
-        avg = round(c["cost_left"] / c["left"], 4) if c["left"] > 0 else 0
+        avg = round(g["cost_left"] / g["left"], 4) if g["left"] > 0 else 0
         holdings.append({
-            "contract": c["orig_contract"],
-            "call_put": c["call_put"],
-            "direction": c["direction"],
+            "contract": g["orig_contract"],
+            "call_put": g["call_put"],
+            "direction": g["direction"],
             "open_price": avg,           # 仅未平仓部分加权均价
-            "qty": c["left"],
-            "premium": round(c["premium_left"], 2),
-            "last_open_date": c["last_open_date"],
+            "qty": g["left"],
+            "premium": round(g["premium_left"], 2),
+            "last_open_date": g["last_open_date"],
         })
+
     # 操作记录: 按日期升序(open_date 或 close_date)
     def _op_dt(x):
         return x["open_date"] if x["op_type"] == "open" else x["close_date"]
@@ -2126,6 +2141,15 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-side{animation:fadeSlide .25s ease}
 .trades-tbl th,.trades-tbl td{white-space:nowrap}
 .tblwrap{overflow-x:auto}
+/* 表头帮助问号 tooltip(仅算未平仓部分说明等) */
+.help-tip{position:relative;cursor:help;border-bottom:1px dashed var(--sub)}
+.help-tip:hover::after{
+  content:attr(data-tip);position:absolute;left:50%;top:calc(100% + 6px);transform:translateX(-50%);
+  background:var(--panel2);color:var(--text);padding:6px 10px;border-radius:6px;
+  border:1px solid var(--border);box-shadow:0 4px 12px rgba(0,0,0,.3);
+  font-size:11px;line-height:1.4;white-space:normal;width:max-content;max-width:260px;
+  z-index:100;pointer-events:none
+}
 @keyframes fadeSlide{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
 
 /* 详情面板 header: 左标题 + 右操作按钮组(新建开仓/新建平仓/关闭) */
@@ -2708,7 +2732,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               <table class="tbl trades-tbl">
                 <thead><tr>
                   <th>合约代码</th><th>看涨看跌</th><th>方向</th>
-                  <th>开仓均价</th><th>数量</th><th>权利金</th>
+                  <th><span class="help-tip" data-tip="仅算未平仓部分(扣减已平仓后剩余的开仓手数)的加权均价, 不会受已平仓的开仓成本影响">开仓均价 ?</span></th><th>数量</th><th>权利金</th>
                 </tr></thead>
                 <tbody id="tdHoldings"></tbody>
               </table>
