@@ -2447,6 +2447,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <button data-fz="md" class="active">A</button>
         <button data-fz="lg">A+</button>
       </div>
+      <button class="iconbtn" id="refreshBtn" title="刷新页面(网络中断/数据异常时点此恢复)">🔄</button>
       <button class="iconbtn" id="pinBtn" title="窗口置顶（始终显示在其他窗口之上）">📌</button>
       <button class="iconbtn" id="themeBtn" title="切换主题">🌙</button>
       <button class="iconbtn" id="exitBtn" title="退出应用">✕</button>
@@ -3399,6 +3400,9 @@ function applyTheme(t){
 $('themeBtn').addEventListener('click',()=>{
   applyTheme(document.body.dataset.theme==='dark' ? 'light' : 'dark');
 });
+
+/* 刷新页面: 网络中断/数据异常时一键 reload(数据存本地, 不会丢失) */
+$('refreshBtn').addEventListener('click',()=>location.reload());
 
 /* 字号档位: 小(sm) / 中(md) / 大(lg) — body class 覆盖 CSS 变量组 */
 const FONT_LEVELS = ['sm','md','lg'];

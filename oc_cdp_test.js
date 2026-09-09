@@ -637,6 +637,19 @@ async function main() {
   const tipText = await evalJs(ws, `document.querySelector('.help-tip[data-tip]')?.dataset.tip || ''`);
   check('「开仓均价 ?」含 tooltip 说明(只算未平仓部分)', /未平仓/.test(tipText), tipText);
 
+  // ---- 场景N: 顶栏刷新按钮存在(在切换器后, 📌 前) ----
+  const refreshBtn = await evalJs(ws, `JSON.stringify((() => {
+    const tb = document.querySelector('.topbtns');
+    const arr = [...tb.children];
+    return {
+      has: !!document.getElementById('refreshBtn'),
+      txt: (document.getElementById('refreshBtn') || {}).textContent || '',
+      between: arr.findIndex(el => el.id === 'fontSeg') < arr.findIndex(el => el.id === 'refreshBtn') && arr.findIndex(el => el.id === 'refreshBtn') < arr.findIndex(el => el.id === 'pinBtn')
+    };
+  })())`);
+  const rb = JSON.parse(refreshBtn);
+  check('顶栏刷新按钮在 fzseg 后、pinBtn 前', rb.has && /🔄/.test(rb.txt) && rb.between, refreshBtn);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();
