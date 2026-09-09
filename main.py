@@ -2101,15 +2101,19 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-toolbar > .spacer{flex:1}
 .chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer}
 .chk input{accent-color:var(--accent)}
-/* 交易记录页 - 主表 + 分页面同时可见, 分页面略宽(grid 1fr 1.2fr), 无横向滚动 */
-.trades-layout{display:block}
-.trades-layout.has-detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:18px;align-items:flex-start}
-.trades-main{min-width:0}
-.trades-side{min-width:0}
-.trades-side .card{max-height:calc(100vh - 80px);overflow:auto}
-.trades-side .tblwrap{overflow-x:auto}   /* 表内可横滚(仅在分页面表格容器内) */
-@media (max-width:900px){
-  .trades-layout.has-detail{display:block}
+/* 交易记录页 - 主表保持 100% 视口宽不变, 分页面用 fixed 浮在右侧(不挤压主表) */
+.trades-layout{display:block;position:relative}
+.trades-layout.has-detail .trades-main{width:100%;min-width:0}
+.trades-layout.has-detail .trades-side{
+  position:fixed;top:60px;right:0;width:min(720px,52vw);height:calc(100vh - 60px);
+  z-index:50;background:var(--panel);border-left:1px solid var(--panel2);
+  box-shadow:-4px 0 18px rgba(0,0,0,.4);overflow:auto;animation:fadeSlide .25s ease
+}
+@media (max-width:1100px){
+  .trades-layout.has-detail .trades-side{
+    position:relative;top:auto;right:auto;width:100%;height:auto;
+    border-left:none;box-shadow:none
+  }
 }
 .trades-side{animation:fadeSlide .25s ease}
 @keyframes fadeSlide{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
@@ -2151,7 +2155,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .formgrid label>input,
 .formgrid label>select{width:100%;margin:0;box-sizing:border-box;min-width:0}
 .formgrid .full{grid-column:1/-1}
-.formgrid label span{font-weight:600;color:var(--text)}
+.formgrid .req{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;font-weight:600;color:var(--text)}
+.formgrid .req i{color:#ff8484;font-style:normal;font-weight:bold;margin-left:1px}
 /* 平仓时字段禁用样式 */
 .formgrid label.disabled{opacity:.55}
 .formgrid label.disabled input,.formgrid label.disabled select{pointer-events:none}
@@ -2779,10 +2784,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="modal" style="max-width:640px">
       <h3><span class="dot"></span><span id="tmTitle">新建开仓</span></h3>
       <div class="formgrid">
-        <label>开仓标的 <span style="color:#ff8484">*</span>
+        <label><span class="req">开仓标的 <i>*</i></span>
           <input id="tmUnderlying" type="text" placeholder="如 ao611">
         </label>
-        <label id="tmContractWrap">合约代码 <span style="color:#ff8484">*</span>
+        <label id="tmContractWrap"><span class="req">合约代码 <i>*</i></span>
           <input id="tmContract" type="text" placeholder="如 ao611P2500">
         </label>
         <label id="tmOpTypeWrap" style="display:none">
@@ -2793,7 +2798,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           </select>
         </label>
 
-        <label>开仓日期 <span style="color:#ff8484">*</span>
+        <label><span class="req">开仓日期 <i>*</i></span>
           <input id="tmOpenDate" type="date">
         </label>
         <label>平仓日期
@@ -2807,7 +2812,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <option value="P">看跌</option>
           </select>
         </label>
-        <label id="tmDirectionWrap">方向 <span style="color:#ff8484">*</span>
+        <label id="tmDirectionWrap"><span class="req">方向 <i>*</i></span>
           <select id="tmDirection">
             <option value="buy">买入</option>
             <option value="sell">卖出</option>
@@ -2828,7 +2833,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <input id="tmClosePrice" type="number" step="0.0001" min="0" placeholder="510">
         </label>
 
-        <label>数量 <span style="color:#ff8484">*</span>
+        <label><span class="req">数量 <i>*</i></span>
           <input id="tmQty" type="number" step="1" min="1" placeholder="4">
         </label>
         <label id="tmCloseQtyWrap">平仓数量

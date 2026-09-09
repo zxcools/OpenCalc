@@ -260,6 +260,9 @@ async function main() {
   check('侧边栏导出/导入按钮 + 3个tab', sb.ex === true && sb.im === true && sb.tabs === 3, sideBtns);
 
   // ---- 场景G: UI 结构打磨 (v50.1) ----
+  // 先关掉场景 F 留下的详情面板, 保证干净的 has-detail 检测
+  await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
+  await sleep(400);
   // 1. 主页面 toolbar 只保留「新建开仓」(无「新建平仓」)
   const mainToolbar = await evalJs(ws, `JSON.stringify({newOpen: !!document.getElementById('btnNewOpen'), newClose: !!document.getElementById('btnNewClose'), onlyOpen: !!document.getElementById('tradesOnlyOpen'), showAll: !!document.getElementById('btnShowAll')})`);
   const mt = JSON.parse(mainToolbar);
@@ -269,14 +272,15 @@ async function main() {
   const sideBtns2 = await evalJs(ws, `JSON.stringify({tdNewOpen: !!document.getElementById('tdNewOpen'), tdNewClose: !!document.getElementById('tdNewClose')})`);
   const sb2 = JSON.parse(sideBtns2);
   check('分页面含「新建开仓」+「新建平仓」按钮', sb2.tdNewOpen && sb2.tdNewClose, sideBtns2);
-  // 3. 详情布局 grid 两列同时显示
+  // 3. 详情布局: 无 detail 时是 block, 有 detail 时主表不变 + 分页面 fixed 浮在右侧(由场景 H 第 7 项验证)
   const layoutInfoG = await evalJs(ws, `JSON.stringify((() => {
-    const layout = document.querySelector('.trades-layout.has-detail');
+    const layout = document.querySelector('.trades-layout');
+    const has = document.querySelector('.trades-layout.has-detail');
     if (!layout) return null;
-    return {display: getComputedStyle(layout).display};
+    return {display: getComputedStyle(layout).display, hasDetail: !!has};
   })())`);
   const lig = JSON.parse(layoutInfoG);
-  check('详情布局 grid 两列同时显示', lig && lig.display === 'grid', layoutInfoG);
+  check('交易记录页布局(无详情时 block, 分页面隐藏)', lig && lig.display === 'block' && !lig.hasDetail, layoutInfoG);
   // 4. tradesArea 内无重复标题(全局 header 由 appTitle 驱动)
   const tradeTitles = await evalJs(ws, `[...document.querySelectorAll('#tradesArea h1')].length`);
   check('tradesArea 内无重复 h1(标题仅全局 header 一个)', tradeTitles === 0, 'count=' + tradeTitles);
@@ -348,7 +352,11 @@ async function main() {
   })())`);
   const raObj = JSON.parse(rowActs);
   check('主表行操作列含 edit(✎) 和 del(🗑)', raObj.e2e.length >= 1 && raObj.e2e[0].btns.some(b => b.startsWith('edit:')) && raObj.e2e[0].btns.some(b => b.startsWith('del:')), JSON.stringify(raObj));
-  // 7. 详情布局 grid 同时显示主表和分页面
+  // 7. 详情布局: 主表保持原宽(不被挤压), 分页面 fixed 浮在右侧
+  // 先关掉 detail 取主表无 detail 时的宽度, 再开 detail 后对比(应近似相等 → "不变")
+  await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
+  await sleep(400);
+  const mainWidthNoDetail = await evalJs(ws, `Math.round(document.querySelector('.trades-main').getBoundingClientRect().width)`);
   await evalJs(ws, `[...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2e3jd100')?.click()`);
   await sleep(700);
   const layoutInfo = await evalJs(ws, `JSON.stringify((() => {
@@ -356,15 +364,18 @@ async function main() {
     const main = document.querySelector('.trades-main');
     const side = document.querySelector('.trades-side');
     if (!layout) return null;
+    const sideCS = getComputedStyle(side);
     return {
-      display: getComputedStyle(layout).display,
-      gridCols: getComputedStyle(layout).gridTemplateColumns,
-      mainVisible: main.getBoundingClientRect().width > 100,
+      sidePosition: sideCS.position,
+      sideRight: sideCS.right,
+      sideWidth: Math.round(side.getBoundingClientRect().width),
+      mainWidth: Math.round(main.getBoundingClientRect().width),
       sideVisible: side.getBoundingClientRect().width > 100,
     };
   })())`);
   const li = JSON.parse(layoutInfo);
-  check('详情布局 grid 同时显示主表和分页面', li && li.display === 'grid' && li.mainVisible && li.sideVisible, layoutInfo);
+  check('分页面 fixed 浮在右侧(width ≈ 720px, z-index 浮层)', li && li.sidePosition === 'fixed' && li.sideWidth >= 600, layoutInfo);
+  check(`主表宽度保持不变(无详情 ${mainWidthNoDetail}px ≈ 有详情 ${li.mainWidth}px)`, li && Math.abs(li.mainWidth - mainWidthNoDetail) < 5, layoutInfo);
   // 8. 详情面板 header: 左标题 + 右三按钮(新建开仓/新建平仓/关闭)
   const headerStructure = await evalJs(ws, `JSON.stringify((() => {
     const head = document.querySelector('#tradeDetailPanel .td-head');

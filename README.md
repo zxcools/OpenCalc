@@ -52,6 +52,10 @@
 
 ## 📦 版本更新
 
+### v50.4（2026-09-09）
+- **🪟 主表保持原宽不变, 分页面 fixed 浮在右侧**: 详情布局改 `display:fixed`, 主表始终 100% 视口宽(不变), 分页面 `position:fixed; top:60px; right:0; width: min(720px, 52vw); z-index: 50; box-shadow` 浮在右侧, 不挤压主表; 窄屏(≤1100px)fallback normal 流
+- **✳ 必填项 * 与文字同一行**: modal 必填 label 把"文字 + *"包在同一个 `<span class="req">` 内, CSS `inline-flex + nowrap`, 避免 flex column 把 text-node 和 inline-span blockify 成两行
+
 ### v50.3（2026-09-09）
 - **📐 详情布局同时显示**: 从 flex 横滚改为 grid `1fr 1.2fr`, 主表与分页面同时可见不需滚动; 分页面略宽以容纳 12 列操作记录
 - **📌 主页面「新建开仓」放右上角**: toolbar 加 spacer 推到行尾
