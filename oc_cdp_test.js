@@ -483,6 +483,32 @@ async function main() {
   check('平仓操作行显示权利金 /', cr && cr.txt.includes('/'), cr ? cr.txt : 'null');
   check('平仓操作行看涨看跌与原合约一致(看涨)', cr && /看涨/.test(cr.txt), cr ? cr.txt : 'null');
 
+  // ---- 场景J: 大小写不一致仍能正确扣减(后端按合约大小写不敏感) ----
+  const caseFix = await evalJs(ws, `(async () => {
+    const cleanup = async (u) => {
+      const d = await fetch('/api/trades/detail?underlying=' + u).then(r=>r.json());
+      for (const op of (d.operations||[])) await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:op.id})}).then(r=>r.json());
+    };
+    await cleanup('e2ecase');
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2ecase', contract:'E2ECASEP2500', op_type:'open', direction:'buy',
+      open_date:'2026-09-01', call_put:'P', open_price:700, qty:5, premium:2500
+    })}).then(r=>r.json());
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2ecase', contract:'e2ecasep2500', op_type:'close', direction:'buy',
+      close_date:'2026-09-09', open_date:'2026-09-09', close_qty:3, qty:3, premium:0, pnl:-570
+    })}).then(r=>r.json());
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2ecase', contract:'e2ecasep2500', op_type:'close', direction:'buy',
+      close_date:'2026-09-09', open_date:'2026-09-09', close_qty:2, qty:2, premium:0, pnl:-200
+    })}).then(r=>r.json());
+    const det = await fetch('/api/trades/detail?underlying=e2ecase').then(r=>r.json());
+    const grp = (await fetch('/api/trades/groups').then(r=>r.json())).groups.find(g => g.underlying === 'e2ecase');
+    return JSON.stringify({status: grp ? grp.close_status : null, holdingsLen: det.holdings.length});
+  })()`);
+  const cf = JSON.parse(caseFix);
+  check('合约大小写不一致仍能正确扣减(主表已平仓+持仓空)', cf.status === '已平仓' && cf.holdingsLen === 0, caseFix);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();

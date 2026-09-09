@@ -1174,7 +1174,8 @@ def trade_upsert(payload):
 
     strategy = TRADE_STRATEGY_DEFAULT   # 固定 abe(自定义策略 UI 已撤除)
 
-    # 平仓数量校验: 不可超过开仓剩余
+    # 平仓数量校验: 不可超过开仓剩余(按合约大小写不敏感匹配)
+    def _k(c): return (c or "").strip().upper()
     if payload["op_type"] == "close" and not payload.get("id"):
         cq = int(payload.get("close_qty") or 0)
         contract = payload.get("contract")
@@ -1182,12 +1183,12 @@ def trade_upsert(payload):
         if cq <= 0:
             raise ValueError("平仓数量必须 > 0")
         opened = db.execute(
-            "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND contract=?",
-            (strategy, underlying, contract),
+            "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=?",
+            (strategy, underlying, _k(contract)),
         ).fetchone()[0]
         closed = db.execute(
-            "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND contract=?",
-            (strategy, underlying, contract),
+            "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=?",
+            (strategy, underlying, _k(contract)),
         ).fetchone()[0]
         if cq > opened - closed:
             raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed))
@@ -1209,12 +1210,12 @@ def trade_upsert(payload):
             contract = payload.get("contract")
             underlying = payload.get("underlying")
             opened = db.execute(
-                "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND contract=?",
-                (strategy, underlying, contract),
+                "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=?",
+                (strategy, underlying, _k(contract)),
             ).fetchone()[0]
             closed_ex = db.execute(
-                "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND contract=? AND id<>?",
-                (strategy, underlying, contract, rec_id),
+                "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=? AND id<>?",
+                (strategy, underlying, _k(contract), rec_id),
             ).fetchone()[0]
             if cq > opened - closed_ex:
                 raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed_ex))
@@ -1257,15 +1258,20 @@ def trade_groups(strategy=None):
         # 首次开仓日期
         open_dates = [x["open_date"] for x in opens if x["open_date"]]
         first_open = min(open_dates) if open_dates else ""
-        # 持仓数量 = 开仓 - 平仓 (按合约)
+        # 持仓数量 = 开仓 - 平仓 (按合约, 大小写不敏感避免扣减失败)
+        def _k(c): return (c or "").strip().upper()
         by_c = {}
         for x in opens:
-            by_c.setdefault(x["contract"], {"opened": 0, "closed": 0, "open_cost": 0.0})
-            by_c[x["contract"]]["opened"] += x["qty"]
-            by_c[x["contract"]]["open_cost"] += (x["open_price"] or 0) * x["qty"]
+            by_c.setdefault(_k(x["contract"]), {"opened": 0, "closed": 0, "open_cost": 0.0,
+                                                "direction": x.get("direction", "")})
+            k = _k(x["contract"])
+            by_c[k]["opened"] += x["qty"]
+            by_c[k]["open_cost"] += (x["open_price"] or 0) * x["qty"]
         for x in closes:
-            by_c.setdefault(x["contract"], {"opened": 0, "closed": 0, "open_cost": 0.0})
-            by_c[x["contract"]]["closed"] += (x["close_qty"] or 0)
+            k = _k(x["contract"])
+            if k not in by_c:
+                by_c[k] = {"opened": 0, "closed": 0, "open_cost": 0.0, "direction": ""}
+            by_c[k]["closed"] += (x["close_qty"] or 0)
         has_open_position = any(
             (c["opened"] - c["closed"]) > 0 for c in by_c.values()
         )
@@ -1275,9 +1281,9 @@ def trade_groups(strategy=None):
         # 方向: 主方向=持仓最多的合约的方向; 无持仓取最近开仓的方向
         direction = ""
         if has_open_position:
-            for c_name, st in by_c.items():
+            for c_key, st in by_c.items():
                 if (st["opened"] - st["closed"]) > 0:
-                    rec = next((x for x in opens if x["contract"] == c_name), None)
+                    rec = next((x for x in opens if _k(x["contract"]) == c_key), None)
                     if rec:
                         direction = rec["direction"]
                         break
@@ -1313,11 +1319,13 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT):
     opens = [x for x in items if x["op_type"] == "open"]
     closes = [x for x in items if x["op_type"] == "close"]
 
-    # 按合约累计: left=剩余数量, cost_left=剩余开仓金额, premium_left=剩余权利金
+    # 按合约累计: left=剩余数量, cost_left=剩余开仓金额, premium_left=剩余权利金(大小写不敏感避免扣减失败)
+    def _k(c): return (c or "").strip().upper()
     by_c = {}
     for x in opens:
-        c = by_c.setdefault(x["contract"], {
-            "contract": x["contract"], "call_put": x["call_put"], "direction": x["direction"],
+        k = _k(x["contract"])
+        c = by_c.setdefault(k, {
+            "orig_contract": x["contract"], "call_put": x["call_put"], "direction": x["direction"],
             "left": 0, "cost_left": 0.0, "premium_left": 0.0, "last_open_date": "",
         })
         c["left"] += x["qty"]
@@ -1330,7 +1338,7 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT):
         cq = x["close_qty"] or 0
         if cq <= 0:
             continue
-        c = by_c.get(x["contract"])
+        c = by_c.get(_k(x["contract"]))
         if not c:
             continue
         if c["left"] <= 0:
@@ -1348,7 +1356,7 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT):
             continue
         avg = round(c["cost_left"] / c["left"], 4) if c["left"] > 0 else 0
         holdings.append({
-            "contract": c["contract"],
+            "contract": c["orig_contract"],
             "call_put": c["call_put"],
             "direction": c["direction"],
             "open_price": avg,           # 仅未平仓部分加权均价
@@ -1875,7 +1883,7 @@ body{
     radial-gradient(900px 420px at 85% -10%, rgba(91,140,255,.16), transparent 60%),
     radial-gradient(700px 380px at -10% 30%, rgba(125,227,255,.10), transparent 55%);
 }
-.wrap{max-width:1180px;margin-left:0;margin-right:auto;padding:28px 20px 60px}
+.wrap{max-width:1100px;margin-left:0;margin-right:auto;padding:28px 20px 60px}
 
 /* 顶部 */
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:26px;flex-wrap:wrap}
