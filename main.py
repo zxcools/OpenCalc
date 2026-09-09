@@ -3961,7 +3961,7 @@ const TradeUI = {
         <td>${qtyTxt}</td>
         <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${premiumTxt}</td>
-        <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':'CN¥')+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+        <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':(o.pnl<0?'-CN¥':'CN¥'))+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
         <td><span class="tag ${st.cls}">${st.txt}</span></td>
         <td class="row-actions">
           <button class="iconbtn" data-edit="${o.id}" title="修改">✎</button>
