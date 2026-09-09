@@ -185,6 +185,80 @@ async function main() {
   const entryO = await evalJs(ws, `document.getElementById('entryO').value`);
   check('期权切换品种→每手权利金自动清空', entryO === '', 'entryO=' + entryO);
 
+  // ---- 场景F: 交易记录模块(abe期权) ----
+  // 通过页面内 fetch 直接造数(prompt 弹窗无法 headless 自动化), 再验证 UI 渲染链路
+  await evalJs(ws, `(async () => {
+    const post = (p) => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)}).then(r=>r.json());
+    const clean = await fetch('/api/trades/groups').then(r=>r.json());
+    // 清理旧的 e2e 测试数据(underlying=e2e)
+    const groups = clean.groups || [];
+    for (const g of groups) {
+      if (String(g.underlying).startsWith('e2e')) {
+        const d = await fetch('/api/trades/detail?underlying=' + g.underlying).then(r=>r.json());
+        for (const op of (d.operations||[])) await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:op.id})}).then(r=>r.json());
+      }
+    }
+    await post({underlying:'e2eao611', contract:'e2eao611P2500', op_type:'open', direction:'buy',
+      open_date:'2026-08-27', open_delta:0.19, target_delta:0.45, call_put:'P', open_price:700, qty:4, premium:1400});
+    return 'seeded';
+  })()`);
+  await sleep(400);
+  // 切到交易记录 tab
+  await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="trades"]').click()`);
+  await sleep(600);
+  const tradesVisible = await evalJs(ws, `!document.getElementById('tradesArea').classList.contains('hidden')`);
+  check('交易记录 tab 切换可见', tradesVisible === true);
+  const rowCount = await evalJs(ws, `document.querySelectorAll('#tradesTable tbody tr.clickable').length`);
+  check('主表渲染新开仓行', rowCount >= 1, 'rows=' + rowCount);
+  const mainRow = await evalJs(ws, `JSON.stringify((() => {
+    const tr = [...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2eao611');
+    return tr ? tr.innerText : null;
+  })())`);
+  check('主表行显示未平仓 + 开仓日期', /未平仓/.test(mainRow || '') && /2026-08-27/.test(mainRow || ''), mainRow);
+  // 点行 → 右侧详情面板
+  await evalJs(ws, `[...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2eao611').click()`);
+  await sleep(800);
+  const panelVisible = await evalJs(ws, `!document.getElementById('tradeDetailPanel').classList.contains('hidden')`);
+  const layoutDetail = await evalJs(ws, `document.querySelector('.trades-layout').classList.contains('has-detail')`);
+  check('点行后右侧详情面板展开(不挡主表)', panelVisible === true && layoutDetail === true);
+  const holdText = await evalJs(ws, `document.getElementById('tdHoldings').innerText`);
+  check('详情当前持仓表出现合约', /e2eao611P2500/.test(holdText || ''), holdText.replace(/\s+/g,' ').slice(0,120));
+  check('持仓数量 4 手', /4/.test(holdText || ''), holdText.replace(/\s+/g,' '));
+  const opText = await evalJs(ws, `document.getElementById('tdOps').innerText`);
+  check('操作记录含开仓行', /开仓/.test(opText || '') && /0.19/.test(opText || ''), opText.replace(/\s+/g,' ').slice(0,160));
+  // 平仓 → 主表应自动汇总
+  await evalJs(ws, `(async () => {
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+      underlying:'e2eao611', contract:'e2eao611P2500', op_type:'close', direction:'buy',
+      close_date:'2026-09-03', open_date:'2026-09-03', close_qty:4, close_price:510, pnl:-760, qty:4, premium:0
+    })}).then(r=>r.json());
+    return 'closed';
+  })()`);
+  await evalJs(ws, `TradeUI.refresh()`);
+  await sleep(800);
+  const rowAfter = await evalJs(ws, `JSON.stringify((() => {
+    const tr = [...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2eao611');
+    return tr ? tr.innerText : null;
+  })())`);
+  check('全平后主表显示已平仓 + 盈亏-760 + 平仓时间', /已平仓/.test(rowAfter || '') && /760/.test(rowAfter || '') && /2026-09-03/.test(rowAfter || ''), rowAfter);
+  // 只展示未平仓过滤
+  await evalJs(ws, `document.getElementById('tradesOnlyOpen').click()`);
+  await sleep(400);
+  const filteredRow = await evalJs(ws, `[...document.querySelectorAll('#tradesTable tbody tr.clickable')].some(x => x.dataset.u === 'e2eao611')`);
+  check('只展示未平仓 → 已平仓行隐藏', filteredRow === false);
+  await evalJs(ws, `document.getElementById('tradesOnlyOpen').click()`);
+  await sleep(300);
+  // 监控池快照
+  await evalJs(ws, `fetch('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({contracts:['si','lc','fu','ao','br','lh','fg','hc','sm','cf','jd','cu']})}).then(r=>r.json())`);
+  await evalJs(ws, `TradeUI.refresh()`);
+  await sleep(500);
+  const poolText = await evalJs(ws, `document.getElementById('poolArea').innerText`);
+  check('监控池快照展示品种', /si/.test(poolText || '') && /cf/.test(poolText || '') && /2026-09-09/.test(poolText || ''), poolText.replace(/\s+/g,' ').slice(0,120));
+  // 侧边栏导入导出按钮存在
+  const sideBtns = await evalJs(ws, `JSON.stringify({ex: !!document.getElementById('btnExport'), im: !!document.getElementById('btnImport'), tabs: document.querySelectorAll('#mainTabs .maintab').length})`);
+  const sb = JSON.parse(sideBtns);
+  check('侧边栏导出/导入按钮 + 3个tab', sb.ex === true && sb.im === true && sb.tabs === 3, sideBtns);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();

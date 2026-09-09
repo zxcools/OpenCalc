@@ -4,7 +4,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from main import calc_futures, calc_options, get_contract, CONTRACTS, MIN_PROFIT_LOSS_RATIO, fund_upsert, fund_list_records, fund_yearly_summary, fund_combined_summary, fund_delete, FUND_STRATEGIES, get_settings, save_settings
+from main import calc_futures, calc_options, get_contract, CONTRACTS, MIN_PROFIT_LOSS_RATIO, fund_upsert, fund_list_records, fund_yearly_summary, fund_combined_summary, fund_delete, fund_import_backup, fund_export_backup, FUND_STRATEGIES, get_settings, save_settings, trade_upsert, trade_list_records, trade_delete, trade_groups, trade_detail, trade_pool_upsert, trade_pool_list, trade_pool_delete
 
 PASS = 0
 FAIL = 0
@@ -348,6 +348,74 @@ _s4 = save_settings({"futures_risk_pct": ""})
 check("空串清除默认风险", _s4["futures_risk_pct"] is None, str(_s4))
 _s5 = save_settings({"default_equity": 123456})
 check("只更新一个字段不丢其他", _s5["default_equity"] == 123456 and "futures_risk_pct" in _s5, str(_s5))
+
+print("\n== 期权交易记录模块 ==")
+# 期权交易记录 CRUD + 汇总 + 监控池 + 导入导出整合
+import os as _os, tempfile as _tf
+_td = _tf.mkdtemp()
+import main as _m
+_m.FUND_DB_PATH = _os.path.join(_td, 'funds.db')
+_m.FUND_DB_CONN = None
+
+# 1. 新建开仓 + 平仓 → 主表显示已平仓 + 平仓盈亏
+trade_upsert({'underlying':'ao611','contract':'ao611P2500','op_type':'open',
+              'direction':'buy','open_date':'2026-08-27','open_delta':0.19,
+              'target_delta':0.45,'call_put':'P','open_price':700,'qty':4,'premium':1400})
+trade_upsert({'underlying':'ao611','contract':'ao611P2500','op_type':'close',
+              'direction':'buy','close_date':'2026-09-03','close_qty':4,
+              'close_price':510,'pnl':-760,'open_date':'2026-09-03','qty':4,'premium':0})
+gs = trade_groups()
+check("主表按 underlying 聚合", len(gs) == 1, str(gs))
+check("主表显示已平仓", gs[0]["close_status"] == "已平仓", str(gs[0]))
+check("主表平仓盈亏 -760", gs[0]["total_pnl"] == -760.0, str(gs[0]))
+check("主表平仓时间 2026-09-03", gs[0]["last_close_date"] == "2026-09-03", str(gs[0]))
+
+# 2. 部分平仓 → 持仓数量加权均价
+trade_upsert({'underlying':'fu2611','contract':'fu2611C3000','op_type':'open',
+              'direction':'buy','open_date':'2026-08-18','call_put':'C',
+              'open_price':100,'qty':5,'premium':500})
+trade_upsert({'underlying':'fu2611','contract':'fu2611C3000','op_type':'close',
+              'direction':'buy','close_date':'2026-08-25','close_qty':2,
+              'close_price':120,'pnl':40,'open_date':'2026-08-25','qty':2,'premium':0})
+det = trade_detail('fu2611')
+check("部分平仓后持仓 3 手", det["holdings"][0]["qty"] == 3, str(det["holdings"]))
+check("持仓均价 = 加权均价 100", det["holdings"][0]["open_price"] == 100, str(det["holdings"]))
+check("操作记录按时间升序", len(det["operations"]) == 2 and det["operations"][0]["op_type"] == "open")
+
+# 3. 详情按合约分别计算, 不同合约互不影响
+gs2 = trade_groups()
+check("主表存在 fu2611 (部分平仓)", any(g["underlying"] == "fu2611" for g in gs2))
+
+# 4. 监控池快照: 新建 + 修改 + 历史快照保留
+pid1 = trade_pool_upsert({'contracts':['si','lc','fu']})
+pid2 = trade_pool_upsert({'contracts':['si','lc','fu','ao','br']})
+check("监控池快照 2 条", len(trade_pool_list()) == 2)
+trade_pool_upsert({'id':pid1, 'contracts':['si','lc','fu','ao']})
+pools = trade_pool_list()
+check("修改最早快照后仍 2 条", len(pools) == 2)
+
+# 5. 删除一条监控池
+trade_pool_delete(pid2)
+check("删除后剩 1 条", len(trade_pool_list()) == 1)
+
+# 6. 删除一条交易记录
+recs = trade_list_records()
+first_id = recs[0]["id"]
+trade_delete(first_id)
+check("删除交易记录后数量-1", len(trade_list_records()) == len(recs) - 1)
+
+# 7. 导入导出整合: 含交易记录
+backup = fund_export_backup()
+check("导出含 trades 键", "trades" in backup)
+check("导出含 trade_pools 键", "trade_pools" in backup)
+
+# 8. 资金曲线清除只清资金曲线, 不动交易记录
+before_trades = len(trade_list_records())
+before_pools = len(trade_pool_list())
+import main as _m2
+_m2.fund_clear_all()
+check("fund_clear_all 不动 trade_records", len(trade_list_records()) == before_trades)
+check("fund_clear_all 不动 trade_pool_snapshots", len(trade_pool_list()) == before_pools)
 
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

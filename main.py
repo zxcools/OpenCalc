@@ -727,6 +727,46 @@ def _fund_db():
         cols = [row[1] for row in FUND_DB_CONN.execute("PRAGMA table_info(records)").fetchall()]
         if "cash" not in cols:
             FUND_DB_CONN.execute("ALTER TABLE records ADD COLUMN cash REAL NOT NULL DEFAULT 0")
+        # 期权交易记录 (策略=abe, 与资金曲线共用 SQLite, 一次导出备份包含所有数据)
+        FUND_DB_CONN.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_records (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy      TEXT    NOT NULL DEFAULT 'abe',
+                underlying    TEXT    NOT NULL,     -- 开仓标的(合约基础), 如 ao611
+                contract      TEXT    NOT NULL,     -- 完整合约代码, 如 ao611P2500
+                op_type       TEXT    NOT NULL,     -- 'open' / 'close'
+                open_date     TEXT,                 -- YYYY-MM-DD
+                open_delta    REAL,
+                target_delta  REAL,
+                call_put      TEXT,                 -- 'C' 看涨 / 'P' 看跌
+                direction     TEXT    NOT NULL,     -- 'buy' 买入 / 'sell' 卖出
+                open_price    REAL,                 -- 开仓价(开仓记录)
+                qty           INTEGER NOT NULL,     -- 开仓/平仓数量(平仓记录存 close_qty)
+                premium       REAL    NOT NULL,     -- 权利金(元/手 × 数量)
+                close_qty     INTEGER,              -- 仅平仓: 平仓数量
+                close_price   REAL,                 -- 仅平仓: 平仓价
+                pnl           REAL,                 -- 仅平仓: 逐笔盈亏
+                close_date    TEXT,                 -- 仅平仓: 平仓日期
+                note          TEXT,
+                created_at    TEXT,
+                updated_at    TEXT
+            )
+            """
+        )
+        # 监控池快照历史
+        FUND_DB_CONN.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_pool_snapshots (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                strategy       TEXT    NOT NULL DEFAULT 'abe',
+                snapshot_date  TEXT    NOT NULL,    -- YYYY-MM-DD
+                contracts      TEXT    NOT NULL,    -- JSON 数组: ["si","lc","fu",...]
+                note           TEXT,
+                created_at     TEXT
+            )
+            """
+        )
     return FUND_DB_CONN
 
 
@@ -991,43 +1031,57 @@ def fund_withdrawal_summary():
 
 
 def fund_export_backup():
-    """导出全部记录为备份 JSON (跨电脑迁移 / 定期备份用)"""
+    """导出全部数据为备份 JSON (资金曲线 + 期权交易记录 + 监控池快照, 跨电脑迁移/定期备份用)"""
     return {
         "app": "期货开仓计算器",
-        "backup_version": 1,
+        "backup_version": 2,
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "records": fund_list_records(),
+        "trades": trade_list_records(),
+        "trade_pools": trade_pool_list(),
     }
 
 
 def fund_import_backup(payload):
-    """导入备份: 逐条 upsert 合并 (相同 strategy/year/month 覆盖, 其余保留)
-    返回 (导入条数, 涉及策略列表)
-    """
-    if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
+    """导入备份: 资金曲线 + 期权交易记录 + 监控池快照 逐条 upsert 合并(同主键覆盖, 其余保留)."""
+    if not isinstance(payload, dict):
+        raise ValueError("备份文件格式不正确")
+    if not isinstance(payload.get("records"), list):
         raise ValueError("备份文件格式不正确（缺少 records 列表）")
-    records = payload["records"]
-    if not records:
-        return 0, []
     strategies = set()
     imported = 0
-    for r in records:
-        if not isinstance(r, dict):
-            raise ValueError("备份条目格式不正确")
-        strategy = r.get("strategy")
-        try:
-            year = int(r["year"])
-            month = int(r["month"])
-            initial_equity = float(r["initial_equity"])
-            end_equity = float(r["end_equity"])
-        except (KeyError, TypeError, ValueError):
-            raise ValueError("备份条目缺少必要字段（strategy/year/month/initial_equity/end_equity）")
-        cash_flow = float(r.get("cash_flow") or 0)
-        cash = float(r.get("cash") or 0)
-        note = str(r.get("note") or "")
-        fund_upsert(strategy, year, month, initial_equity, end_equity, cash_flow, note, cash=cash)
-        strategies.add(strategy)
-        imported += 1
+    if isinstance(payload.get("records"), list):
+        for r in payload["records"]:
+            if not isinstance(r, dict):
+                raise ValueError("资金曲线条目格式不正确")
+            try:
+                year = int(r["year"])
+                month = int(r["month"])
+                initial_equity = float(r["initial_equity"])
+                end_equity = float(r["end_equity"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("资金曲线条目缺少必要字段")
+            cash_flow = float(r.get("cash_flow") or 0)
+            cash = float(r.get("cash") or 0)
+            note = str(r.get("note") or "")
+            fund_upsert(r.get("strategy", "abe"), year, month, initial_equity,
+                        end_equity, cash_flow, note, cash=cash)
+            strategies.add(r.get("strategy", "abe"))
+            imported += 1
+    if isinstance(payload.get("trades"), list):
+        for r in payload["trades"]:
+            try:
+                trade_upsert(r)
+                imported += 1
+            except Exception:
+                pass   # 单条记录不合法则跳过, 不中断整批
+    if isinstance(payload.get("trade_pools"), list):
+        for r in payload["trade_pools"]:
+            try:
+                trade_pool_upsert(r)
+                imported += 1
+            except Exception:
+                pass
     return imported, sorted(strategies)
 
 
@@ -1055,6 +1109,276 @@ def fund_combined_dashboard():
             "annualized_return_rate": total_pnl / initial_eq if initial_eq > 0 else 0.0,
         })
     return {"monthly": monthly, "yearly": yearly}
+
+
+# ===========================================================================
+# 期权交易记录 (abe 策略) — 与资金曲线共用 funds.db, 一次导出含所有数据
+# ===========================================================================
+TRADE_STRATEGY_DEFAULT = "abe"
+ALLOWED_CALL_PUT = ("C", "P")
+ALLOWED_DIRECTION = ("buy", "sell")
+ALLOWED_OP_TYPE = ("open", "close")
+
+
+def _trade_record_to_dict(r):
+    return {
+        "id": r["id"],
+        "strategy": r["strategy"],
+        "underlying": r["underlying"],
+        "contract": r["contract"],
+        "op_type": r["op_type"],
+        "open_date": r["open_date"] or "",
+        "open_delta": r["open_delta"],
+        "target_delta": r["target_delta"],
+        "call_put": r["call_put"] or "",
+        "direction": r["direction"],
+        "open_price": r["open_price"],
+        "qty": r["qty"],
+        "premium": r["premium"] or 0.0,
+        "close_qty": r["close_qty"],
+        "close_price": r["close_price"],
+        "pnl": r["pnl"],
+        "close_date": r["close_date"] or "",
+        "note": r["note"] or "",
+        "created_at": r["created_at"] or "",
+        "updated_at": r["updated_at"] or "",
+    }
+
+
+def trade_list_records(strategy=TRADE_STRATEGY_DEFAULT):
+    db = _fund_db()
+    rows = db.execute(
+        "SELECT * FROM trade_records WHERE strategy=? ORDER BY id ASC",
+        (strategy,),
+    ).fetchall()
+    return [_trade_record_to_dict(r) for r in rows]
+
+
+def trade_upsert(payload):
+    """新增/更新交易记录; 不传 id=新增; 传 id=更新. 自动维护 created_at/updated_at."""
+    db = _fund_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    required = ("underlying", "contract", "op_type", "direction")
+    for k in required:
+        if not payload.get(k):
+            raise ValueError("缺少必填字段: %s" % k)
+    if payload["op_type"] not in ALLOWED_OP_TYPE:
+        raise ValueError("op_type 必须为 open / close")
+    if payload["direction"] not in ALLOWED_DIRECTION:
+        raise ValueError("direction 必须为 buy / sell")
+
+    rec_id = payload.get("id")
+    fields = (
+        "underlying", "contract", "op_type",
+        "open_date", "open_delta", "target_delta", "call_put",
+        "direction", "open_price", "qty", "premium",
+        "close_qty", "close_price", "pnl", "close_date", "note",
+    )
+    vals = [payload.get(f) for f in fields]
+    if rec_id:
+        # 更新
+        existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
+        if not existing:
+            raise ValueError("记录不存在 id=%s" % rec_id)
+        set_clause = ", ".join("%s=?" % f for f in fields)
+        db.execute(
+            "UPDATE trade_records SET " + set_clause + ", updated_at=? WHERE id=?",
+            (*vals, now, rec_id),
+        )
+        return rec_id
+    # 新增
+    cols = ", ".join(fields)
+    placeholders = ", ".join("?" for _ in fields)
+    db.execute(
+        "INSERT INTO trade_records (strategy, " + cols + ", created_at, updated_at) VALUES (?, "
+        + placeholders + ", ?, ?)",
+        (TRADE_STRATEGY_DEFAULT, *vals, now, now),
+    )
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def trade_delete(rec_id):
+    db = _fund_db()
+    db.execute("DELETE FROM trade_records WHERE id=?", (rec_id,))
+
+
+def trade_groups(strategy=TRADE_STRATEGY_DEFAULT):
+    """主表汇总: 按 underlying 分组(主键=开仓标的), 输出每组:
+       direction(主要方向), open_date(首次开仓), close_status(未平/部分平/全平),
+       total_pnl(已实现盈亏), last_close_date(最后平仓日)."""
+    recs = trade_list_records(strategy)
+    if not recs:
+        return []
+    by_u = {}
+    for r in recs:
+        by_u.setdefault(r["underlying"], []).append(r)
+
+    groups = []
+    for u, items in by_u.items():
+        opens = [x for x in items if x["op_type"] == "open"]
+        closes = [x for x in items if x["op_type"] == "close"]
+        # 首次开仓日期
+        open_dates = [x["open_date"] for x in opens if x["open_date"]]
+        first_open = min(open_dates) if open_dates else ""
+        # 持仓数量 = 开仓 - 平仓 (按合约)
+        by_c = {}
+        for x in opens:
+            by_c.setdefault(x["contract"], {"opened": 0, "closed": 0, "open_cost": 0.0})
+            by_c[x["contract"]]["opened"] += x["qty"]
+            by_c[x["contract"]]["open_cost"] += (x["open_price"] or 0) * x["qty"]
+        for x in closes:
+            by_c.setdefault(x["contract"], {"opened": 0, "closed": 0, "open_cost": 0.0})
+            by_c[x["contract"]]["closed"] += (x["close_qty"] or 0)
+        has_open_position = any(
+            (c["opened"] - c["closed"]) > 0 for c in by_c.values()
+        )
+        total_pnl = sum((x["pnl"] or 0) for x in closes)
+        close_dates = [x["close_date"] for x in closes if x["close_date"]]
+        last_close = max(close_dates) if close_dates else ""
+        # 方向: 主方向=持仓最多的合约的方向; 无持仓取最近开仓的方向
+        direction = ""
+        if has_open_position:
+            for c_name, st in by_c.items():
+                if (st["opened"] - st["closed"]) > 0:
+                    rec = next((x for x in opens if x["contract"] == c_name), None)
+                    if rec:
+                        direction = rec["direction"]
+                        break
+        if not direction and opens:
+            direction = opens[-1]["direction"]
+        if not has_open_position and opens:
+            close_status = "已平仓"
+        elif has_open_position and total_pnl != 0:
+            close_status = "部分平仓"
+        else:
+            close_status = "未平仓"
+        groups.append({
+            "underlying": u,
+            "direction": direction,
+            "open_date": first_open,
+            "close_status": close_status,
+            "total_pnl": round(total_pnl, 2),
+            "last_close_date": last_close,
+        })
+    # 按开仓日期倒序: 最近开仓在最上
+    groups.sort(key=lambda g: (g["open_date"] or ""), reverse=True)
+    return groups
+
+
+def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT):
+    """单个标的详情: 上方持仓汇总(按 contract 分组, 仅算未平仓部分加权均价), 下方操作记录(按日期升序)."""
+    db = _fund_db()
+    rows = db.execute(
+        "SELECT * FROM trade_records WHERE strategy=? AND underlying=? ORDER BY id ASC",
+        (strategy, underlying),
+    ).fetchall()
+    items = [_trade_record_to_dict(r) for r in rows]
+    opens = [x for x in items if x["op_type"] == "open"]
+    closes = [x for x in items if x["op_type"] == "close"]
+
+    # 按合约累计: left=剩余数量, cost_left=剩余开仓金额, premium_left=剩余权利金
+    by_c = {}
+    for x in opens:
+        c = by_c.setdefault(x["contract"], {
+            "contract": x["contract"], "call_put": x["call_put"], "direction": x["direction"],
+            "left": 0, "cost_left": 0.0, "premium_left": 0.0, "last_open_date": "",
+        })
+        c["left"] += x["qty"]
+        c["cost_left"] += (x["open_price"] or 0) * x["qty"]
+        c["premium_left"] += x["premium"] or 0
+        c["last_open_date"] = x["open_date"] or c["last_open_date"]
+
+    # 遍历 close, FIFO 扣除 left + 同步扣减 cost_left / premium_left
+    for x in closes:
+        cq = x["close_qty"] or 0
+        if cq <= 0:
+            continue
+        c = by_c.get(x["contract"])
+        if not c:
+            continue
+        if c["left"] <= 0:
+            break
+        take = min(cq, c["left"])
+        if c["left"] > 0:
+            ratio = take / c["left"]
+            c["cost_left"] -= c["cost_left"] * ratio
+            c["premium_left"] -= c["premium_left"] * ratio
+        c["left"] -= take
+
+    holdings = []
+    for cn, c in by_c.items():
+        if c["left"] <= 0:
+            continue
+        avg = round(c["cost_left"] / c["left"], 4) if c["left"] > 0 else 0
+        holdings.append({
+            "contract": c["contract"],
+            "call_put": c["call_put"],
+            "direction": c["direction"],
+            "open_price": avg,           # 仅未平仓部分加权均价
+            "qty": c["left"],
+            "premium": round(c["premium_left"], 2),
+            "last_open_date": c["last_open_date"],
+        })
+    # 操作记录: 按日期升序(open_date 或 close_date)
+    def _op_dt(x):
+        return x["open_date"] if x["op_type"] == "open" else x["close_date"]
+    ops = sorted(items, key=_op_dt)
+    return {"underlying": underlying, "holdings": holdings, "operations": ops}
+
+
+# ----- 监控池快照 -----
+def trade_pool_list(strategy=TRADE_STRATEGY_DEFAULT):
+    db = _fund_db()
+    rows = db.execute(
+        "SELECT * FROM trade_pool_snapshots WHERE strategy=? ORDER BY snapshot_date DESC, id DESC",
+        (strategy,),
+    ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            cs = json.loads(r["contracts"]) if r["contracts"] else []
+        except Exception:
+            cs = []
+        out.append({
+            "id": r["id"],
+            "snapshot_date": r["snapshot_date"] or "",
+            "contracts": cs,
+            "note": r["note"] or "",
+            "created_at": r["created_at"] or "",
+        })
+    return out
+
+
+def trade_pool_upsert(payload):
+    """新增/更新监控池快照; 不传 id=新建快照; 传 id=修改内容; 自动设 snapshot_date=今天"""
+    db = _fund_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    contracts = payload.get("contracts") or []
+    if not isinstance(contracts, list):
+        raise ValueError("contracts 必须是数组")
+    cs = json.dumps(contracts, ensure_ascii=False)
+    note = payload.get("note") or ""
+    rec_id = payload.get("id")
+    if rec_id:
+        existing = db.execute("SELECT snapshot_date FROM trade_pool_snapshots WHERE id=?", (rec_id,)).fetchone()
+        if not existing:
+            raise ValueError("快照不存在 id=%s" % rec_id)
+        db.execute(
+            "UPDATE trade_pool_snapshots SET contracts=?, note=?, snapshot_date=? WHERE id=?",
+            (cs, note, payload.get("snapshot_date") or existing["snapshot_date"], rec_id),
+        )
+        return rec_id
+    today = payload.get("snapshot_date") or datetime.now().date().isoformat()
+    db.execute(
+        "INSERT INTO trade_pool_snapshots (strategy, snapshot_date, contracts, note, created_at) VALUES (?, ?, ?, ?, ?)",
+        (TRADE_STRATEGY_DEFAULT, today, cs, note, now),
+    )
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def trade_pool_delete(rec_id):
+    db = _fund_db()
+    db.execute("DELETE FROM trade_pool_snapshots WHERE id=?", (rec_id,))
 
 
 # ===========================================================================
@@ -1191,6 +1515,24 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/funds/export":
             self._send(200, _json({"ok": True, **fund_export_backup()}))
 
+        # ---- 期权交易记录 ----
+        elif path == "/api/trades/groups":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            strategy = (qs.get("strategy") or [TRADE_STRATEGY_DEFAULT])[0]
+            self._send(200, _json({"ok": True, "groups": trade_groups(strategy)}))
+
+        elif path == "/api/trades/detail":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            underlying = qs.get("underlying", [""])[0]
+            strategy = (qs.get("strategy") or [TRADE_STRATEGY_DEFAULT])[0]
+            if not underlying:
+                self._send(200, _json({"ok": False, "error": "缺少 underlying"}))
+                return
+            self._send(200, _json({"ok": True, **trade_detail(underlying, strategy)}))
+
+        elif path == "/api/trades/pool":
+            self._send(200, _json({"ok": True, "snapshots": trade_pool_list()}))
+
         elif path == "/api/funds/data-info":
             self._send(200, _json({"ok": True, **fund_data_info()}))
 
@@ -1274,6 +1616,25 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, _json({"ok": False, "error": "未选择文件夹（已取消）"}))
                 return
+
+            # ---- 期权交易记录 (POST) ----
+            elif path == "/api/trades/upsert":
+                rec_id = trade_upsert(params)
+                self._send(200, _json({"ok": True, "id": rec_id, "msg": "已保存"}))
+                return
+            elif path == "/api/trades/delete":
+                trade_delete(int(params["id"]))
+                self._send(200, _json({"ok": True, "msg": "已删除"}))
+                return
+            elif path == "/api/trades/pool/upsert":
+                rec_id = trade_pool_upsert(params)
+                self._send(200, _json({"ok": True, "id": rec_id, "msg": "已保存"}))
+                return
+            elif path == "/api/trades/pool/delete":
+                trade_pool_delete(int(params["id"]))
+                self._send(200, _json({"ok": True, "msg": "已删除"}))
+                return
+
             elif path == "/api/settings":
                 self._send(200, _json({"ok": True, "settings": save_settings(params)}))
                 return
@@ -1686,6 +2047,59 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .maintab.active small{opacity:.92}
 .maintab:not(.active):hover{background:var(--panel2);color:var(--text)}
 .main{flex:1;min-width:0}
+
+/* 侧边栏额外操作区(导入/导出/联系作者) */
+.side-extras{margin-top:auto;width:100%;display:flex;flex-direction:column;gap:6px;
+  padding-top:14px;border-top:1px solid var(--panel2)}
+.side-btn{padding:8px 4px;border-radius:10px;border:1px solid var(--panel2);
+  background:var(--panel);color:var(--text);font-size:11px;cursor:pointer;
+  transition:background .15s,border-color .15s}
+.side-btn:hover{background:var(--panel2);border-color:var(--accent)}
+
+/* 交易记录页 */
+.trades-header{display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:18px;gap:16px;flex-wrap:wrap}
+.trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer}
+.chk input{accent-color:var(--accent)}
+.trades-layout{display:grid;grid-template-columns:1fr;gap:18px}
+.trades-layout.has-detail{grid-template-columns:minmax(0,1.4fr) minmax(380px,1fr)}
+@media (max-width:1080px){.trades-layout.has-detail{grid-template-columns:1fr}}
+.trades-side{animation:fadeSlide .25s ease}
+@keyframes fadeSlide{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
+.trades-tbl th{font-size:11px}
+.trades-tbl td{font-size:12px;padding:6px 8px}
+.trades-tbl tr.row-open td{background:rgba(91,140,255,.04)}
+.trades-tbl tr.row-close td{background:rgba(255,107,155,.04)}
+.trades-tbl tr.clickable{cursor:pointer}
+.trades-tbl tr.clickable:hover{background:var(--panel2)}
+.tag{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:600}
+.tag.long{background:rgba(255,107,107,.18);color:#ff8484}
+.tag.short{background:rgba(70,214,234,.18);color:#46d6ea}
+.tag.open{background:rgba(91,140,255,.18);color:#7da3ff}
+.tag.close{background:rgba(255,107,155,.18);color:#ff84b9}
+.tag.closed{background:rgba(120,200,150,.18);color:#78c896}
+.tag.partial{background:rgba(255,180,80,.18);color:#ffb450}
+.tag.unclosed{background:rgba(91,140,255,.18);color:#7da3ff}
+.tag.buy{background:rgba(70,214,234,.18);color:#46d6ea}
+.tag.sell{background:rgba(255,107,155,.18);color:#ff84b9}
+.iconbtn{background:transparent;border:none;color:var(--sub);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:6px}
+.iconbtn:hover{background:var(--panel2);color:var(--accent)}
+.row-actions{display:flex;gap:4px;justify-content:flex-end}
+
+/* 监控池 */
+.pool-block{margin-bottom:14px}
+.pool-title{font-size:13px;font-weight:600;color:var(--accent2);display:flex;align-items:center;gap:8px;cursor:pointer}
+.pool-title .arrow{transition:transform .15s}
+.pool-title.collapsed .arrow{transform:rotate(-90deg)}
+.pool-content{margin-top:6px;display:flex;flex-wrap:wrap;gap:6px;font-size:12.5px;line-height:1.7}
+.pool-chip{background:var(--panel2);padding:2px 8px;border-radius:6px;font-family:Consolas,monospace}
+
+/* 录入对话框(共用) */
+.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--sub)}
+.formgrid input,.formgrid select{width:100%}
+.formgrid .full{grid-column:1/-1}
 @media (max-width:640px){
   .side{width:64px;padding:16px 6px;gap:10px}
   .maintab{font-size:11px;padding:12px 2px}
@@ -1809,7 +2223,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 <div class="app-shell">
   <aside class="side" id="mainTabs">
     <div class="maintab active" data-tab="calc"><span class="mi">🧮</span><span class="mt">开仓计算</span><small>期货 · 期权</small></div>
+    <div class="maintab" data-tab="trades"><span class="mi">📋</span><span class="mt">交易记录</span><small>abe 期权</small></div>
     <div class="maintab" data-tab="funds"><span class="mi">📈</span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
+    <div class="side-extras">
+      <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬇ 导出</button>
+      <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬆ 导入</button>
+      <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬 联系作者</button>
+    </div>
   </aside>
   <div class="main">
   <div class="wrap">
@@ -2153,6 +2573,85 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       </div>
     </div>
   </div><!-- /fundsArea -->
+
+  <!-- ============================ 期权交易记录 ============================ -->
+  <div id="tradesArea" class="hidden">
+    <div class="wrap">
+      <header class="trades-header">
+        <div class="brand">
+          <div class="logo">◈</div>
+          <div>
+            <h1 style="color:var(--accent2)">abe 期权交易记录</h1>
+            <p>策略: abe · 期权买方代替期货开仓 · 逐笔记录 + 自动汇总</p>
+          </div>
+        </div>
+        <div class="trades-toolbar">
+          <label class="chk"><input type="checkbox" id="tradesOnlyOpen"> 只展示未平仓</label>
+          <button class="btn xs" id="btnNewOpen">➕ 新建开仓</button>
+          <button class="btn xs" id="btnNewClose">➖ 新建平仓</button>
+          <button class="btn xs" id="btnShowAll" hidden>📜 显示全部</button>
+        </div>
+      </header>
+      <div class="trades-layout">
+        <div class="trades-main">
+          <div class="card results">
+            <h2><span class="dot"></span>期权交易(按开仓时间倒序, 最近在最上, 最多 10 条)</h2>
+            <div class="tblwrap">
+              <table class="tbl trades-tbl" id="tradesTable">
+                  <thead><tr>
+                    <th>开仓标的</th><th>方向</th><th>开仓时间</th>
+                    <th>是否平仓</th><th>平仓盈亏</th><th>平仓时间</th>
+                    <th>操作</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+            </div>
+          </div>
+
+          <div class="card results" style="margin-top:14px">
+            <h2><span class="dot"></span>abe 期权监控池</h2>
+            <div id="poolArea"><div class="tip">暂无监控池快照，点下面按钮新建</div></div>
+            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn xs" id="btnNewPool">➕ 新建监控池快照</button>
+              <button class="btn xs ghost" id="btnPoolHistory" hidden>📜 查看历史快照</button>
+            </div>
+          </div>
+        </div>
+
+        <aside class="trades-side hidden" id="tradeDetailPanel">
+          <div class="card results">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <h2><span class="dot"></span><span id="tdTitle">—</span></h2>
+              <button class="btn xs ghost" id="tdClose">✕ 关闭</button>
+            </div>
+            <div class="tip" id="tdMeta" style="margin:6px 0 10px"></div>
+            <h3 style="font-size:13px;margin:14px 0 8px;color:var(--accent2)">当前持仓(按合约汇总, 仅算未平仓部分)</h3>
+            <div class="tblwrap">
+              <table class="tbl trades-tbl">
+                <thead><tr>
+                  <th>合约代码</th><th>看涨看跌</th><th>方向</th>
+                  <th>开仓均价</th><th>数量</th><th>权利金</th>
+                </tr></thead>
+                <tbody id="tdHoldings"></tbody>
+              </table>
+            </div>
+            <h3 style="font-size:13px;margin:18px 0 8px;color:var(--accent2)">操作记录(按时间升序, 最近在最下方)</h3>
+            <div class="tblwrap">
+              <table class="tbl trades-tbl">
+                <thead><tr>
+                  <th>合约</th><th>日期</th><th>操作</th>
+                  <th>delta</th><th>目标</th><th>看涨看跌</th>
+                  <th>方向</th><th>数量</th><th>价格</th><th>权利金</th>
+                  <th>平仓盈亏</th><th>状态</th><th>操作</th>
+                </tr></thead>
+                <tbody id="tdOps"></tbody>
+              </table>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div><!-- /tradesArea -->
 
   <!-- 图表放大 弹窗 -->
   <div class="modalbg hidden" id="chartZoomBg">
@@ -2907,6 +3406,369 @@ $('planList').addEventListener('click', e=>{
 init();
 
 /* =================================================================
+   期权交易记录模块（命名空间 TradeUI）
+   ================================================================= */
+const TradeUI = {
+  groups: [],           // 主表行(按 underlying 聚合)
+  detail: null,         // 当前详情(underlying)
+  pool: [],             // 监控池快照历史
+  poolCollapsed: {},    // {date: true/false} 历史快照折叠状态
+  onlyOpen: false,      // 只展示未平仓
+  showAll: false,       // 是否展开全部(>10)
+  MAX: 10,
+
+  fmtDate(d){
+    if (!d) return '—';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+    return d;
+  },
+
+  async init(){
+    $('tradesOnlyOpen').addEventListener('change', e => { this.onlyOpen = e.target.checked; this.renderMain(); });
+    $('btnShowAll').addEventListener('click', () => { this.showAll = true; this.renderMain(); });
+    $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
+    $('btnNewClose').addEventListener('click', () => this.openEditModal('close'));
+    $('btnNewPool').addEventListener('click', () => this.openPoolModal());
+    $('btnPoolHistory').addEventListener('click', () => { /* always visible when pool loaded */ });
+    $('tdClose').addEventListener('click', () => this.closeDetail());
+    // 侧边栏全局按钮: 委托给 FundUI(导出已含交易记录)
+    const se = $('btnExport'); const si = $('btnImport');
+    if (se) se.addEventListener('click', () => FundUI.exportBackup());
+    if (si) si.addEventListener('click', () => $('importFile').click());
+    const contact = $('btnContact');
+    if (contact) contact.addEventListener('click', () => {
+      const bg = $('contactBg'); if (bg) bg.classList.remove('hidden');
+    });
+    await this.refresh();
+  },
+
+  async refresh(){
+    try {
+      const [gr, pl] = await Promise.all([
+        fetchT('/api/trades/groups').then(r => r.json()),
+        fetchT('/api/trades/pool').then(r => r.json()),
+      ]);
+      this.groups = gr.ok ? gr.groups : [];
+      this.pool = pl.ok ? pl.snapshots : [];
+    } catch (e) { console.error('TradeUI refresh', e); this.groups = []; this.pool = []; }
+    this.renderMain();
+    this.renderPool();
+    if (this.detail) {
+      const u = this.detail.underlying;
+      this.loadDetail(u);
+    }
+  },
+
+  renderMain(){
+    const tb = document.querySelector('#tradesTable tbody');
+    let rows = this.groups.slice();
+    if (this.onlyOpen) rows = rows.filter(g => g.close_status !== '已平仓');
+    const total = rows.length;
+    const limit = this.showAll ? total : this.MAX;
+    const show = rows.slice(0, limit);
+    $('btnShowAll').hidden = !this.showAll && total > this.MAX;
+    if (!show.length){
+      tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--sub)">暂无记录，点上面「新建开仓」添加</td></tr>';
+      return;
+    }
+    tb.innerHTML = show.map(g => {
+      const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '—');
+      const dirTag = g.direction === 'buy' ? 'buy' : (g.direction === 'sell' ? 'sell' : '');
+      const statusTag = g.close_status === '已平仓' ? 'closed' : (g.close_status === '部分平仓' ? 'partial' : 'unclosed');
+      const pnl = g.total_pnl;
+      const pnlCls = pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '');
+      return `<tr class="clickable" data-u="${escHtml(g.underlying)}">
+        <td><b>${escHtml(g.underlying)}</b></td>
+        <td><span class="tag ${dirTag}">${dirTxt}</span></td>
+        <td>${this.fmtDate(g.open_date)}</td>
+        <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>
+        <td class="${pnlCls}" style="font-weight:600">${pnl ? (pnl > 0 ? '+' : '') + 'CN¥' + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+        <td>${this.fmtDate(g.last_close_date)}</td>
+        <td class="row-actions">
+          <button class="iconbtn" data-act="open" data-u="${escHtml(g.underlying)}" title="新增该标的的开仓">➕</button>
+          <button class="iconbtn" data-act="close" data-u="${escHtml(g.underlying)}" title="新增该标的的平仓">➖</button>
+        </td>
+      </tr>`;
+    }).join('');
+    // 行点击打开详情(操作列按钮不触发)
+    tb.querySelectorAll('tr.clickable').forEach(tr => {
+      tr.addEventListener('click', e => {
+        const btn = e.target.closest('[data-act]');
+        if (btn) {
+          e.stopPropagation();
+          this.openEditModal(btn.dataset.act, { underlying: btn.dataset.u });
+          return;
+        }
+        this.loadDetail(tr.dataset.u);
+      });
+    });
+  },
+
+  async loadDetail(underlying){
+    try {
+      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const d = await r.json();
+      if (!d.ok) { alert('加载详情失败: ' + d.error); return; }
+      this.detail = d;
+      this.renderDetail();
+    } catch (e) { alert('加载详情失败: ' + e); }
+  },
+
+  renderDetail(){
+    const d = this.detail;
+    if (!d) return;
+    document.querySelector('.trades-layout').classList.add('has-detail');
+    $('tradeDetailPanel').classList.remove('hidden');
+    $('tdTitle').textContent = d.underlying + ' 详情';
+    // 顶部 meta: 方向/开仓时间/是否平仓/平仓盈亏/平仓时间
+    const g = this.groups.find(x => x.underlying === d.underlying) || {};
+    const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '—');
+    const pnl = g.total_pnl;
+    const pnlStr = pnl ? (pnl > 0 ? '+CN¥' : 'CN¥') + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—';
+    $('tdMeta').innerHTML = `
+      <span class="tag ${g.direction==='buy'?'buy':(g.direction==='sell'?'sell':'')}">${dirTxt}</span>
+      &nbsp;开仓时间 <b>${this.fmtDate(g.open_date)}</b>
+      &nbsp;状态 <span class="tag ${g.close_status==='已平仓'?'closed':(g.close_status==='部分平仓'?'partial':'unclosed')}">${escHtml(g.close_status||'—')}</span>
+      &nbsp;平仓盈亏 <b class="${pnl>0?'pos':(pnl<0?'neg':'')}">${pnlStr}</b>
+      &nbsp;平仓时间 <b>${this.fmtDate(g.last_close_date)}</b>`;
+
+    // 持仓汇总
+    const hb = $('tdHoldings');
+    if (!d.holdings.length){
+      hb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
+    } else {
+      hb.innerHTML = d.holdings.map(h => `<tr>
+        <td><b>${escHtml(h.contract)}</b></td>
+        <td><span class="tag ${h.call_put==='P'?'short':(h.call_put==='C'?'long':'')}">${h.call_put==='P'?'看跌':(h.call_put==='C'?'看涨':'—')}</span></td>
+        <td><span class="tag ${h.direction==='buy'?'buy':'sell'}">${h.direction==='buy'?'买入':'卖出'}</span></td>
+        <td>${h.open_price.toLocaleString('en-US',{maximumFractionDigits:4})}</td>
+        <td>${h.qty}</td>
+        <td>${h.premium.toLocaleString('en-US',{maximumFractionDigits:2})}</td>
+      </tr>`).join('');
+    }
+    // 操作记录(按日期升序, 最近在最下)
+    const ob = $('tdOps');
+    if (!d.operations.length){
+      ob.innerHTML = '<tr><td colspan="13" style="text-align:center;padding:14px;color:var(--sub)">暂无操作记录</td></tr>';
+    } else {
+      ob.innerHTML = d.operations.map(o => {
+        const isOpen = o.op_type === 'open';
+        const dt = isOpen ? o.open_date : o.close_date;
+        const price = isOpen ? o.open_price : o.close_price;
+        // 计算该合约当前持仓状态(为该行提供 "状态" 字段)
+        const st = this._rowStatus(o, d);
+        const pnlCls = (o.pnl||0) > 0 ? 'pos' : ((o.pnl||0) < 0 ? 'neg' : '');
+        const opTag = isOpen ? 'open' : 'close';
+        const opTxt = isOpen ? '开仓' : '平仓';
+        return `<tr class="row-${opTag}">
+          <td><b>${escHtml(o.contract)}</b></td>
+          <td>${this.fmtDate(dt)}</td>
+          <td><span class="tag ${opTag}">${opTxt}</span></td>
+          <td>${o.open_delta!=null ? o.open_delta : '—'}</td>
+          <td>${o.target_delta!=null ? o.target_delta : '—'}</td>
+          <td><span class="tag ${o.call_put==='P'?'short':(o.call_put==='C'?'long':'')}">${o.call_put==='P'?'看跌':(o.call_put==='C'?'看涨':'—')}</span></td>
+          <td><span class="tag ${o.direction==='buy'?'buy':'sell'}">${o.direction==='buy'?'买入':'卖出'}</span></td>
+          <td>${o.qty}</td>
+          <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
+          <td>${o.premium.toLocaleString('en-US',{maximumFractionDigits:2})}</td>
+          <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':'CN¥')+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+          <td><span class="tag ${st.cls}">${st.txt}</span></td>
+          <td class="row-actions">
+            <button class="iconbtn" data-edit="${o.id}" title="修改">✎</button>
+            <button class="iconbtn" data-del="${o.id}" title="删除">🗑</button>
+          </td>
+        </tr>`;
+      }).join('');
+      ob.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+        const op = d.operations.find(x => x.id === +b.dataset.edit);
+        if (op) this.openEditModal(op.op_type, op);
+      }));
+      ob.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => this.deleteOp(+b.dataset.del)));
+    }
+  },
+
+  _rowStatus(op, detail){
+    // 统计该合约 open qty - close qty (FIFO): 当前剩余数量
+    const ops = detail.operations;
+    let opened = 0, closed = 0;
+    for (const x of ops){
+      if (x.contract !== op.contract) continue;
+      if (x.op_type === 'open') opened += x.qty;
+      else closed += (x.close_qty||0);
+    }
+    if (op.op_type === 'open'){
+      // 此 open 自身被后续 close 平掉的数量
+      let closedAfter = 0;
+      let seen = false;
+      for (const x of ops){
+        if (x === op){ seen = true; continue; }
+        if (!seen) continue;
+        if (x.contract !== op.contract) continue;
+        if (x.op_type === 'close') closedAfter += (x.close_qty||0);
+      }
+      const left = op.qty - closedAfter;
+      if (left <= 0) return { cls: 'closed', txt: '已平仓' };
+      if (closedAfter > 0) return { cls: 'partial', txt: '部分平仓' };
+      return { cls: 'unclosed', txt: '未平仓' };
+    } else {
+      // close 行: 显示此 close 是否为"全平"该 open
+      return { cls: 'close', txt: '平仓' };
+    }
+  },
+
+  closeDetail(){
+    this.detail = null;
+    $('tradeDetailPanel').classList.add('hidden');
+    document.querySelector('.trades-layout').classList.remove('has-detail');
+  },
+
+  renderPool(){
+    const box = $('poolArea');
+    if (!this.pool.length){
+      box.innerHTML = '<div class="tip">暂无监控池快照，点「➕ 新建监控池快照」记录当前品种</div>';
+      $('btnPoolHistory').hidden = true;
+      return;
+    }
+    $('btnPoolHistory').hidden = false;
+    // 最新快照展开, 历史快照折叠(可点击展开)
+    box.innerHTML = this.pool.map((s, idx) => {
+      const collapsed = idx > 0 && !this.poolCollapsed[s.snapshot_date];
+      const content = collapsed ? '' : `<div class="pool-content">${
+        s.contracts.map(c => `<span class="pool-chip">${escHtml(c)}</span>`).join('')
+      }</div>`;
+      const head = `<div class="pool-title${collapsed?' collapsed':''}" data-date="${escHtml(s.snapshot_date)}" data-id="${s.id}">
+        <span class="arrow">▼</span>
+        <span>${escHtml(s.snapshot_date)} 更新</span>
+        <span class="row-actions" style="margin-left:auto">
+          <button class="iconbtn" data-edit-pool="${s.id}" data-date="${escHtml(s.snapshot_date)}" data-cs='${escHtml(JSON.stringify(s.contracts))}' title="修改">✎</button>
+          <button class="iconbtn" data-del-pool="${s.id}" title="删除">🗑</button>
+        </span>
+      </div>`;
+      return `<div class="pool-block">${head}${content}</div>`;
+    }).join('');
+    box.querySelectorAll('.pool-title').forEach(t => t.addEventListener('click', e => {
+      const btn = e.target.closest('[data-edit-pool], [data-del-pool]');
+      if (btn) {
+        e.stopPropagation();
+        if (btn.hasAttribute('data-edit-pool')) {
+          this.openPoolModal({
+            id: +btn.dataset.editPool,
+            snapshot_date: btn.dataset.date,
+            contracts: JSON.parse(btn.dataset.cs),
+          });
+        } else {
+          this.deletePool(+btn.dataset.delPool);
+        }
+        return;
+      }
+      this.poolCollapsed[t.dataset.date] = !this.poolCollapsed[t.dataset.date];
+      this.renderPool();
+    }));
+  },
+
+  /* ---------- 新建/编辑 开仓/平仓 弹框 ---------- */
+  openEditModal(type, preset){
+    preset = preset || {};
+    const isOpen = type === 'open';
+    const u = preset.underlying || prompt('请输入开仓标的(如 ao611):') || '';
+    if (!u) return;
+    const contract = preset.contract || prompt('请输入完整合约代码(如 ao611P2500):') || '';
+    if (!contract) return;
+    if (isOpen){
+      const date = preset.open_date || prompt('开仓日期 (YYYY-MM-DD):', new Date().toISOString().slice(0,10)) || '';
+      const cp = (preset.call_put || prompt('看涨/看跌 (C/P):', 'P') || '').toUpperCase();
+      const dir = (preset.direction || prompt('方向 (buy/sell):', 'buy') || '').toLowerCase();
+      const price = parseFloat(prompt('开仓价格:', preset.open_price || '') || '');
+      const qty = parseInt(prompt('数量:', preset.qty || 1) || 0, 10);
+      const premium = parseFloat(prompt('权利金(元/手 × 数量):', preset.premium || '') || '');
+      const delta = parseFloat(prompt('开仓 delta (0~1, 可空):', preset.open_delta || '') || '');
+      const target = parseFloat(prompt('目标 delta (可空):', preset.target_delta || '') || '');
+      if (!cp || !dir || !(price>=0) || !(qty>0) || !(premium>=0)) { alert('必填字段缺失, 已取消'); return; }
+      const payload = {
+        id: preset.id || null,
+        op_type: 'open', underlying: u, contract, open_date: date,
+        open_delta: isNaN(delta) ? null : delta, target_delta: isNaN(target) ? null : target,
+        call_put: cp, direction: dir, open_price: price, qty, premium, note: '',
+      };
+      this._saveOp(payload);
+    } else {
+      // close: 合约必须来自已开仓的合约
+      if (!this.detail){
+        alert('请先在主表点开该标的的详情, 再点「新建平仓」按钮');
+        return;
+      }
+      const avail = this.detail.holdings;
+      if (!avail.length) { alert('该标的当前无持仓可平'); return; }
+      const opts = avail.map((h, i) => `${i+1}. ${h.contract} 看${h.call_put==='P'?'跌':'涨'} ${h.direction==='buy'?'买入':'卖出'} 余${h.qty}手 @均价${h.open_price}`).join('\n');
+      const pick = prompt('选择要平仓的合约编号:\n' + opts, '1');
+      const idx = parseInt(pick || '-1', 10) - 1;
+      if (idx < 0 || idx >= avail.length) { alert('选择无效, 已取消'); return; }
+      const h = avail[idx];
+      const maxQty = h.qty;
+      const qty = parseInt(prompt('平仓数量 (≤' + maxQty + '):', String(maxQty)) || 0, 10);
+      if (qty <= 0 || qty > maxQty) { alert('平仓数量必须在 1~' + maxQty + ', 已取消'); return; }
+      const price = parseFloat(prompt('平仓价格:', preset.close_price || '') || '');
+      const pnl = parseFloat(prompt('平仓盈亏 (按逐笔盈计算):', preset.pnl || '') || '');
+      const date = preset.close_date || new Date().toISOString().slice(0,10);
+      const payload = {
+        id: preset.id || null,
+        op_type: 'close', underlying: u, contract: h.contract,
+        open_date: date, close_date: date, close_qty: qty, close_price: price,
+        pnl, qty, premium: 0, direction: h.direction, call_put: h.call_put,
+      };
+      this._saveOp(payload);
+    }
+  },
+
+  async _saveOp(payload){
+    try {
+      const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+      const d = await r.json();
+      if (!d.ok) { alert('保存失败: ' + d.error); return; }
+      await this.refresh();
+    } catch (e) { alert('保存失败: ' + e); }
+  },
+
+  async deleteOp(id){
+    if (!confirm('确认删除这条操作记录?')) return;
+    try {
+      const r = await fetchT('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+      const d = await r.json();
+      if (!d.ok) { alert('删除失败: ' + d.error); return; }
+      await this.refresh();
+    } catch (e) { alert('删除失败: ' + e); }
+  },
+
+  /* ---------- 监控池弹框 ---------- */
+  openPoolModal(preset){
+    preset = preset || {};
+    const cur = preset.contracts ? preset.contracts.join('、') : '';
+    const input = prompt('监控品种(逗号或顿号分隔, 如 si、lc、fu、ao、br):', cur);
+    if (input === null) return;
+    const contracts = input.split(/[,、， \t\n]+/).map(s => s.trim()).filter(Boolean);
+    if (!contracts.length) { alert('至少输入一个品种'); return; }
+    const date = preset.snapshot_date || new Date().toISOString().slice(0,10);
+    const payload = { id: preset.id || null, snapshot_date: date, contracts, note: '' };
+    fetchT('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})
+      .then(r => r.json()).then(d => {
+        if (!d.ok) { alert('保存失败: ' + d.error); return; }
+        this.refresh();
+      }).catch(e => alert('保存失败: ' + e));
+  },
+
+  async deletePool(id){
+    if (!confirm('确认删除这个监控池快照?')) return;
+    try {
+      const r = await fetchT('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+      const d = await r.json();
+      if (!d.ok) { alert('删除失败: ' + d.error); return; }
+      await this.refresh();
+    } catch (e) { alert('删除失败: ' + e); }
+  },
+};
+TradeUI.init();
+
+/* =================================================================
    资金曲线模块（独立命名空间 FundUI）
    ================================================================= */
 /* 图表数值标签插件: 柱状图顶部显示金额(万), 折线图节点上方显示 % */
@@ -2962,13 +3824,16 @@ const FundUI = {
         const tab = t.dataset.tab;
         $('calcArea').classList.toggle('hidden', tab !== 'calc');
         $('fundsArea').classList.toggle('hidden', tab !== 'funds');
+        $('tradesArea').classList.toggle('hidden', tab !== 'trades');
         // header 标题随 tab 联动
         const titles = {
-          calc:  {t:'期货开仓计算器', s:'风控仓位计算 · 盈亏比决策 · 保证金测算'},
-          funds: {t:'资金曲线',        s:'abe · 威科夫 多策略记录'}
+          calc:   {t:'期货开仓计算器', s:'风控仓位计算 · 盈亏比决策 · 保证金测算'},
+          trades: {t:'abe 期权交易记录', s:'策略: abe · 期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
+          funds:  {t:'资金曲线',        s:'abe · 威科夫 多策略记录'}
         };
         const ti = titles[tab];
         if (ti) { $('appTitle').textContent = ti.t; $('appSubtitle').textContent = ti.s; }
+        if (tab === 'trades' && typeof TradeUI !== 'undefined') TradeUI.refresh();
         if (tab === 'funds' && (!this.monthly.length && !this.yearly.length)) {
           this.refreshAll();
         }
