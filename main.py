@@ -1875,7 +1875,7 @@ body{
     radial-gradient(900px 420px at 85% -10%, rgba(91,140,255,.16), transparent 60%),
     radial-gradient(700px 380px at -10% 30%, rgba(125,227,255,.10), transparent 55%);
 }
-.wrap{max-width:1320px;margin-left:0;margin-right:auto;padding:28px 20px 60px}
+.wrap{max-width:1180px;margin-left:0;margin-right:auto;padding:28px 20px 60px}
 
 /* 顶部 */
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:26px;flex-wrap:wrap}
@@ -2099,8 +2099,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* 交易记录页 toolbar: 左侧筛选, 右侧操作按钮 */
 .trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%}
 .trades-toolbar > .spacer{flex:1}
-.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer}
-.chk input{accent-color:var(--accent)}
+.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer;white-space:nowrap}
+.chk input{accent-color:var(--accent);margin:0}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
 .trades-layout.has-detail .trades-main{width:100%;min-width:0}
@@ -2142,8 +2142,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .tag.closed{background:rgba(120,200,150,.18);color:#78c896}
 .tag.partial{background:rgba(255,180,80,.18);color:#ffb450}
 .tag.unclosed{background:rgba(91,140,255,.18);color:#7da3ff}
-.tag.buy{background:rgba(70,214,234,.18);color:#46d6ea}
-.tag.sell{background:rgba(255,107,155,.18);color:#ff84b9}
+/* 方向色(中国习惯): 买入红 / 卖出青; 看涨红 / 看跌青 */
+.tag.buy{background:rgba(255,107,107,.18);color:#ff8484}
+.tag.sell{background:rgba(70,214,234,.18);color:#46d6ea}
 .iconbtn{background:transparent;border:none;color:var(--sub);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:6px}
 .iconbtn:hover{background:var(--panel2);color:var(--accent)}
 .row-actions{display:flex;gap:4px;justify-content:flex-end}
@@ -2200,6 +2201,13 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .btn.xs{padding:3px 10px;font-size:11px;border-radius:8px;vertical-align:middle}
 .btn.ghost{background:transparent;border-color:var(--border);color:var(--sub)}
 .btn.ghost:hover{color:var(--accent);border-color:var(--accent)}
+/* 交易记录动作按钮配色: 开仓(买入/做多)红, 平仓(卖出/做空)青 — 中国习惯 */
+.btn.rose{background:linear-gradient(135deg,#ff8484,#ff5f6d);border:0;color:#fff;
+  box-shadow:0 4px 12px rgba(255,95,109,.28)}
+.btn.rose:hover{box-shadow:0 8px 20px rgba(255,95,109,.42)}
+.btn.cyan{background:linear-gradient(135deg,#46d6ea,#21b6cf);border:0;color:#0b2230;
+  box-shadow:0 4px 12px rgba(70,214,234,.25)}
+.btn.cyan:hover{box-shadow:0 8px 20px rgba(70,214,234,.4)}
 
 /* 期权品种单选按钮组 */
 .chipgroup{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 6px}
@@ -2645,9 +2653,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <header class="trades-header">
         <div class="trades-toolbar">
           <label class="chk"><input type="checkbox" id="tradesOnlyOpen"> 只展示未平仓</label>
-          <button class="btn xs" id="btnShowAll" hidden>📜 显示全部</button>
+          <button class="btn xs ghost" id="btnShowAll" hidden>📜 显示全部</button>
           <span class="spacer"></span>
-          <button class="btn xs" id="btnNewOpen">➕ 新建开仓</button>
+          <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
         </div>
       </header>
       <div class="trades-layout">
@@ -2681,8 +2689,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="td-head">
               <h2><span class="dot"></span><span id="tdTitle">—</span></h2>
               <div class="td-head-actions">
-                <button class="btn xs" id="tdNewOpen">➕ 新建开仓</button>
-                <button class="btn xs" id="tdNewClose">➖ 新建平仓</button>
+                <button class="btn xs rose" id="tdNewOpen">➕ 新建开仓</button>
+                <button class="btn xs cyan" id="tdNewClose">➖ 新建平仓</button>
                 <button class="btn xs ghost" id="tdClose">✕ 关闭</button>
               </div>
             </div>

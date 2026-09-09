@@ -305,6 +305,16 @@ async function main() {
   })())`);
   const mto = JSON.parse(mainToolbarOrder);
   check('主页面 toolbar「新建开仓」在最右(右推)', mto[mto.length - 1] === 'btnNewOpen', mainToolbarOrder);
+  // 1b. 主页面工具栏按钮配色: btnNewOpen 红(rose), 分页面 tdNewOpen 红/tdNewClose 青
+  const btnColors = await evalJs(ws, `JSON.stringify({
+    mainOpen: document.getElementById('btnNewOpen').className,
+    tdOpen: document.getElementById('tdNewOpen').className,
+    tdClose: document.getElementById('tdNewClose').className,
+    chkNowrap: getComputedStyle(document.querySelector('.trades-toolbar .chk')).whiteSpace
+  })`);
+  const bc = JSON.parse(btnColors);
+  check('主页面/分页面按钮配色(开仓红/平仓青)', /rose/.test(bc.mainOpen) && /rose/.test(bc.tdOpen) && /cyan/.test(bc.tdClose), btnColors);
+  check('「只展示未平仓」不换行', bc.chkNowrap === 'nowrap', btnColors);
   // 2. 策略名输入字段已移除
   const stratGone = await evalJs(ws, `!!document.getElementById('tmStrategy')`);
   check('策略名输入字段已移除', stratGone === false);
