@@ -263,6 +263,38 @@ async function main() {
   const ad = JSON.parse(arrowDir);
   check('箭头方向 导出⬆ / 导入⬇', ad.ex === '⬆' && ad.im === '⬇', arrowDir);
 
+  // ---- 场景L: 字号三档切换 + 分页面加宽 ----
+  // 1. 顶部字号切换存在且默认中(md active)
+  const fzSeg = await evalJs(ws, `JSON.stringify({
+    seg: !!document.getElementById('fontSeg'),
+    btns: [...document.querySelectorAll('#fontSeg button')].map(b=>b.dataset.fz + ':' + b.classList.contains('active')),
+    body: document.body.className
+  })`);
+  const fs1 = JSON.parse(fzSeg);
+  check('字号切换器在顶部(小/中/大)', fs1.seg && fs1.btns.length === 3, fzSeg);
+  check('默认中号(md active)', fs1.btns.includes('md:true') && /fz-md/.test(fs1.body), fzSeg);
+  // 2. 切大号 → body class 变化 + 表格字号实际变大
+  const fzGrow = await evalJs(ws, `(async () => {
+    const before = getComputedStyle(document.querySelector('#tradesTable td')).fontSize;
+    document.querySelector('#fontSeg button[data-fz="lg"]').click();
+    await new Promise(r=>setTimeout(r,300));
+    const after = getComputedStyle(document.querySelector('#tradesTable td')).fontSize;
+    const cls = document.body.className;
+    document.querySelector('#fontSeg button[data-fz="md"]').click();
+    await new Promise(r=>setTimeout(r,300));
+    return JSON.stringify({before, after, cls, back: getComputedStyle(document.querySelector('#tradesTable td')).fontSize});
+  })()`);
+  const fg = JSON.parse(fzGrow);
+  check('切大号后表格字号变大(大>中)', parseFloat(fg.after) > parseFloat(fg.before) && /fz-lg/.test(fg.cls), fzGrow);
+  check('切回中号恢复', Math.abs(parseFloat(fg.back) - parseFloat(fg.before)) < 0.01, fzGrow);
+  // 3. 分页面宽度 ≥ 1100(加宽消除横滑)
+  await evalJs(ws, `[...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === 'e2eavg')?.click()`);
+  await sleep(600);
+  const sideW = await evalJs(ws, `Math.round(document.querySelector('.trades-side').getBoundingClientRect().width)`);
+  check('分页面加宽 ≥1100px(表格无滑块)', sideW >= 1100, 'w=' + sideW);
+  await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
+  await sleep(300);
+
   // ---- 场景G: UI 结构打磨 (v50.1) ----
   // 先关掉场景 F 留下的详情面板, 保证干净的 has-detail 检测
   await evalJs(ws, `document.querySelector('#tdClose')?.click()`);

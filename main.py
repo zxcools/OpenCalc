@@ -1882,6 +1882,45 @@ HTML = r"""<!DOCTYPE html>
   --text:#e8ecff; --sub:#9aa6c8; --accent:#5b8cff; --accent2:#7de3ff;
   --good:#2ecc8f; --bad:#ff6b6b; --warn:#ffb86b; --gold:#f5c76b;
   --shadow:0 18px 50px rgba(0,0,0,.45);
+  /* ===== 字号档位变量 (默认=中) =====
+     切换: <body class="fz-sm|fz-md|fz-lg">, 覆盖整组变量即整体放大/缩小 */
+  --fz-th:14px;      /* 表格表头 */
+  --fz-td:15px;      /* 表格正文(资金曲线 .tbl td) */
+  --fz-td2:14.5px;   /* 交易记录 td */
+  --fz-tag:13.5px;   /* 标签 */
+  --fz-btn:13.5px;   /* 小按钮 xs/ghost */
+  --fz-btn2:14.5px;  /* 中按钮 sm */
+  --fz-h2:16.5px;    /* 卡片标题 */
+  --fz-seg:15px;     /* seg 切换按钮 */
+  --fz-chk:14.5px;   /* 复选框 */
+  --fz-tip:14px;     /* 提示 */
+  --fz-icon:17px;    /* 行内 ✎🗑 图标 */
+  --fz-opf:14px;     /* 筛选行 */
+  --fz-lbl:13.5px;   /* 表单标签 */
+  --fz-input:15px;   /* 输入框/下拉 */
+  --fz-micro:12px;   /* 极小说明(mode small/ladder-note 等) */
+  --fz-small:12.5px; /* 次级说明(bignum .s/unit .u 等) */
+  --fz-mid:13px;     /* 常规小字(quote qname/bignum .t 等) */
+  --fz-fml:12px;     /* 预算公式行 */
+  --fz-legend:13px;  /* 图表图例 */
+  --fz-chart:13px;    /* Chart.js 刻度字号(实时读取) */
+  --fz-chart2:14px;   /* Chart.js 数值标签 */
+}
+body.fz-sm{
+  --fz-th:12.5px; --fz-td:13.5px; --fz-td2:13px; --fz-tag:12px;
+  --fz-btn:12px; --fz-btn2:13px; --fz-h2:15px; --fz-seg:13.5px;
+  --fz-chk:13px; --fz-tip:12.5px; --fz-icon:15px; --fz-opf:12.5px;
+  --fz-lbl:12.5px; --fz-input:13.5px;
+  --fz-micro:11px; --fz-small:11.5px; --fz-mid:12px; --fz-fml:11px;
+  --fz-legend:11.5px; --fz-chart:11.5px; --fz-chart2:12.5px;
+}
+body.fz-lg{
+  --fz-th:15.5px; --fz-td:17px; --fz-td2:16px; --fz-tag:15px;
+  --fz-btn:15px; --fz-btn2:16.5px; --fz-h2:18.5px; --fz-seg:17px;
+  --fz-chk:16px; --fz-tip:15.5px; --fz-icon:19px; --fz-opf:15.5px;
+  --fz-lbl:15px; --fz-input:17px;
+  --fz-micro:13.5px; --fz-small:14px; --fz-mid:14.5px; --fz-fml:13.5px;
+  --fz-legend:14.5px; --fz-chart:15px; --fz-chart2:16px;
 }
 [data-theme="light"]{
   --bg:#eef1f8; --panel:#ffffff; --panel2:#f4f6fd; --border:#dfe4f2;
@@ -1903,12 +1942,20 @@ body{
 /* 顶部 */
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:26px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:14px}
+/* 顶部字号切换(置顶左侧, 小/中/大) */
+.fzseg{display:flex;gap:2px;background:var(--panel);border:1px solid var(--border);
+  border-radius:12px;padding:3px;flex:none;align-self:center}
+.fzseg button{padding:6px 10px;border-radius:8px;cursor:pointer;border:0;
+  background:transparent;color:var(--sub);font-weight:600;font-size:12.5px;
+  line-height:1;transition:all .2s}
+.fzseg button.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);color:#fff}
+.fzseg button:not(.active):hover{background:var(--panel2);color:var(--text)}
 .logo{width:46px;height:46px;border-radius:14px;flex:none;
   background:linear-gradient(135deg,#5b8cff,#7de3ff);
   display:flex;align-items:center;justify-content:center;font-size:22px;
   box-shadow:0 8px 24px rgba(91,140,255,.4)}
 .brand h1{font-size:21px;letter-spacing:.5px}
-.brand p{font-size:12px;color:var(--sub);margin-top:2px}
+.brand p{font-size:var(--fz-mid);color:var(--sub);margin-top:2px}
 .topbtns{display:flex;align-items:center;gap:10px}
 .iconbtn{width:38px;height:38px;border-radius:11px;border:1px solid var(--border);
   background:var(--panel);color:var(--text);cursor:pointer;font-size:16px;
@@ -1934,13 +1981,13 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 
 .card{background:var(--panel);border:1px solid var(--border);border-radius:20px;
   padding:22px;box-shadow:var(--shadow)}
-.card h2{font-size:14px;color:var(--sub);font-weight:600;letter-spacing:1px;
+.card h2{font-size:var(--fz-h2);color:var(--sub);font-weight:600;letter-spacing:1px;
   margin-bottom:16px;display:flex;align-items:center;gap:8px}
 .card h2 .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block}
 
-label{display:block;font-size:12.5px;color:var(--sub);margin:14px 0 6px}
+label{display:block;font-size:var(--fz-lbl);color:var(--sub);margin:14px 0 6px}
 input,select{width:100%;padding:11px 13px;border-radius:11px;border:1px solid var(--border);
-  background:var(--panel2);color:var(--text);font-size:15px;outline:none;
+  background:var(--panel2);color:var(--text);font-size:var(--fz-input);outline:none;
   transition:border .2s,box-shadow .2s;font-family:inherit}
 input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(91,140,255,.18)}
 input::placeholder{color:var(--sub);opacity:.55}
@@ -2052,7 +2099,7 @@ select{cursor:pointer;appearance:none;
 .plans-item:hover .go{background:rgba(91,140,255,.2)}
 .plans-item .go:active{transform:scale(.96)}
 
-.tip{margin-top:16px;font-size:12px;color:var(--sub);line-height:1.8;
+.tip{margin-top:16px;font-size:var(--fz-tip);color:var(--sub);line-height:1.8;
   background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:12px 16px}
 .tip b{color:var(--accent2);font-weight:600}
 
@@ -2122,13 +2169,13 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* 交易记录页 toolbar: 左侧筛选, 右侧操作按钮 */
 .trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%}
 .trades-toolbar > .spacer{flex:1}
-.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer;white-space:nowrap}
+.chk{display:flex;align-items:center;gap:6px;font-size:var(--fz-chk);color:var(--text);cursor:pointer;white-space:nowrap}
 .chk input{accent-color:var(--accent);margin:0}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
 .trades-layout.has-detail .trades-main{width:100%;min-width:0}
 .trades-layout.has-detail .trades-side{
-  position:fixed;top:60px;right:0;width:min(940px,64vw);height:calc(100vh - 60px);
+  position:fixed;top:60px;right:0;width:min(1240px,86vw);height:calc(100vh - 60px);
   z-index:50;background:var(--panel);border-left:1px solid var(--panel2);
   box-shadow:-4px 0 18px rgba(0,0,0,.4);overflow:auto;animation:fadeSlide .25s ease
 }
@@ -2166,7 +2213,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-tbl tr.row-close td{background:rgba(255,107,155,.04)}
 .trades-tbl tr.clickable{cursor:pointer}
 .trades-tbl tr.clickable:hover{background:var(--panel2)}
-.tag{display:inline-block;padding:2px 7px;border-radius:6px;font-size:11px;font-weight:600}
+.tag{display:inline-block;padding:2px 7px;border-radius:6px;font-size:var(--fz-tag);font-weight:600}
 .tag.long{background:rgba(255,107,107,.18);color:#ff8484}
 .tag.short{background:rgba(70,214,234,.18);color:#46d6ea}
 .tag.open{background:rgba(91,140,255,.18);color:#7da3ff}
@@ -2191,7 +2238,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 
 /* 录入对话框(共用) */
 .formgrid{display:grid;grid-template-columns:1fr 1fr;column-gap:14px;row-gap:12px;margin-top:12px}
-.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--sub);align-items:stretch;min-width:0}
+.formgrid label{display:flex;flex-direction:column;gap:4px;font-size:var(--fz-lbl);color:var(--sub);align-items:stretch;min-width:0}
 .formgrid label>input,
 .formgrid label>select{width:100%;margin:0;box-sizing:border-box;min-width:0}
 .formgrid .full{grid-column:1/-1}
@@ -2222,15 +2269,15 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   color:var(--text);font-weight:600;font-size:11.5px;white-space:nowrap}
 .wchip b{color:var(--accent)}
 .btn{padding:10px 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel2);
-  color:var(--text);font-weight:600;cursor:pointer;transition:all .2s;font-size:13.5px}
+  color:var(--text);font-weight:600;cursor:pointer;transition:all .2s;font-size:var(--fz-btn)}
 .btn:hover{transform:translateY(-1px);background:var(--panel);border-color:var(--accent)}
 .btn.primary{background:linear-gradient(135deg,#5b8cff,#3b6cf6);border:0;color:#fff;
   box-shadow:0 6px 18px rgba(59,108,246,.3)}
 .btn.primary:hover{box-shadow:0 10px 24px rgba(59,108,246,.45)}
 .btn.danger{background:rgba(255,107,107,.12);border-color:rgba(255,107,107,.3);color:var(--bad)}
 .btn.danger:hover{background:rgba(255,107,107,.22)}
-.btn.sm{padding:6px 12px;font-size:12px}
-.btn.xs{padding:3px 10px;font-size:11px;border-radius:8px;vertical-align:middle}
+.btn.sm{padding:6px 12px;font-size:var(--fz-btn2)}
+.btn.xs{padding:3px 10px;font-size:var(--fz-btn);border-radius:8px;vertical-align:middle}
 .btn.ghost{background:transparent;border-color:var(--border);color:var(--sub)}
 .btn.ghost:hover{color:var(--accent);border-color:var(--accent)}
 /* 交易记录动作按钮配色: 开仓(买入/做多)红, 平仓(卖出/做空)青 — 中国习惯 */
@@ -2245,7 +2292,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .chipgroup{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 6px}
 .chip{padding:8px 14px;border-radius:10px;border:1px solid var(--border);background:var(--panel2);
   color:var(--text);font-weight:600;font-size:12.5px;cursor:pointer;transition:all .2s;user-select:none}
-.chip small{display:block;font-weight:400;font-size:10px;opacity:.65;margin-top:1px}
+.chip small{display:block;font-weight:400;font-size:var(--fz-micro);opacity:.65;margin-top:1px}
 .chip:hover{border-color:var(--accent);transform:translateY(-1px)}
 .chip.active{background:linear-gradient(135deg,#5b8cff,#3b6cf6);border-color:transparent;color:#fff;
   box-shadow:0 6px 16px rgba(59,108,246,.35)}
@@ -2273,56 +2320,56 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   box-shadow:0 6px 20px rgba(91,140,255,.45);font-size:22px;z-index:100;transition:transform .2s,box-shadow .2s}
 .floating-contact:hover{transform:scale(1.1);box-shadow:0 8px 26px rgba(91,140,255,.6)}
 
-.tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
-.tbl th{text-align:left;padding:10px 10px;color:var(--sub);font-weight:600;font-size:11.5px;
+.tbl{width:100%;border-collapse:collapse;font-size:var(--fz-td2);margin-top:6px}
+.tbl th{text-align:left;padding:10px 10px;color:var(--sub);font-weight:600;font-size:var(--fz-th);
   letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--panel2);
   position:sticky;top:0;z-index:2}   /* 表头固定: 滚动时首行不消失 */
 .tbl td{padding:11px 10px;border-bottom:1px solid var(--border)}
 .tbl tr:hover td{background:var(--panel2)}
 .tbl .num{text-align:right;font-variant-numeric:tabular-nums}
 
-/* ===== 交易记录 / 资金曲线 字号放大 (2026-09-09 v2, 再调大一档) ===== */
-#tradesArea .tbl th, #fundsArea .tbl th{font-size:14px}
-#tradesArea .tbl td, #fundsArea .tbl td{font-size:15px}
-#tradesArea .trades-tbl th{font-size:14px}
-#tradesArea .trades-tbl td{font-size:14.5px;padding:8px 10px}
-#tradesArea .tag, #fundsArea .tag{font-size:13.5px;padding:3px 9px}
-#tradesArea .btn.xs, #fundsArea .btn.xs{font-size:13.5px;padding:5px 13px}
-#tradesArea .btn.sm, #fundsArea .btn.sm{font-size:14.5px;padding:7px 15px}
-#tradesArea .btn.ghost, #fundsArea .btn.ghost{font-size:13.5px}
-#tradesArea .chk{font-size:14.5px}
-#tradesArea .op-filter{font-size:14px}
-#tradesArea .op-filter select{font-size:14px;padding:5px 9px}
-#tradesArea .iconbtn{font-size:17px}
-#tradesArea .card h2, #fundsArea .card h2{font-size:16.5px}
-#fundsArea .funds-bar .seg button{font-size:15px;padding:9px 18px}
-#fundsArea .funds-bar .btn.sm{font-size:14.5px;padding:7px 13px}
-#tradesArea .tip, #fundsArea .tip{font-size:14px}
-#fundsArea .chartbox .legend{font-size:13px}
+/* ===== 交易记录 / 资金曲线 字号放大 (2026-09-09 v3, 变量驱动支持三档) ===== */
+#tradesArea .tbl th, #fundsArea .tbl th{font-size:var(--fz-th)}
+#tradesArea .tbl td, #fundsArea .tbl td{font-size:var(--fz-td)}
+#tradesArea .trades-tbl th{font-size:var(--fz-th)}
+#tradesArea .trades-tbl td{font-size:var(--fz-td2);padding:8px 10px}
+#tradesArea .tag, #fundsArea .tag{font-size:var(--fz-tag);padding:3px 9px}
+#tradesArea .btn.xs, #fundsArea .btn.xs{font-size:var(--fz-btn);padding:5px 13px}
+#tradesArea .btn.sm, #fundsArea .btn.sm{font-size:var(--fz-btn2);padding:7px 15px}
+#tradesArea .btn.ghost, #fundsArea .btn.ghost{font-size:var(--fz-btn)}
+#tradesArea .chk{font-size:var(--fz-chk)}
+#tradesArea .op-filter{font-size:var(--fz-opf)}
+#tradesArea .op-filter select{font-size:var(--fz-opf);padding:5px 9px}
+#tradesArea .iconbtn{font-size:var(--fz-icon)}
+#tradesArea .card h2, #fundsArea .card h2{font-size:var(--fz-h2)}
+#fundsArea .funds-bar .seg button{font-size:var(--fz-seg);padding:9px 18px}
+#fundsArea .funds-bar .btn.sm{font-size:var(--fz-btn2);padding:7px 13px}
+#tradesArea .tip, #fundsArea .tip{font-size:var(--fz-tip)}
+#fundsArea .chartbox .legend{font-size:var(--fz-legend)}
 
-/* ===== 开仓计算页 字号放大 (2026-09-09) ===== */
-#calcArea label{font-size:13.5px}
-#calcArea .dirrow .dirlabel{font-size:13.5px}
-#calcArea .unit-suffix .u{font-size:13.5px}
-#calcArea .budgetbar .k{font-size:13.5px}
-#calcArea .budgetbar .k .fml{font-size:12px}
-#calcArea .budgetbar .v small{font-size:13px}
-#calcArea .bignum .t{font-size:13px}
-#calcArea .bignum .s{font-size:12.5px}
-#calcArea .ratio-strip .l{font-size:13.5px}
-#calcArea .ratio-strip .r small{font-size:13px}
-#calcArea .details .drow{font-size:14.5px;padding:12px 18px}
-#calcArea .drow .k{font-size:13px}
-#calcArea .mode small{font-size:12px}
-#calcArea .plans-item .meta{font-size:12.5px}
-#calcArea .plans-empty{font-size:13.5px}
-#calcArea .quote .qname{font-size:13px}
-#calcArea .quote .qchg{font-size:13.5px}
-#calcArea .ladder-hd .ladder-sub{font-size:12.5px}
-#calcArea .ladder-hd .ladder-note{font-size:12px}
-#calcArea .rung .rt{font-size:12px}
-#calcArea .rung .rt b{font-size:13.5px}
-#calcArea .rung .rp{font-size:12px}
+/* ===== 开仓计算页 字号放大 (变量驱动) ===== */
+#calcArea label{font-size:var(--fz-lbl)}
+#calcArea .dirrow .dirlabel{font-size:var(--fz-lbl)}
+#calcArea .unit-suffix .u{font-size:var(--fz-lbl)}
+#calcArea .budgetbar .k{font-size:var(--fz-lbl)}
+#calcArea .budgetbar .k .fml{font-size:var(--fz-fml)}
+#calcArea .budgetbar .v small{font-size:var(--fz-mid)}
+#calcArea .bignum .t{font-size:var(--fz-mid)}
+#calcArea .bignum .s{font-size:var(--fz-small)}
+#calcArea .ratio-strip .l{font-size:var(--fz-lbl)}
+#calcArea .ratio-strip .r small{font-size:var(--fz-mid)}
+#calcArea .details .drow{font-size:var(--fz-td2);padding:12px 18px}
+#calcArea .drow .k{font-size:var(--fz-mid)}
+#calcArea .mode small{font-size:var(--fz-micro)}
+#calcArea .plans-item .meta{font-size:var(--fz-small)}
+#calcArea .plans-empty{font-size:var(--fz-lbl)}
+#calcArea .quote .qname{font-size:var(--fz-mid)}
+#calcArea .quote .qchg{font-size:var(--fz-lbl)}
+#calcArea .ladder-hd .ladder-sub{font-size:var(--fz-small)}
+#calcArea .ladder-hd .ladder-note{font-size:var(--fz-micro)}
+#calcArea .rung .rt{font-size:var(--fz-micro)}
+#calcArea .rung .rt b{font-size:var(--fz-lbl)}
+#calcArea .rung .rp{font-size:var(--fz-micro)}
 #calcArea .tip{font-size:13.5px}
 /* 月度明细限高滚动(记录多时默认只显示最近 5 条, 其余可滚动) */
 .tbl-scroll{max-height:420px;overflow-y:auto;overflow-x:auto}
@@ -2387,11 +2434,18 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <div class="wrap">
 
   <header>
-    <div class="brand">
-      <div class="logo">◈</div>
-      <div>
-        <h1 id="appTitle">期货开仓计算器</h1>
-        <p id="appSubtitle">风控仓位计算 · 盈亏比决策 · 保证金测算</p>
+    <div class="hgroup" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div class="fzseg" id="fontSeg" title="界面字号">
+        <button data-fz="sm">A-</button>
+        <button data-fz="md" class="active">A</button>
+        <button data-fz="lg">A+</button>
+      </div>
+      <div class="brand">
+        <div class="logo">◈</div>
+        <div>
+          <h1 id="appTitle">期货开仓计算器</h1>
+          <p id="appSubtitle">风控仓位计算 · 盈亏比决策 · 保证金测算</p>
+        </div>
       </div>
     </div>
     <div class="topbtns">
@@ -3348,6 +3402,31 @@ $('themeBtn').addEventListener('click',()=>{
   applyTheme(document.body.dataset.theme==='dark' ? 'light' : 'dark');
 });
 
+/* 字号档位: 小(sm) / 中(md) / 大(lg) — body class 覆盖 CSS 变量组 */
+const FONT_LEVELS = ['sm','md','lg'];
+let fontLevel = localStorage.getItem('oc-font') || 'md';
+function applyFontLevel(lv, skipChart){
+  if (!FONT_LEVELS.includes(lv)) lv = 'md';
+  fontLevel = lv;
+  document.body.classList.remove('fz-sm','fz-md','fz-lg');
+  document.body.classList.add('fz-' + lv);
+  localStorage.setItem('oc-font', lv);
+  document.querySelectorAll('#fontSeg button').forEach(b=>{
+    b.classList.toggle('active', b.dataset.fz === lv);
+  });
+  // 图表字号实时读 CSS 变量 → 已开图表需重建(含放大图); 页面初始化时 FundUI 尚未定义, 跳过
+  if (!skipChart){
+    try{
+      if (FundUI && (FundUI.chartMonthly || FundUI.chartYearly)) FundUI.renderCharts();
+      if (FundUI && FundUI.chartZoom) FundUI.closeChartZoom();
+    }catch(e){}
+  }
+}
+document.querySelectorAll('#fontSeg button').forEach(b=>{
+  b.addEventListener('click', ()=>applyFontLevel(b.dataset.fz));
+});
+applyFontLevel(fontLevel, true);   // 初始: 只需设 class, 图表由 FundUI.init 后续按变量渲染
+
 /* 窗口置顶 (Always on Top) */
 let pinned = localStorage.getItem('oc-pin') === '1';
 function applyPinUI(){
@@ -4199,12 +4278,19 @@ function fmtWan(v){
   if (abs >= 10000) return (v/10000).toFixed(2) + '万';
   return v.toLocaleString('en-US');
 }
+// 读 CSS 变量字号(px), 供 Chart.js 随字号档位联动
+function cssFz(name, fallback){
+  const v = getComputedStyle(document.body).getPropertyValue(name).trim();
+  const n = parseFloat(v);
+  return isNaN(n) ? fallback : n;
+}
 const valueLabelPlugin = {
   id: 'valueLabel',
   afterDatasetsDraw(chart, args, opts){
     const {ctx} = chart;
     ctx.save();
-    const fs = (chart.options.plugins && chart.options.plugins.valueLabel && chart.options.plugins.valueLabel.fontSize) || 13;
+    const fs = (chart.options.plugins && chart.options.plugins.valueLabel && chart.options.plugins.valueLabel.fontSize)
+      || cssFz('--fz-chart2', 14);
     ctx.font = 'bold ' + fs + 'px "Segoe UI","Microsoft YaHei",sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -4719,13 +4805,13 @@ const FundUI = {
         maintainAspectRatio: false,
         plugins: {
           legend: {display: false},
-          tooltip: {intersect: false, mode: 'index', titleFont: {size: 14}, bodyFont: {size: 13.5},
+          tooltip: {intersect: false, mode: 'index', titleFont: {size: cssFz('--fz-chart2',14)}, bodyFont: {size: cssFz('--fz-chart',13)},
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size:13}, callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size:13}, callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size:13}, autoSkip: true, maxRotation: 0}},
+          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
+          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}, autoSkip: true, maxRotation: 0}},
         },
       },
     });
@@ -4756,13 +4842,13 @@ const FundUI = {
         maintainAspectRatio: false,
         plugins: {
           legend: {display: false},
-          tooltip: {intersect: false, mode: 'index', titleFont: {size: 14}, bodyFont: {size: 13.5},
+          tooltip: {intersect: false, mode: 'index', titleFont: {size: cssFz('--fz-chart2',14)}, bodyFont: {size: cssFz('--fz-chart',13)},
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size:13}, callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size:13}, callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size:13}}},
+          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toLocaleString()}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size: cssFz('--fz-chart',13)}, callback:v=>v.toFixed(0)+'%'}},
+          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13)}}},
         },
       },
     });
@@ -4836,14 +4922,14 @@ const FundUI = {
         animation: {duration: 400},
         plugins: {
           legend: {display: false},
-          valueLabel: {fontSize: 16},   // 放大图数值标签更大
-          tooltip: {intersect: false, mode: 'index', titleFont: {size: 14}, bodyFont: {size: 13},
+          valueLabel: {fontSize: cssFz('--fz-chart2',14) + 2},   // 放大图数值标签更大
+          tooltip: {intersect: false, mode: 'index', titleFont: {size: cssFz('--fz-chart2',14)}, bodyFont: {size: cssFz('--fz-chart',13)},
             callbacks: {label: ctx=> ctx.dataset.label + ': ' + ctx.formattedValue + (ctx.dataset.label.includes('%')?'%':'')}},
         },
         scales: {
-          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size:13.5}, callback:v=>v.toLocaleString()}},
-          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size:13.5}, callback:v=>v.toFixed(0)+'%'}},
-          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size:13.5}, autoSkip: true, maxRotation: 0}},
+          y:  {position:'left',  grid:{color:'rgba(148,163,255,.12)'}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toLocaleString()}},
+          y1: {position:'right', grid:{display:false},            ticks:{color:'#ff5b9b', font:{size: cssFz('--fz-chart',13) + 0.5}, callback:v=>v.toFixed(0)+'%'}},
+          x:  {grid:{display:false}, ticks:{color:'#9aa6c8', font:{size: cssFz('--fz-chart',13) + 0.5}, autoSkip: true, maxRotation: 0}},
         },
       },
     });
