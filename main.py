@@ -1086,14 +1086,14 @@ def fund_import_backup(payload):
     if isinstance(payload.get("trades"), list):
         for r in payload["trades"]:
             try:
-                trade_upsert(r)
+                trade_import_record(r)   # 保留原 id 直接写入(不是 trade_upsert — 带 id 会走 UPDATE 而失败)
                 imported += 1
             except Exception:
                 pass   # 单条记录不合法则跳过, 不中断整批
     if isinstance(payload.get("trade_pools"), list):
         for r in payload["trade_pools"]:
             try:
-                trade_pool_upsert(r)
+                trade_pool_import_record(r)
                 imported += 1
             except Exception:
                 pass
@@ -1464,6 +1464,96 @@ def trade_pool_upsert(payload):
 def trade_pool_delete(rec_id):
     db = _fund_db()
     db.execute("DELETE FROM trade_pool_snapshots WHERE id=?", (rec_id,))
+
+
+# ----- 备份导入专用: 保留原 id 直接写入(同 id 覆盖), 使重复导入幂等 -----
+# ⚠ 不能复用 trade_upsert / trade_pool_upsert — 它们见到 id 就走 UPDATE 分支,
+#   目标库(如换电脑后的空库)没有该 id 会抛"记录不存在", 导致整批记录被静默丢弃。
+_TRADE_IMPORT_COLS = (
+    "id", "strategy", "underlying", "contract", "op_type", "open_date", "open_delta",
+    "target_delta", "call_put", "direction", "open_price", "qty", "premium",
+    "close_qty", "close_price", "pnl", "close_date", "note", "created_at", "updated_at",
+)
+
+
+def trade_import_record(r):
+    """导入单条交易记录(备份恢复用): 保留原 id, 同 id 覆盖 → 重复导入幂等"""
+    if not isinstance(r, dict):
+        raise ValueError("交易记录条目格式不正确")
+    for k in ("underlying", "contract", "op_type", "direction"):
+        if not r.get(k):
+            raise ValueError("交易记录缺少必填字段: %s" % k)
+    if r["op_type"] not in ALLOWED_OP_TYPE:
+        raise ValueError("op_type 必须为 open / close")
+    now = datetime.now().isoformat(timespec="seconds")
+    row = {
+        "id": r.get("id"),
+        "strategy": r.get("strategy") or TRADE_STRATEGY_DEFAULT,
+        "underlying": r["underlying"],
+        "contract": r["contract"],
+        "op_type": r["op_type"],
+        "open_date": r.get("open_date") or "",
+        "open_delta": r.get("open_delta"),
+        "target_delta": r.get("target_delta"),
+        "call_put": r.get("call_put"),
+        "direction": r["direction"],
+        "open_price": r.get("open_price") or 0,
+        "qty": int(r.get("qty") or 0),
+        "premium": float(r.get("premium") or 0),
+        "close_qty": r.get("close_qty"),
+        "close_price": r.get("close_price"),
+        "pnl": r.get("pnl"),
+        "close_date": r.get("close_date") or "",
+        "note": r.get("note") or "",
+        "created_at": r.get("created_at") or now,
+        "updated_at": r.get("updated_at") or now,
+    }
+    db = _fund_db()
+    if row["id"] is None:
+        cols = [c for c in _TRADE_IMPORT_COLS if c != "id"]
+        db.execute(
+            "INSERT INTO trade_records (%s) VALUES (%s)" % (", ".join(cols), ", ".join("?" for _ in cols)),
+            [row[c] for c in cols],
+        )
+        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT OR REPLACE INTO trade_records (%s) VALUES (%s)" % (
+            ", ".join(_TRADE_IMPORT_COLS), ", ".join("?" for _ in _TRADE_IMPORT_COLS)),
+        [row[c] for c in _TRADE_IMPORT_COLS],
+    )
+    return row["id"]
+
+
+def trade_pool_import_record(r):
+    """导入单条监控池快照(备份恢复用): 保留原 id, 同 id 覆盖"""
+    if not isinstance(r, dict):
+        raise ValueError("监控池条目格式不正确")
+    contracts = r.get("contracts") or []
+    if not isinstance(contracts, list):
+        raise ValueError("contracts 必须是数组")
+    now = datetime.now().isoformat(timespec="seconds")
+    row = {
+        "id": r.get("id"),
+        "strategy": r.get("strategy") or TRADE_STRATEGY_DEFAULT,
+        "snapshot_date": r.get("snapshot_date") or datetime.now().date().isoformat(),
+        "contracts": json.dumps(contracts, ensure_ascii=False),
+        "note": r.get("note") or "",
+        "created_at": r.get("created_at") or now,
+    }
+    cols = ("id", "strategy", "snapshot_date", "contracts", "note", "created_at")
+    db = _fund_db()
+    if row["id"] is None:
+        cols2 = [c for c in cols if c != "id"]
+        db.execute(
+            "INSERT INTO trade_pool_snapshots (%s) VALUES (%s)" % (", ".join(cols2), ", ".join("?" for _ in cols2)),
+            [row[c] for c in cols2],
+        )
+        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT OR REPLACE INTO trade_pool_snapshots (%s) VALUES (%s)" % (", ".join(cols), ", ".join("?" for _ in cols)),
+        [row[c] for c in cols],
+    )
+    return row["id"]
 
 
 # ===========================================================================
@@ -2114,6 +2204,10 @@ select{cursor:pointer;appearance:none;
 .rung .rq.short{color:#46d6ea}
 [data-theme="light"] .rung .rq.long{color:#e05252}
 [data-theme="light"] .rung .rq.short{color:#0e9fc8}
+/* 平仓状态 tag 浅色主题(保证浅底可读): 未平仓=深绿 / 部分=深橙 / 已平仓=灰 */
+[data-theme="light"] .tag.closed{background:rgba(110,120,115,.13);color:#5d6b63}
+[data-theme="light"] .tag.partial{background:rgba(217,138,31,.15);color:#b8720f}
+[data-theme="light"] .tag.unclosed{background:rgba(22,160,107,.15);color:#16a06b}
 .rung .rp{font-size:10.5px;color:var(--sub)}
 .rung .rp b{color:var(--bad);font-weight:600}
 
@@ -2255,7 +2349,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .tag.short{background:rgba(70,214,234,.18);color:#46d6ea}
 .tag.open{background:rgba(62,207,143,.18);color:#63d89c}
 .tag.close{background:rgba(255,107,155,.18);color:#ff84b9}
-.tag.closed{background:rgba(120,200,150,.18);color:#78c896}
+/* 平仓状态三态区分: 未平仓=绿(持仓中) / 部分平仓=橙(进行中) / 已平仓=灰(已了结归档) */
+.tag.closed{background:rgba(150,160,155,.16);color:#8d9a92}
 .tag.partial{background:rgba(255,180,80,.18);color:#ffb450}
 .tag.unclosed{background:rgba(62,207,143,.18);color:#63d89c}
 /* 方向色(中国习惯): 买入红 / 卖出青; 看涨红 / 看跌青 */
@@ -4593,12 +4688,17 @@ const FundUI = {
       const r = await fetchT('/api/funds/export');
       const d = await r.json();
       if (!d.ok) { alert('导出失败：' + (d.error||'')); return; }
-      const cnt = (d.records||[]).length;
-      if (!cnt) { alert('当前没有可导出的记录'); return; }
+      // 备份含三部分: 资金曲线 / 交易记录 / 监控池 — 任一部分有数据即可导出
+      const nRec = (d.records||[]).length;
+      const nTrd = (d.trades||[]).length;
+      const nPool = (d.trade_pools||[]).length;
+      const total = nRec + nTrd + nPool;
+      if (!total) { alert('当前没有可导出的数据（资金曲线 / 交易记录 / 监控池均为空）'); return; }
+      const summary = '资金曲线 ' + nRec + ' 条 · 交易记录 ' + nTrd + ' 条 · 监控池 ' + nPool + ' 条';
       const blob = new Blob([JSON.stringify(d, null, 2)], {type:'application/json'});
       const now = new Date();
       const pad = n=>String(n).padStart(2,'0');
-      const fname = '资金曲线备份_' + now.getFullYear() + pad(now.getMonth()+1) + pad(now.getDate()) + '_' + pad(now.getHours()) + pad(now.getMinutes()) + '.opcalc';
+      const fname = 'OpenCalc备份_' + now.getFullYear() + pad(now.getMonth()+1) + pad(now.getDate()) + '_' + pad(now.getHours()) + pad(now.getMinutes()) + '.opcalc';
       // 优先: 系统保存对话框 (Chrome 桌面版支持, 可自选保存位置)
       if (window.showSaveFilePicker) {
         try {
@@ -4609,7 +4709,7 @@ const FundUI = {
           const writable = await handle.createWritable();
           await writable.write(blob);
           await writable.close();
-          alert('✅ 已导出 ' + cnt + ' 条记录 → ' + handle.name + '\n请把该文件拷贝到新电脑，用「导入备份」恢复。');
+          alert('✅ 已导出 → ' + handle.name + '\n' + summary + '\n请把该文件拷贝到新电脑，用「导入」恢复。');
           return;
         } catch (err) {
           if (err && err.name === 'AbortError') return;   // 用户点了取消
@@ -4623,7 +4723,7 @@ const FundUI = {
       document.body.appendChild(a);
       a.click();
       setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 200);
-      alert('✅ 已导出 ' + cnt + ' 条记录 → ' + fname + '\n文件已保存到浏览器默认「下载」目录，如需自选位置请使用新版弹窗。');
+      alert('✅ 已导出 → ' + fname + '\n' + summary + '\n文件已保存到浏览器默认「下载」目录，如需自选位置请使用新版弹窗。');
     } catch (e) {
       alert('导出失败：' + e);
     }
@@ -4640,8 +4740,10 @@ const FundUI = {
           body:JSON.stringify(payload)});
         const d = await r.json();
         if (!d.ok) { alert('导入失败：' + (d.error||'备份文件格式不正确')); return; }
-        alert('✅ 导入成功：' + d.imported + ' 条记录（策略：' + (d.strategies.join('、') || '无') + '）');
+        alert('✅ 导入成功：共 ' + d.imported + ' 条（资金曲线 + 交易记录 + 监控池，同主键覆盖合并）'
+          + (d.strategies && d.strategies.length ? '\n资金曲线策略：' + d.strategies.join('、') : ''));
         this.refreshAll();
+        if (typeof TradeUI !== 'undefined' && TradeUI.refresh) TradeUI.refresh();   // 交易记录页同步刷新
       } catch (e) {
         alert('导入失败：文件不是有效的备份文件（' + e.message + '）');
       }

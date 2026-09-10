@@ -339,6 +339,40 @@ try:
 except ValueError:
     check("records 非列表被拒绝", True)
 
+# ---- 交易记录 / 监控池 也必须含在备份中 (v50.27 用户反馈: 原前端只提示/校验资金曲线) ----
+trade_upsert({"underlying": "bk1", "contract": "bk1C5000", "op_type": "open",
+              "open_date": "2025-08-01", "call_put": "C", "direction": "buy",
+              "open_price": 100, "qty": 2, "premium": 200})
+trade_upsert({"underlying": "bk1", "contract": "bk1C5000", "op_type": "close",
+              "close_date": "2025-08-05", "close_qty": 2, "close_price": 150, "pnl": 100,
+              "call_put": "C", "direction": "sell"})
+trade_pool_upsert({"snapshot_date": "2025-08-01",
+                   "contracts": [{"contract": "bk1C5000", "qty": 2}], "note": "备份测试"})
+bk2 = fund_export_backup()
+check("导出包含 trades 数组", isinstance(bk2.get("trades"), list) and len(bk2["trades"]) == 2, str(len(bk2.get("trades") or [])))
+check("导出包含 trade_pools 数组", isinstance(bk2.get("trade_pools"), list) and len(bk2["trade_pools"]) == 1, str(len(bk2.get("trade_pools") or [])))
+# 清空三表后仅靠备份恢复
+_conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+for t in ("records", "trade_records", "trade_pool_snapshots"):
+    _conn3.execute(f"DELETE FROM {t}")
+_conn3.commit(); _conn3.close()
+n3, _ = fund_import_backup(bk2)
+check("导入含三部分(资金3+交易2+池1=6)", n3 == 6, "实际 %s" % n3)
+_trl = trade_list_records()
+check("交易记录完整恢复", len(_trl) == 2 and _trl[0]["contract"] == "bk1C5000", str(len(_trl)))
+check("平仓盈亏恢复", [x for x in _trl if x["op_type"] == "close"][0]["pnl"] == 100)
+check("监控池恢复", len(trade_pool_list()) == 1 and trade_pool_list()[0]["contracts"][0]["contract"] == "bk1C5000")
+check("资金曲线一并恢复", len(fund_list_records()) == 3, str(len(fund_list_records())))
+# 幂等: 再导入一次不应翻倍
+n4, _ = fund_import_backup(bk2)
+check("重复导入幂等(不翻倍)", len(trade_list_records()) == 2 and len(fund_list_records()) == 3 and len(trade_pool_list()) == 1,
+      "trades=%s records=%s pools=%s" % (len(trade_list_records()), len(fund_list_records()), len(trade_pool_list())))
+# 清理, 不影响后续用例
+_conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+for t in ("records", "trade_records", "trade_pool_snapshots"):
+    _conn3.execute(f"DELETE FROM {t}")
+_conn3.commit(); _conn3.close()
+
 print("\n== 设置持久化 (默认权益 / 默认期货风险额度) ==")
 _s0 = get_settings()
 check("settings 返回独立权益键", "futures_default_equity" in _s0 and "options_default_equity" in _s0 and "futures_risk_pct" in _s0, str(_s0))
