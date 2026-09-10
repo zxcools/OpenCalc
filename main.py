@@ -567,10 +567,21 @@ def fund_data_info():
 # 应用设置 (config.json 的 settings 字段): 默认权益 / 期货默认风险额度百分比
 # ---------------------------------------------------------------------------
 def get_settings():
-    """读取用户设置: 返回 {default_equity, futures_risk_pct, options_risk_pct, frequent_futures, frequent_options} (无则 None/[])"""
+    """读取用户设置: 返回 {futures_default_equity, options_default_equity, futures_risk_pct,
+    options_risk_pct, frequent_futures, frequent_options} (无则 None/[])
+
+    权益默认值期货/期权**互相独立**; 旧版单一 default_equity 作为两者的回退(向后兼容)。"""
     s = (_load_config().get("settings") or {})
+    legacy = s.get("default_equity")   # v50.24 及以前的共用权益, 仅作回退
+
+    def _pick(key):
+        v = s.get(key)
+        return v if v is not None else legacy
+
     return {
-        "default_equity": s.get("default_equity"),
+        "futures_default_equity": _pick("futures_default_equity"),
+        "options_default_equity": _pick("options_default_equity"),
+        "default_equity": legacy,   # 兼容旧前端读取
         "futures_risk_pct": s.get("futures_risk_pct"),
         "options_risk_pct": s.get("options_risk_pct"),
         "frequent_futures": s.get("frequent_futures") or [],
@@ -582,9 +593,13 @@ def save_settings(patch):
     """保存用户设置 (合并, 只更新传入字段; None/空串 = 清除该默认值; 数组 = 覆盖)"""
     cfg = _load_config()
     s = cfg.setdefault("settings", {})
-    if "default_equity" in patch:
-        v = patch["default_equity"]
-        s["default_equity"] = None if v in (None, "") else float(v)
+    for k in ("futures_default_equity", "options_default_equity", "default_equity"):
+        if k in patch:
+            v = patch[k]
+            s[k] = None if v in (None, "") else float(v)
+    # 已写入任一独立权益键 → 完成迁移, 清掉旧版共用键(避免清除后被 legacy 回退覆盖)
+    if "futures_default_equity" in patch or "options_default_equity" in patch:
+        s.pop("default_equity", None)
     if "futures_risk_pct" in patch:
         v = patch["futures_risk_pct"]
         s["futures_risk_pct"] = None if v in (None, "") else float(v)
@@ -3113,25 +3128,19 @@ function init(){
   loadTheme();
   loadSettings();
   bindWanEquity();            // 权益输入单位=万元, 实时显示对应元金额
-  // 风险额度预算提示(期货 + 期权共用, 内部按 mode 取对应 select 的值)
-  function updateRiskHint(mode){
-    const eq = (parseFloat($('equity').value) || 0) * 10000;   // 万元 → 元
-    const defPct = mode === 'options' ? 3 : 1;
-    const selId = mode === 'options' ? 'riskAmountO' : 'riskAmount';
-    const hintId = mode === 'options' ? 'riskHintO' : 'riskHint';
-    const pct = parseFloat($(selId).value);
-    const hint = $(hintId);
-    if (isNaN(eq) || eq <= 0) { hint.innerHTML = ''; return; }
-    const p = isNaN(pct) || pct <= 0 ? defPct : pct;
-    const budget = eq * p / 100;
-    hint.innerHTML = '预算 = 权益 × ' + p + '% = <b style="color:var(--accent)">¥' + budget.toLocaleString('en-US', {maximumFractionDigits:2}) + '</b>';
-  }
   function onRiskChange(mode){
     updateRiskHint(mode);
     onInput();   // 立即重新测算
   }
-  $('equity').addEventListener('input', ()=>{ updateRiskHint('futures'); updateRiskHint('options'); });
-  $('equity').addEventListener('change', ()=>{ updateRiskHint('futures'); updateRiskHint('options'); });
+  // 权益输入: 同步记到当前模式(切模式时各自恢复), 并刷新风险提示
+  const _onEqInput = ()=>{
+    if (curMode) equityByMode[curMode] = $('equity').value;
+    const hint = $('defEquityHint');
+    if (hint && $('equity').value) hint.classList.add('hidden');   // 用户手动改过 → 隐藏"已自动填入"
+    updateRiskHint('futures'); updateRiskHint('options');
+  };
+  $('equity').addEventListener('input', _onEqInput);
+  $('equity').addEventListener('change', _onEqInput);
   $('riskAmount').addEventListener('change', ()=>onRiskChange('futures'));
   $('riskAmountO').addEventListener('change', ()=>onRiskChange('options'));
   // 存为默认: 权益 / 风险百分比(期货+期权)
@@ -3145,19 +3154,61 @@ function init(){
 }
 
 /* ---- 默认值设置: 权益 / 期货风险百分比 (持久化到 config.json) ---- */
-let settingsCache = {default_equity:null, futures_risk_pct:null, options_risk_pct:null, frequent_futures:[], frequent_options:[]};
+/* 风险额度预算提示(期货 + 期权共用, 内部按 mode 取对应 select 的值) — 全局函数: setMode/applyEquityForMode 也会调 */
+function updateRiskHint(mode){
+  const eqEl = $('equity');
+  if (!eqEl) return;
+  const eq = (parseFloat(eqEl.value) || 0) * 10000;   // 万元 → 元
+  const defPct = mode === 'options' ? 3 : 1;
+  const selId = mode === 'options' ? 'riskAmountO' : 'riskAmount';
+  const hintId = mode === 'options' ? 'riskHintO' : 'riskHint';
+  const sel = $(selId), hint = $(hintId);
+  if (!sel || !hint) return;
+  const pct = parseFloat(sel.value);
+  if (isNaN(eq) || eq <= 0) { hint.innerHTML = ''; return; }
+  const p = isNaN(pct) || pct <= 0 ? defPct : pct;
+  const budget = eq * p / 100;
+  hint.innerHTML = '预算 = 权益 × ' + p + '% = <b style="color:var(--accent)">¥' + budget.toLocaleString('en-US', {maximumFractionDigits:2}) + '</b>';
+}
+let settingsCache = {futures_default_equity:null, options_default_equity:null, futures_risk_pct:null, options_risk_pct:null, frequent_futures:[], frequent_options:[]};
+/* 期货/期权各自的当前权益输入值(万元, null=未填过) — 两模式互不影响 */
+let equityByMode = {futures:null, options:null};
+/* 取某模式的默认权益(元) */
+function defaultEquityOf(mode){
+  return mode === 'options' ? settingsCache.options_default_equity : settingsCache.futures_default_equity;
+}
+/* 把当前 equity 输入框的值切到指定模式: 有记忆值用记忆值, 否则用该模式默认值, 都没有则清空 */
+function applyEquityForMode(mode){
+  const eq = $('equity');
+  if (!eq) return;
+  const remembered = equityByMode[mode];
+  const def = defaultEquityOf(mode);
+  if (remembered != null && remembered !== '') eq.value = remembered;
+  else if (def != null) eq.value = def / 10000;   // 元 → 万元
+  else eq.value = '';
+  bindWanEquity();
+  const hint = $('defEquityHint');
+  if (hint){
+    const isDefault = (remembered == null || remembered === '') && def != null;
+    if (isDefault){
+      hint.classList.remove('hidden');
+      hint.innerHTML = '✓ 已自动填入' + (mode==='options'?'期权':'期货') + '默认权益：<b>'
+        + (def/10000).toLocaleString('en-US',{maximumFractionDigits:2})
+        + ' 万元</b>（可点「存为默认」更换）';
+    } else {
+      hint.classList.add('hidden');
+    }
+  }
+  updateRiskHint('futures');
+  updateRiskHint('options');
+}
 function loadSettings(){
   fetchT('/api/settings').then(r=>r.json()).then(d=>{
     if(!d.ok) return;
     const s = d.settings || {};
     settingsCache = s;
-    if (s.default_equity != null && !$('equity').value) {
-      $('equity').value = s.default_equity / 10000;   // 元 → 万元
-      bindWanEquity();
-      const hint = $('defEquityHint');
-      hint.classList.remove('hidden');
-      hint.innerHTML = '✓ 已自动填入默认权益：<b>' + (s.default_equity/10000).toLocaleString('en-US',{maximumFractionDigits:2}) + ' 万元</b>（可点「存为默认」更换）';
-    }
+    // 按当前模式填入该模式自己的默认权益(期货/期权独立)
+    applyEquityForMode(curMode);
     if (s.futures_risk_pct != null) {
       const sel = $('riskAmount');
       const opts = [...sel.options].map(o=>parseFloat(o.value));
@@ -3168,8 +3219,7 @@ function loadSettings(){
       const opts = [...sel.options].map(o=>parseFloat(o.value));
       if (opts.indexOf(parseFloat(s.options_risk_pct)) >= 0) sel.value = String(s.options_risk_pct);
     }
-    // 刷新提示
-    const evt = new Event('change'); $('equity').dispatchEvent(evt);
+    // 刷新提示(风险额度提示由 applyEquityForMode 内 updateRiskHint 处理; 不派发 change 以免误清"已自动填入"提示)
     // 渲染常用区
     if (typeof initContractSearch._renderFreqAll === 'function') initContractSearch._renderFreqAll();
     onInput();
@@ -3179,9 +3229,16 @@ function saveDefaultEquity(){
   const eqWan = parseFloat($('equity').value);
   if (isNaN(eqWan) || eqWan <= 0) { alert('请先填写有效的权益金额'); return; }
   const eqYuan = eqWan * 10000;   // 万元 → 元(存储)
+  const key = curMode === 'options' ? 'options_default_equity' : 'futures_default_equity';
+  const label = curMode === 'options' ? '期权' : '期货';
   fetchT('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({default_equity: eqYuan})}).then(r=>r.json()).then(d=>{
-    if(d.ok) alert('✅ 已保存默认权益：' + eqWan.toLocaleString('en-US',{maximumFractionDigits:2}) + ' 万元，下次打开自动填入');
+    body:JSON.stringify({[key]: eqYuan})}).then(r=>r.json()).then(d=>{
+    if(d.ok){
+      settingsCache[key] = eqYuan;
+      equityByMode[curMode] = null;   // 值已等于默认值 → 不算手动记忆, 让它显示"已自动填入"提示
+      applyEquityForMode(curMode);
+      alert('✅ 已把 ' + label + '默认权益保存为：' + eqWan.toLocaleString('en-US',{maximumFractionDigits:2}) + ' 万元（下次打开' + label + '模式自动填入，不影响' + (curMode==='options'?'期货':'期权') + '模式）');
+    }
     else alert('保存失败：' + (d.error||''));
   });
 }
@@ -3218,8 +3275,11 @@ function bindWanEquity(){
     const v = parseFloat(el.value);
     hint.innerHTML = isNaN(v) ? '' : '= <b style="color:var(--accent)">¥' + (v*10000).toLocaleString('en-US', {maximumFractionDigits:0}) + '</b> 元';
   };
-  el.addEventListener('input', update);
-  el.addEventListener('change', update);
+  if (!el.dataset.wanBound){   // 只绑一次(切模式会多次调用)
+    el.addEventListener('input', update);
+    el.addEventListener('change', update);
+    el.dataset.wanBound = '1';
+  }
   update();
 }
 
@@ -3401,11 +3461,14 @@ $('qRefO').addEventListener('click',()=>{ if(selCode.O) loadQuote(selCode.O,'O')
 
 /* 模式切换 (期货/期权); 调出方案时也走这里 */
 function setMode(m){
+  // 切走前: 记住当前模式的权益输入(两模式权益互相独立)
+  if (curMode && $('equity') && curMode !== m) equityByMode[curMode] = $('equity').value;
   document.querySelectorAll('.mode').forEach(x=>x.classList.toggle('active', x.dataset.mode===m));
   curMode = m;
   $('futuresFields').classList.toggle('hidden', curMode!=='futures');
   $('optionsFields').classList.toggle('hidden', curMode!=='options');
   if (typeof renderPlans === 'function') renderPlans();   // 最近方案区仅期货显示
+  if (typeof applyEquityForMode === 'function') applyEquityForMode(curMode);   // 切到该模式自己的权益
   onInput();
 }
 document.querySelectorAll('.mode').forEach(m=>{
