@@ -2359,6 +2359,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .iconbtn{background:transparent;border:none;color:var(--sub);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:6px}
 .iconbtn:hover{background:var(--panel2);color:var(--accent)}
 .row-actions{display:flex;gap:4px;justify-content:flex-end}
+/* 操作记录「备注」列(在操作列前): 限宽省略, 悬停 title 看全文 */
+.op-note{color:var(--sub)}
+.op-note-txt{display:inline-block;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 
 /* 监控池 */
 .pool-block{margin-bottom:14px}
@@ -2983,7 +2986,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
                   <th>合约</th><th>日期</th><th>操作</th>
                   <th>delta</th><th>目标</th><th>看涨看跌</th>
                   <th>方向</th><th>数量</th><th>价格</th><th>权利金</th>
-                  <th>平仓盈亏</th><th>状态</th><th>操作</th>
+                  <th>平仓盈亏</th><th>状态</th><th>备注</th><th>操作</th>
                 </tr></thead>
                 <tbody id="tdOps"></tbody>
               </table>
@@ -4095,7 +4098,7 @@ const TradeUI = {
       ? d.operations.filter(o => o.contract === this.contractFilter)
       : d.operations;
     if (!ops.length){
-      ob.innerHTML = '<tr><td colspan="13" style="text-align:center;padding:14px;color:var(--sub)">' +
+      ob.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:14px;color:var(--sub)">' +
         (d.operations.length ? '该合约无操作记录' : '暂无操作记录') + '</td></tr>';
       return;
     }
@@ -4124,6 +4127,7 @@ const TradeUI = {
         <td>${premiumTxt}</td>
         <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':(o.pnl<0?'-CN¥':'CN¥'))+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
         <td><span class="tag ${st.cls}">${st.txt}</span></td>
+        <td class="op-note"><span class="op-note-txt"${o.note ? ' title="' + escHtml(o.note) + '"' : ''}>${o.note ? escHtml(o.note) : '—'}</span></td>
         <td class="row-actions">
           <button class="iconbtn" data-edit="${o.id}" title="修改">✎</button>
           <button class="iconbtn" data-del="${o.id}" title="删除">🗑</button>
