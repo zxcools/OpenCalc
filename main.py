@@ -1135,6 +1135,26 @@ ALLOWED_DIRECTION = ("buy", "sell")
 ALLOWED_OP_TYPE = ("open", "close")
 
 
+def normalize_contract(c):
+    """合约代码归一化: 品种代码小写, C/P(看涨/看跌)大写, 去掉空白.
+    例: BR2610c15800 -> br2610C15800 ; AO611P2500 -> ao611P2500
+    ⚠ 只认「月份数字后面」的 C/P — 品种代码自带 C/P 的很多(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p),
+      在整串里盲目大写会把品种代码改坏."""
+    if not isinstance(c, str):
+        return c   # 非字符串原样返回(监控池 contracts 元素可能是 dict)
+    s = "".join(c.split())
+    if not s:
+        return s
+    s = s.lower()
+    m = re.search(r"[0-9]([cp])(?=[0-9]|$)", s)
+    if not m:
+        m = re.search(r"([cp])(?=[0-9]+$)", s)   # 兜底: 省略月份(如 aoc5000)
+    if m:
+        i = m.start(1)
+        s = s[:i] + s[i].upper() + s[i + 1:]
+    return s
+
+
 def _trade_record_to_dict(r):
     return {
         "id": r["id"],
@@ -1175,7 +1195,8 @@ def trade_list_records(strategy=None):
 
 def trade_upsert(payload):
     """新增/更新交易记录; 不传 id=新增; 传 id=更新. 自动维护 created_at/updated_at.
-    平仓数量校验: close_qty ≤ (同一合约 open qty 总和 - 该 close 之外 close_qty 之和)."""
+    ⚠ 先做一次合约归一化(品种小写 + C/P 大写), 并把「归一化后与本次保存内容完全相同的旧行」删掉 —
+      否则 同一合约会因大小写被存成两条(旧行残留), 在筛选下拉里出现两次。"""
     db = _fund_db()
     now = datetime.now().isoformat(timespec="seconds")
     required = ("underlying", "contract", "op_type", "direction")
@@ -1188,6 +1209,10 @@ def trade_upsert(payload):
         raise ValueError("direction 必须为 buy / sell")
 
     strategy = TRADE_STRATEGY_DEFAULT   # 固定 abe(自定义策略 UI 已撤除)
+
+    # 合约代码归一化(品种小写 + C/P 大写), 避免同一合约因大小写不同被当成两个
+    payload["contract"] = normalize_contract(payload.get("contract"))
+    _dup_id = payload.get("id")
 
     # 平仓数量校验: 不可超过开仓剩余(按合约大小写不敏感匹配)
     def _k(c): return (c or "").strip().upper()
@@ -1257,7 +1282,18 @@ def trade_upsert(payload):
         + placeholders + ", ?, ?)",
         (strategy, *vals, now, now),
     )
-    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    new_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # 清理大小写旧行: 同一标的+合约(大小写不敏感)且「除 id/时间戳外全部字段相同」的旧行 → 只留新写入这条
+    # ⚠ 必须逐字段全量比较, 只比 qty/日期 会把价格不同的两条真实记录误删
+    _cmp_cols = [f for f in fields if f != "contract"]
+    _cmp_sql = " AND ".join("IFNULL(%s,'')=IFNULL(?,'')" % c for c in _cmp_cols)
+    _cmp_vals = [payload.get(c) for c in _cmp_cols]
+    db.execute(
+        "DELETE FROM trade_records WHERE id<>? AND strategy=? AND underlying=? "
+        "AND UPPER(TRIM(contract))=? AND " + _cmp_sql,
+        (new_id, strategy, payload["underlying"], payload["contract"].upper(), *_cmp_vals),
+    )
+    return new_id
 
 
 def trade_delete(rec_id):
@@ -1441,6 +1477,7 @@ def trade_pool_upsert(payload):
     contracts = payload.get("contracts") or []
     if not isinstance(contracts, list):
         raise ValueError("contracts 必须是数组")
+    contracts = [normalize_contract(c) for c in contracts]
     cs = json.dumps(contracts, ensure_ascii=False)
     note = payload.get("note") or ""
     rec_id = payload.get("id")
@@ -1490,7 +1527,7 @@ def trade_import_record(r):
         "id": r.get("id"),
         "strategy": r.get("strategy") or TRADE_STRATEGY_DEFAULT,
         "underlying": r["underlying"],
-        "contract": r["contract"],
+        "contract": normalize_contract(r["contract"]),
         "op_type": r["op_type"],
         "open_date": r.get("open_date") or "",
         "open_delta": r.get("open_delta"),
@@ -1531,6 +1568,7 @@ def trade_pool_import_record(r):
     contracts = r.get("contracts") or []
     if not isinstance(contracts, list):
         raise ValueError("contracts 必须是数组")
+    contracts = [normalize_contract(c) for c in contracts]
     now = datetime.now().isoformat(timespec="seconds")
     row = {
         "id": r.get("id"),
@@ -3923,6 +3961,22 @@ const TradeUI = {
   poolCollapsed: {},    // {date: true/false} 历史快照折叠状态
   onlyOpen: false,      // 只展示未平仓
   showAll: false,       // 是否展开全部(>10)
+
+  // 合约代码归一化: 品种代码小写, C/P(看涨/看跌)大写
+  // ⚠ 只认「月份数字后面」的 C/P — 品种代码自带 C/P 的多(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p),
+  //   整串盲目大写会把品种代码改坏
+  normalizeContract(c){
+    let s = String(c || '').replace(/\s+/g, '');
+    if (!s) return s;
+    s = s.toLowerCase();
+    let m = s.match(/[0-9]([cp])(?=[0-9]|$)/);
+    if (!m) m = s.match(/([cp])(?=[0-9]+$)/);   // 兜底: 省略月份(如 aoc5000)
+    if (m){
+      const i = m.index + m[0].length - 1;
+      s = s.slice(0, i) + s[i].toUpperCase() + s.slice(i + 1);
+    }
+    return s;
+  },
   contractFilter: '',   // 详情操作记录合约筛选(空=全部)
   MAX: 10,
 
@@ -4079,8 +4133,14 @@ const TradeUI = {
         <td>${h.premium.toLocaleString('en-US',{maximumFractionDigits:2})}</td>
       </tr>`).join('');
     }
-    // 合约筛选下拉: 选项 = 该标的下全部合约(去重)
-    const contracts = [...new Set(d.operations.map(o => o.contract))];
+    // 合约筛选下拉: 选项 = 该标的下全部合约(按归一化后去重, 避免 br2610C15800 / br2610c15800 出现两行)
+    const _seen = {};
+    const contracts = [];
+    d.operations.forEach(o => {
+      const n = this.normalizeContract(o.contract);
+      const k = n.toUpperCase();
+      if (!_seen[k]){ _seen[k] = 1; contracts.push(n); }
+    });
     const selF = $('tdContractFilter');
     const prevSel = selF.value;
     selF.innerHTML = '<option value="">全部合约</option>' + contracts.map(c =>
@@ -4094,8 +4154,9 @@ const TradeUI = {
     const d = this.detail;
     if (!d) return;
     const ob = $('tdOps');
-    const ops = this.contractFilter
-      ? d.operations.filter(o => o.contract === this.contractFilter)
+    const _f = this.contractFilter ? this.contractFilter.toUpperCase() : '';
+    const ops = _f
+      ? d.operations.filter(o => this.normalizeContract(o.contract).toUpperCase() === _f)
       : d.operations;
     if (!ops.length){
       ob.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:14px;color:var(--sub)">' +
@@ -4337,6 +4398,11 @@ const TradeUI = {
         if (m) $('tmCallPut').value = m[1];
       };
       inp.addEventListener('input', _autoCp);
+      // 失焦时把输入框内容格式化成规范写法(品种小写 + C/P 大写), 与后端保存口径一致
+      inp.addEventListener('blur', () => {
+        const v = this.normalizeContract(inp.value);
+        if (v && v !== inp.value) inp.value = v;
+      });
       if (!preset.call_put) _autoCp();
     }
 
@@ -4408,7 +4474,7 @@ const TradeUI = {
       id: $('tradeModalBg').dataset.editing || null,
       op_type: isOpen ? 'open' : 'close',
       underlying: $('tmUnderlying').value.trim(),
-      contract: contractVal,
+      contract: TradeUI.normalizeContract(contractVal),
       open_date: $('tmOpenDate').value,
       open_delta: $('tmOpenDelta').value === '' ? null : parseFloat($('tmOpenDelta').value),
       target_delta: $('tmTargetDelta').value === '' ? null : parseFloat($('tmTargetDelta').value),

@@ -480,6 +480,56 @@ try:
 except ValueError as e:
     check("平仓数量超额被拒绝", "超过剩余可平" in str(e), str(e))
 
+# 10. 合约代码归一化 (v50.29): 品种小写 + C/P 大写, 大小写不同不再算两个合约
+print("\n== 合约代码归一化 (normalize_contract) ==")
+from main import normalize_contract, trade_import_record
+_norm_cases = [
+    ('br2610c15800', 'br2610C15800'), ('BR2610C15800', 'br2610C15800'),
+    ('AO611P2500', 'ao611P2500'),     ('p2601C8000', 'p2601C8000'),
+    ('P2601c8000', 'p2601C8000'),     ('pp2601C8000', 'pp2601C8000'),
+    ('ap2601p9000', 'ap2601P9000'),   ('pk2601C8000', 'pk2601C8000'),
+    ('c2601C2400', 'c2601C2400'),     ('cf2701C18000', 'cf2701C18000'),
+    ('sp2601p5000', 'sp2601P5000'),   ('AOC5000', 'aoC5000'),
+    ('br 2610 C 15800', 'br2610C15800'), ('SR611C6000', 'sr611C6000'),
+    ('SF611C6800', 'sf611C6800'),     ('', ''),
+]
+_bad = [(a, normalize_contract(a), b) for a, b in _norm_cases if normalize_contract(a) != b]
+check("归一化 16 组用例", not _bad, str(_bad))
+check("非字符串原样返回(监控池 dict 不被破坏)", normalize_contract({'contract': 1}) == {'contract': 1})
+
+# 大小写不同但内容相同 → 只留一条(不重复出现在筛选下拉)
+trade_upsert({'underlying':'nz1','contract':'nz1C5000','op_type':'open','direction':'buy',
+              'open_date':'2026-08-01','call_put':'C','open_price':100,'qty':2,'premium':200})
+trade_upsert({'underlying':'nz1','contract':'NZ1c5000','op_type':'open','direction':'buy',
+              'open_date':'2026-08-01','call_put':'C','open_price':100,'qty':2,'premium':200})
+_nz = [r for r in trade_list_records() if r['underlying'] == 'nz1']
+check("大小写不同+内容相同 → 合并为 1 条", len(_nz) == 1 and _nz[0]['contract'] == 'nz1C5000', str(len(_nz)))
+
+# 大小写不同且内容不同 → 两条并存但合约写法统一
+trade_upsert({'underlying':'nz2','contract':'nz2C5000','op_type':'open','direction':'buy',
+              'open_date':'2026-08-01','call_put':'C','open_price':100,'qty':2,'premium':200})
+trade_upsert({'underlying':'nz2','contract':'nz2c5000','op_type':'open','direction':'buy',
+              'open_date':'2026-08-02','call_put':'C','open_price':110,'qty':3,'premium':330})
+_nz2 = [r for r in trade_list_records() if r['underlying'] == 'nz2']
+check("不同内容两条并存", len(_nz2) == 2, str(len(_nz2)))
+check("两条合约写法已统一", set(r['contract'] for r in _nz2) == {'nz2C5000'}, str(set(r['contract'] for r in _nz2)))
+
+# 平仓时用不同大小写也能匹配上开仓余量(旧逻辑已大小写不敏感, 归一化后仍通)
+trade_upsert({'underlying':'nz2','contract':'NZ2C5000','op_type':'close','direction':'buy',
+              'close_date':'2026-09-01','close_qty':5,'close_price':120,'pnl':100,'call_put':'C'})
+_d2 = trade_detail('nz2')
+check("平仓余量匹配(5手全平)", _d2['holdings'] == [], str(_d2['holdings']))
+
+# 导入备份时也归一化
+_conn4 = sqlite3.connect(_m.FUND_DB_PATH)
+_conn4.execute("DELETE FROM trade_records WHERE underlying='nz3'")
+_conn4.commit(); _conn4.close()
+trade_import_record({'underlying': 'nz3', 'contract': 'NZ3c6000', 'op_type': 'open',
+                     'direction': 'buy', 'open_date': '2026-08-01', 'call_put': 'C',
+                     'open_price': 100, 'qty': 1, 'premium': 100})
+_nz3 = [r for r in trade_list_records() if r['underlying'] == 'nz3']
+check("导入时合约也归一化", len(_nz3) == 1 and _nz3[0]['contract'] == 'nz3C6000', str(_nz3))
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

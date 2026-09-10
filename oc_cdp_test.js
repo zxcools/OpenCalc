@@ -54,6 +54,10 @@ async function main() {
   };
 
   await send(ws, 'Page.enable');
+  // 固定视口宽度: 分页面/字号切换器/详情布局断言依赖视口 ≥1280px, 不设会随 Chrome 窗口宽度漂移
+  await send(ws, 'Emulation.setDeviceMetricsOverride', {
+    width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false
+  });
   await send(ws, 'Runtime.enable');
   await send(ws, 'Page.navigate', { url: BASE + '/' });
   await sleep(2500);   // 等导航提交完成再 evaluate
@@ -636,6 +640,41 @@ async function main() {
     JSON.stringify(h0));
   const tipText = await evalJs(ws, `document.querySelector('.help-tip[data-tip]')?.dataset.tip || ''`);
   check('「开仓均价 ?」含 tooltip 说明(只算未平仓部分)', /未平仓/.test(tipText), tipText);
+
+  // ---- 场景P: 合约大小写归一化(品种小写 + C/P 大写, 同合约不再分裂成两个) ----
+  const normFix = await evalJs(ws, `(async () => {
+    const cleanup = async (u) => {
+      const d = await fetch('/api/trades/detail?underlying=' + u).then(r=>r.json());
+      for (const op of (d.operations||[])) await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:op.id})}).then(r=>r.json());
+    };
+    await cleanup('e2enorm');
+    const post = (b) => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b)}).then(r=>r.json());
+    // 开仓用大写 C 写法, 平仓用小写 c 写法
+    await post({underlying:'e2enorm', contract:'BR2610C15800', op_type:'open', direction:'buy',
+                open_date:'2026-08-01', call_put:'C', open_price:700, qty:4, premium:2800});
+    await post({underlying:'e2enorm', contract:'br2610c15800', op_type:'open', direction:'buy',
+                open_date:'2026-08-02', call_put:'C', open_price:710, qty:2, premium:1420});
+    await post({underlying:'e2enorm', contract:'br2610C15800', op_type:'close', direction:'sell',
+                close_date:'2026-09-01', close_qty:4, close_price:800, pnl:2000, call_put:'C'});
+    const det = await fetch('/api/trades/detail?underlying=e2enorm').then(r=>r.json());
+    return JSON.stringify({
+      contracts: [...new Set((det.operations||[]).map(o=>o.contract))],
+      opsContracts: [...new Set((det.operations||[]).map(o=>o.contract))],
+      holdings: det.holdings,
+      normFn: [TradeUI.normalizeContract('br2610c15800'), TradeUI.normalizeContract('AO611P2500'), TradeUI.normalizeContract('p2601C8000')]
+    });
+  })()`);
+  const nf = JSON.parse(normFix);
+  check('输入框归一化: 品种小写 + C/P 大写',
+    nf.normFn[0] === 'br2610C15800' && nf.normFn[1] === 'ao611P2500' && nf.normFn[2] === 'p2601C8000',
+    JSON.stringify(nf.normFn));
+  check('大小写不同的合约落库后写法统一(不再分裂)',
+    nf.contracts.length === 1 && nf.contracts[0] === 'br2610C15800', JSON.stringify(nf.contracts));
+  check('筛选下拉只出现 1 个合约(原 2 个)',
+    nf.opsContracts.length === 1 && nf.opsContracts[0] === 'br2610C15800', JSON.stringify(nf.opsContracts));
+  check('大小写不同仍能正确匹配平仓(4平2留)',
+    nf.holdings.length === 1 && nf.holdings[0].qty === 2 && nf.holdings[0].open_price === 710,
+    JSON.stringify(nf.holdings));
 
   // ---- 场景N: 顶栏刷新按钮存在(在切换器后, 📌 前) ----
   const refreshBtn = await evalJs(ws, `JSON.stringify((() => {
