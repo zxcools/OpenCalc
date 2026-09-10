@@ -17,6 +17,9 @@ archive/
 # ===== 本地工作记忆 =====
 .workbuddy/
 
+# ===== 测试临时产物 =====
+.e2e-chrome/
+
 # ===== 系统文件 =====
 Thumbs.db
 .DS_Store

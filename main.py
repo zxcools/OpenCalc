@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 49              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
+APP_VERSION = 50              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -600,12 +600,23 @@ def save_settings(patch):
     # 已写入任一独立权益键 → 完成迁移, 清掉旧版共用键(避免清除后被 legacy 回退覆盖)
     if "futures_default_equity" in patch or "options_default_equity" in patch:
         s.pop("default_equity", None)
-    if "futures_risk_pct" in patch:
-        v = patch["futures_risk_pct"]
-        s["futures_risk_pct"] = None if v in (None, "") else float(v)
-    if "options_risk_pct" in patch:
-        v = patch["options_risk_pct"]
-        s["options_risk_pct"] = None if v in (None, "") else float(v)
+    # 风险额度: 只接受五档合法值(0.5/1/1.5/2/3), 其余只允许清除
+    #   ⚠ 之前任意数字都能存进去(如 999), 虽前端按 <option> 匹配后不会应用, 但配置里留脏值易误导
+    for _k, _opts in (("futures_risk_pct", FUTURES_RISK_OPTIONS),
+                      ("options_risk_pct", OPTIONS_RISK_OPTIONS)):
+        if _k not in patch:
+            continue
+        v = patch[_k]
+        if v in (None, ""):
+            s[_k] = None
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("风险额度必须为数字")
+        if fv not in _opts:
+            raise ValueError("风险额度只支持 %s" % " / ".join("%g" % x for x in _opts))
+        s[_k] = fv
     for k in ("frequent_futures", "frequent_options"):
         if k in patch:
             v = patch[k]
@@ -1135,24 +1146,157 @@ ALLOWED_DIRECTION = ("buy", "sell")
 ALLOWED_OP_TYPE = ("open", "close")
 
 
+_CP_SEP = "-_/ "   # C/P 前后允许的分隔符(国内期权代码写法多样)
+
+# 国内期权合约的月份段: 四位(2611)或三位(611, 郑商所/上期所简写)
+_MONTH_RE = re.compile(r"[0-9]{3,4}")
+# 行权价段: 任意长度数字
+_STRIKE_RE = re.compile(r"[0-9]+")
+
+
+def _has_month(block):
+    """block 内是否存在独立的 3-4 位月份数字段(前后都不是数字)"""
+    return bool(re.search(r"(?<![0-9])[0-9]{3,4}(?![0-9])", block))
+
+
+def _has_digits(block):
+    return bool(_STRIKE_RE.search(block))
+
+
+def _digit_run_left(s, i):
+    """返回 s[:i] 末尾连续的纯数字串(碰到非数字即停)"""
+    j = i - 1
+    while j >= 0 and s[j].isdigit():
+        j -= 1
+    return s[j + 1:i]
+
+
+def _digit_run_right(s, i):
+    """返回 s[i+1:] 开头连续的纯数字串"""
+    j = i + 1
+    while j < len(s) and s[j].isdigit():
+        j += 1
+    return s[i + 1:j]
+
+
+def find_cp_index(s):
+    """在合约代码里定位「看涨看跌 C/P」那一位, 返回索引; 没有则 None.
+    兼容写法:
+      紧凑式   lc2611c144000 / sf611c6800 / ao611p2500  -> C/P 左右紧邻月份与行权价数字
+      分隔式   lc2611-c-144000 / lc2611_c_144000        -> C/P 自成一段, 两侧是分隔符
+      半分隔式 lc2611-c144000                           -> 左边分隔、右边直接接行权价
+    ⚠ 三重坑:
+      1) 24 个品种代码自带 C/P(玉米 c / 棉花 cf / 纸浆 sp / 聚丙烯 pp / 苹果 ap / 花生 pk),
+         「有 c/p 就当标志位」会错判;
+      2) 品种前缀里的 c/p 也可能「看起来合法」, 例如 hc2610 的 c 右边紧跟月份 2610、
+         hc2610P6000 里 c 与 P 都满足结构 — 必须取「最右边」那个满足条件的位置;
+      3) 判定必须依赖月份: 真实期权代码一定含月份(3-4 位), 没有月份的一律不认
+         (aoc5000 / aoC5000 这类缺月份的写法无法与品种前缀区分, 不作为合法合约)."""
+    if not s:
+        return None
+    n = len(s)
+
+    def _is_sep(ch):
+        return ch == "" or ch in _CP_SEP
+
+    def _month_run_len(run):
+        return 3 <= len(run) <= 4
+
+    found = None
+    for i, ch in enumerate(s):
+        if ch not in "cpCP":
+            continue
+        left = s[i - 1] if i > 0 else ""
+        right = s[i + 1] if i + 1 < n else ""
+        leftblock = s[:i]
+        rightblock = s[i + 1:]
+        lrun = _digit_run_left(s, i)
+        rrun = _digit_run_right(s, i)
+
+        ok = False
+        # 1) 紧凑式: 一侧是月份(3-4 位数字 run), 另一侧是行权价数字
+        if left.isdigit() and right.isdigit():
+            if _month_run_len(lrun) or _month_run_len(rrun):
+                ok = True
+        # 2) 分隔式: 左右紧邻都是分隔符/边界, 两侧块里须出现月份与行权价
+        #    (月份可能在 C/P 左侧 lc2611-c-144000, 也可能在右侧 au-c-2611)
+        elif _is_sep(left) and _is_sep(right):
+            if (_has_month(leftblock) and _has_digits(rightblock)) or \
+               (_has_digits(leftblock) and _has_month(rightblock)):
+                ok = True
+        # 3) 半分隔式: 一侧分隔、另一侧数字, 且分隔侧出现月份
+        elif _is_sep(left) and right.isdigit() and _has_month(leftblock):
+            ok = True
+        elif left.isdigit() and _is_sep(right) and _has_month(rightblock):
+            ok = True
+
+        if ok:
+            found = i   # 继续往后找, 取最右边一个(避开品种前缀里的 c/p)
+    return found
+
+
+def _looks_variety(block):
+    """block 去掉分隔符后是否是纯字母(可能是品种代码), 且至少 1 个字母"""
+    t = block.replace("-", "").replace("_", "").replace("/", "").strip()
+    return bool(t) and t.isalpha()
+
+
+# 分隔符统一为 "-"(用户实际写法), 避免同一合约因 _ / / 空格 不同又分裂
+#   ⚠ 空白是「打字随手敲的」, 一律删掉; 只有 - _ / 才视为分段符
+_SPACE_RE = re.compile(r"\s+")
+_SEP_NORM = re.compile(r"[_/]+")
+
+
+def _tidy_seps(s):
+    """把空白去掉、把 _ / 统一成 '-'、合并连续 '-'、去掉首尾 '-'.
+    例: 'br 2610 C 15800' -> 'br-2610-C-15800' ; 'lc2611_C_144000' -> 'lc2611-C-144000'"""
+    s = _SPACE_RE.sub("", s.strip())
+    s = _SEP_NORM.sub("-", s)
+    s = re.sub(r"-+", "-", s)
+    return s.strip("-")
+
+
+def _collapse_seps(s, cp_i):
+    """归一化后把「非 C/P 两侧」的 '-' 去掉, 得到统一写法.
+    cp_i 为小写 s 中 C/P 的索引.
+    例: br-2610-C-15800 -> br2610C15800(C/P 两侧原本无 '-') ;
+        lc2611-C-144000 -> lc2611-C-144000(C/P 两侧原本有 '-')"""
+    ch = s[cp_i].upper()
+    has_l = cp_i > 0 and s[cp_i - 1] == "-"
+    has_r = cp_i + 1 < len(s) and s[cp_i + 1] == "-"
+    left = s[:cp_i].replace("-", "")
+    right = s[cp_i + 1:].replace("-", "")
+    if not left:
+        return (ch + ("-" if has_r else "") + right) if right else ch
+    if not right:
+        return left + ("-" if has_l else "") + ch
+    return left + ("-" if has_l else "") + ch + ("-" if has_r else "") + right
+
+
 def normalize_contract(c):
-    """合约代码归一化: 品种代码小写, C/P(看涨/看跌)大写, 去掉空白.
-    例: BR2610c15800 -> br2610C15800 ; AO611P2500 -> ao611P2500
-    ⚠ 只认「月份数字后面」的 C/P — 品种代码自带 C/P 的很多(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p),
+    """合约代码归一化: 品种代码小写, 看涨看跌的 C/P 大写, 分隔符统一.
+    例: BR2610c15800 -> br2610C15800 ; LC2611-c-144000 -> lc2611-C-144000 ;
+        AO611P2500 -> ao611P2500 ; br 2610 C 15800 -> br2610C15800
+    ⚠ 只改「月份/行权价之间」的 C/P — 品种代码自带 C/P 的很多(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p),
       在整串里盲目大写会把品种代码改坏."""
     if not isinstance(c, str):
         return c   # 非字符串原样返回(监控池 contracts 元素可能是 dict)
-    s = "".join(c.split())
-    if not s:
-        return s
-    s = s.lower()
-    m = re.search(r"[0-9]([cp])(?=[0-9]|$)", s)
-    if not m:
-        m = re.search(r"([cp])(?=[0-9]+$)", s)   # 兜底: 省略月份(如 aoc5000)
-    if m:
-        i = m.start(1)
-        s = s[:i] + s[i].upper() + s[i + 1:]
-    return s
+    low = _tidy_seps(c).lower()
+    if not low:
+        return low
+    i = find_cp_index(low)
+    if i is None:
+        return low.replace("-", "")
+    return _collapse_seps(low, i)
+
+
+def detect_call_put(c):
+    """从合约代码推断看涨(C)/看跌(P); 识别不出返回 ''"""
+    if not isinstance(c, str):
+        return ""
+    s = _tidy_seps(c).lower()
+    i = find_cp_index(s)
+    return s[i].upper() if i is not None else ""
 
 
 def _trade_record_to_dict(r):
@@ -1232,6 +1376,29 @@ def trade_upsert(payload):
         ).fetchone()[0]
         if cq > opened - closed:
             raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed))
+
+    # 开仓数量/价格校验: 手数须为正整数、开仓价与权利金不得为负
+    #   ⚠ 负数手数曾能存进去: 持仓按 qty>0 汇总 → 负数行不出现在持仓里,
+    #     用户看到「已保存」却什么都查不到(隐形脏数据); 必须拦在入口
+    if payload["op_type"] == "open":
+        try:
+            _qty = float(payload.get("qty"))
+        except (TypeError, ValueError):
+            raise ValueError("开仓手数必须为数字")
+        if _qty <= 0:
+            raise ValueError("开仓手数必须 > 0")
+        if _qty != int(_qty):
+            raise ValueError("开仓手数必须为整数")
+        for _f, _label in (("open_price", "开仓价"), ("premium", "权利金")):
+            _v = payload.get(_f)
+            if _v in (None, ""):
+                continue
+            try:
+                _fv = float(_v)
+            except (TypeError, ValueError):
+                raise ValueError("%s必须为数字" % _label)
+            if _fv < 0:
+                raise ValueError("%s不能为负数" % _label)
 
     rec_id = payload.get("id")
     fields = (
@@ -3962,20 +4129,78 @@ const TradeUI = {
   onlyOpen: false,      // 只展示未平仓
   showAll: false,       // 是否展开全部(>10)
 
-  // 合约代码归一化: 品种代码小写, C/P(看涨/看跌)大写
-  // ⚠ 只认「月份数字后面」的 C/P — 品种代码自带 C/P 的多(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p),
-  //   整串盲目大写会把品种代码改坏
-  normalizeContract(c){
-    let s = String(c || '').replace(/\s+/g, '');
-    if (!s) return s;
-    s = s.toLowerCase();
-    let m = s.match(/[0-9]([cp])(?=[0-9]|$)/);
-    if (!m) m = s.match(/([cp])(?=[0-9]+$)/);   // 兜底: 省略月份(如 aoc5000)
-    if (m){
-      const i = m.index + m[0].length - 1;
-      s = s.slice(0, i) + s[i].toUpperCase() + s.slice(i + 1);
-    }
+  // 预处理: 空白是打字随手敲的 → 直接删; _ / 视为有意分段 → 统一成 '-'; 合并连续'-'; 去首尾'-'
+  //   'br 2610 C 15800' -> 'br-2610-C-15800' ; 'lc2611_C_144000' -> 'lc2611-C-144000'
+  tidySeps(s){
+    s = String(s || '').trim().replace(/\s+/g, '');
+    s = s.replace(/[_/]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
     return s;
+  },
+
+  // 合约代码归一化: 品种代码小写, C/P(看涨/看跌)大写, 分隔符统一
+  //   ⚠ 只改「月份/行权价之间」的 C/P — 品种代码自带 C/P 的多(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p),
+  //     整串盲目大写会把品种代码改坏
+  normalizeContract(c){
+    const low = this.tidySeps(c).toLowerCase();
+    if (!low) return low;
+    const i = this.findCpIndex(low);
+    if (i < 0) return low.replace(/-/g, '');
+    // C/P 两侧原本带 '-' 就保留分段, 否则输出紧凑写法
+    const ch = low[i].toUpperCase();
+    const hasL = i > 0 && low[i - 1] === '-';
+    const hasR = i + 1 < low.length && low[i + 1] === '-';
+    const left = low.slice(0, i).replace(/-/g, '');
+    const right = low.slice(i + 1).replace(/-/g, '');
+    if (!left) return right ? (ch + (hasR ? '-' : '') + right) : ch;
+    if (!right) return left + (hasL ? '-' : '') + ch;
+    return left + (hasL ? '-' : '') + ch + (hasR ? '-' : '') + right;
+  },
+
+  // 定位看涨看跌 C/P 的位置(与后端 find_cp_index 规则一致), 找不到返回 -1
+  //   紧凑式 lc2611c144000 / sf611c6800 | 分隔式 lc2611-c-144000 | 半分隔 lc2611-c144000
+  //   ⚠ 三重坑:
+  //     1) 24 个品种代码自带 C/P(玉米 c / 棉花 cf / 纸浆 sp / 聚丙烯 pp / 苹果 ap / 花生 pk);
+  //     2) 品种前缀的 c/p 也可能「看着合法」(hc2610P6000 里 c 与 P 都满足结构) → 取最右侧;
+  //     3) 判定依赖月份(3-4 位), 没有月份的写法不认(aoc5000 无法与品种前缀区分)
+  findCpIndex(s){
+    if (!s) return -1;
+    const SEP = '-_/ ';
+    const isSep = (v) => v === '' || SEP.indexOf(v) >= 0;
+    const isDigit = (v) => v >= '0' && v <= '9';
+    const runLeft = (i) => { let j = i - 1; while (j >= 0 && isDigit(s[j])) j--; return s.slice(j + 1, i); };
+    const runRight = (i) => { let j = i + 1; while (j < s.length && isDigit(s[j])) j++; return s.slice(i + 1, j); };
+    const hasMonth = (b) => /(^|[^0-9])[0-9]{3,4}([^0-9]|$)/.test(b);
+    const hasDigit = (b) => /[0-9]/.test(b);
+    const isMonthRun = (r) => r.length >= 3 && r.length <= 4;
+    let found = -1;
+    for (let i = 0; i < s.length; i++){
+      const ch = s[i];
+      if (ch !== 'c' && ch !== 'p') continue;
+      const left = i > 0 ? s[i - 1] : '';
+      const right = i + 1 < s.length ? s[i + 1] : '';
+      const lb = s.slice(0, i), rb = s.slice(i + 1);
+      let ok = false;
+      if (isDigit(left) && isDigit(right)){
+        // 紧凑式: 一侧是月份(3-4 位 run), 另一侧是行权价数字
+        if (isMonthRun(runLeft(i)) || isMonthRun(runRight(i))) ok = true;
+      } else if (isSep(left) && isSep(right)){
+        // 分隔式: 两侧块里须出现月份与行权价(月份可能在 C/P 左侧或右侧)
+        if ((hasMonth(lb) && hasDigit(rb)) || (hasDigit(lb) && hasMonth(rb))) ok = true;
+      } else if (isSep(left) && isDigit(right) && hasMonth(lb)){
+        ok = true;    // 半分隔式: lc2611-c144000
+      } else if (isDigit(left) && isSep(right) && hasMonth(rb)){
+        ok = true;    // 半分隔式(镜像)
+      }
+      if (ok) found = i;   // 继续往后找, 取最右侧
+    }
+    return found;
+  },
+
+  // 从合约代码推断看涨(C)/看跌(P), 识别不出返回 ''
+  detectCallPut(c){
+    const s = this.tidySeps(c).toLowerCase();
+    const i = this.findCpIndex(s);
+    return i >= 0 ? s[i].toUpperCase() : '';
   },
   contractFilter: '',   // 详情操作记录合约筛选(空=全部)
   MAX: 10,
@@ -4381,24 +4606,21 @@ const TradeUI = {
       const inp = document.createElement('input');
       inp.id = 'tmContract';
       inp.type = 'text';
-      inp.placeholder = '如 ao611P2500';
+      inp.placeholder = '如 lc2611-C-144000 或 ao611P2500';
       contractInput.replaceWith(inp);
       $('tmUnderlying').value = preset.underlying || '';
       $('tmUnderlying').readOnly = !!preset.underlying;
       $('tmDirectionWrap').classList.remove('disabled');
       $('tmDirection').disabled = false;
       $('tmCloseQtyHint').textContent = '';
+      // 输入即自动填看涨看跌; 兼容 lc2611-C-144000(分隔) / ao611P2500(紧凑) 两种写法
+      // ⚠ 不能只按「有 C/P」判断 — 24 个品种代码自带 C/P(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p / 聚丙烯 pp / 苹果 ap / 花生 pk)
       const _autoCp = () => {
-        const code = String(inp.value || '').toUpperCase().replace(/\s+/g, '');
-        // 期权代码格式: 品种 + 月份 + C/P + 行权价
-        // ⚠ 只认「月份数字后面」的 C/P — 品种代码自带 P/C 的很多(棕榈油 p / 聚丙烯 pp / 苹果 ap / 花生 pk / 玉米 c / 棉花 cf),
-        //   若在整串里找 P/C 会把 p2601C8000(棕榈油看涨) 误判成看跌
-        let m = code.match(/[0-9]([CP])(?=[0-9]|$)/);
-        if (!m) m = code.match(/([CP])(?=[0-9]+$)/);   // 兜底: 省略月份时(如 AOC5000)取后跟数字的 C/P
-        if (m) $('tmCallPut').value = m[1];
+        const cp = this.detectCallPut(inp.value);
+        if (cp) $('tmCallPut').value = cp;
       };
       inp.addEventListener('input', _autoCp);
-      // 失焦时把输入框内容格式化成规范写法(品种小写 + C/P 大写), 与后端保存口径一致
+      // 失焦时把输入框内容格式化成规范写法(品种小写 + C/P 大写 + 分隔符统一), 与后端保存口径一致
       inp.addEventListener('blur', () => {
         const v = this.normalizeContract(inp.value);
         if (v && v !== inp.value) inp.value = v;

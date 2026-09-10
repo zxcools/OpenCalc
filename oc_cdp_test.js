@@ -661,7 +661,14 @@ async function main() {
       contracts: [...new Set((det.operations||[]).map(o=>o.contract))],
       opsContracts: [...new Set((det.operations||[]).map(o=>o.contract))],
       holdings: det.holdings,
-      normFn: [TradeUI.normalizeContract('br2610c15800'), TradeUI.normalizeContract('AO611P2500'), TradeUI.normalizeContract('p2601C8000')]
+      normFn: [TradeUI.normalizeContract('br2610c15800'), TradeUI.normalizeContract('AO611P2500'), TradeUI.normalizeContract('p2601C8000')],
+      // v50.30: 分隔式(- 隔开) + 半分隔式; 品种前缀自带 c/p 须取最右侧
+      sepFn: [TradeUI.normalizeContract('lc2611-C-144000'), TradeUI.normalizeContract('LC2611-c-144000'),
+              TradeUI.normalizeContract('lc2611-c144000'), TradeUI.normalizeContract('lc2611_C_144000'),
+              TradeUI.normalizeContract('hc2610P6000')],
+      sepCp: [TradeUI.detectCallPut('lc2611-C-144000'), TradeUI.detectCallPut('LC2611-P-144000'),
+              TradeUI.detectCallPut('hc2610P6000'), TradeUI.detectCallPut('cu2610'),
+              TradeUI.detectCallPut('aoc5000')]
     });
   })()`);
   const nf = JSON.parse(normFix);
@@ -675,6 +682,16 @@ async function main() {
   check('大小写不同仍能正确匹配平仓(4平2留)',
     nf.holdings.length === 1 && nf.holdings[0].qty === 2 && nf.holdings[0].open_price === 710,
     JSON.stringify(nf.holdings));
+  // ---- 场景P2 (v50.30): 分隔式 lc2611-C-144000 也能识别 + 归一化 ----
+  check('分隔式 lc2611-C-144000 归一化(保留 - 分段)',
+    nf.sepFn[0] === 'lc2611-C-144000' && nf.sepFn[1] === 'lc2611-C-144000', JSON.stringify(nf.sepFn));
+  check('半分隔式 lc2611-c144000 归一化', nf.sepFn[2] === 'lc2611-C144000', JSON.stringify(nf.sepFn));
+  check('_ 分隔统一成 -', nf.sepFn[3] === 'lc2611-C-144000', JSON.stringify(nf.sepFn));
+  check('品种前缀自带 c/p + 真实标志位取最右', nf.sepFn[4] === 'hc2610P6000', JSON.stringify(nf.sepFn));
+  check('看涨看跌自动识别: 分隔式 C/P',
+    nf.sepCp[0] === 'C' && nf.sepCp[1] === 'P', JSON.stringify(nf.sepCp));
+  check('看涨看跌自动识别: 前缀c不误判 / 缺月份不认',
+    nf.sepCp[2] === 'P' && nf.sepCp[3] === '' && nf.sepCp[4] === '', JSON.stringify(nf.sepCp));
 
   // ---- 场景N: 顶栏刷新按钮存在(在切换器后, 📌 前) ----
   const refreshBtn = await evalJs(ws, `JSON.stringify((() => {

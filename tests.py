@@ -480,22 +480,120 @@ try:
 except ValueError as e:
     check("平仓数量超额被拒绝", "超过剩余可平" in str(e), str(e))
 
+# 9b. 开仓数量/价格校验 (v50.30): 负数手数曾能存进去 → 持仓查不到(隐形脏数据)
+print("\n== 开仓参数校验 ==")
+_bad_open = [
+    ("负手数被拒",   {'underlying':'vz','contract':'vzC100','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':100,'qty':-5,'premium':-500}),
+    ("零手数被拒",   {'underlying':'vz','contract':'vzC100','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':100,'qty':0,'premium':0}),
+    ("小数手数被拒", {'underlying':'vz','contract':'vzC100','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':100,'qty':1.5,'premium':150}),
+    ("非数字手数被拒", {'underlying':'vz','contract':'vzC100','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':100,'qty':'abc','premium':100}),
+    ("负开仓价被拒", {'underlying':'vz','contract':'vzC100','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':-100,'qty':1,'premium':100}),
+    ("负权利金被拒", {'underlying':'vz','contract':'vzC100','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':100,'qty':1,'premium':-100}),
+]
+for _nm, _p in _bad_open:
+    try:
+        trade_upsert(dict(_p))
+        check(_nm, False, "未被拒绝, 已写入")
+    except ValueError:
+        check(_nm, True)
+# 正常开仓仍然通过
+_zid = trade_upsert({'underlying':'vz','contract':'vzC100','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':100,'qty':3,'premium':300})
+check("正常开仓仍通过", _zid is not None)
+_vd = trade_detail('vz')
+check("正常开仓可查到持仓 3 手", _vd['holdings'] and _vd['holdings'][0]['qty'] == 3, str(_vd['holdings']))
+trade_delete(_zid)
+
+# 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
+print("\n== 风险额度设置校验 ==")
+from main import save_settings
+_orig_f = get_settings().get('futures_risk_pct')
+try:
+    save_settings({'futures_risk_pct': 999})
+    check("风险额度 999 被拒", False, "未拒绝")
+except ValueError as _e:
+    check("风险额度 999 被拒", "只支持" in str(_e), str(_e))
+try:
+    save_settings({'futures_risk_pct': 'abc'})
+    check("风险额度非数字被拒", False, "未拒绝")
+except ValueError:
+    check("风险额度非数字被拒", True)
+save_settings({'futures_risk_pct': 1.5})
+check("风险额度合法档 1.5 可存", get_settings().get('futures_risk_pct') == 1.5)
+save_settings({'futures_risk_pct': _orig_f})   # 还原
+check("风险额度可清除/还原", get_settings().get('futures_risk_pct') == _orig_f)
+
 # 10. 合约代码归一化 (v50.29): 品种小写 + C/P 大写, 大小写不同不再算两个合约
 print("\n== 合约代码归一化 (normalize_contract) ==")
-from main import normalize_contract, trade_import_record
+from main import normalize_contract, trade_import_record, detect_call_put, find_cp_index
 _norm_cases = [
+    # --- 紧凑式 ---
     ('br2610c15800', 'br2610C15800'), ('BR2610C15800', 'br2610C15800'),
     ('AO611P2500', 'ao611P2500'),     ('p2601C8000', 'p2601C8000'),
     ('P2601c8000', 'p2601C8000'),     ('pp2601C8000', 'pp2601C8000'),
     ('ap2601p9000', 'ap2601P9000'),   ('pk2601C8000', 'pk2601C8000'),
     ('c2601C2400', 'c2601C2400'),     ('cf2701C18000', 'cf2701C18000'),
-    ('sp2601p5000', 'sp2601P5000'),   ('AOC5000', 'aoC5000'),
+    ('sp2601p5000', 'sp2601P5000'),
     ('br 2610 C 15800', 'br2610C15800'), ('SR611C6000', 'sr611C6000'),
     ('SF611C6800', 'sf611C6800'),     ('', ''),
+    # --- 分隔式 (v50.30): C/P 前后用 - 隔开, 用户实际写法 lc2611-C-144000 ---
+    ('lc2611-C-144000', 'lc2611-C-144000'), ('LC2611-c-144000', 'lc2611-C-144000'),
+    ('lc2611-c-144000', 'lc2611-C-144000'), ('lc2611-P-144000', 'lc2611-P-144000'),
+    ('LC2611-p-144000', 'lc2611-P-144000'), ('au2612-c-560', 'au2612-C-560'),
+    ('lc2611-c144000', 'lc2611-C144000'),
+    # _ / 视为有意分段 → 统一成 '-'; 空白视为打字随手敲的 → 直接删
+    ('lc2611_C_144000', 'lc2611-C-144000'), ('lc2611/P/144000', 'lc2611-P-144000'),
+    ('lc2611 c 144000', 'lc2611C144000'),   ('lc2611-C-144000 ', 'lc2611-C-144000'),
+    # 品种前缀自带 c/p + 真实标志位 → 取最右侧
+    ('hc2610P6000', 'hc2610P6000'),   ('sp2610C6000', 'sp2610C6000'),
 ]
 _bad = [(a, normalize_contract(a), b) for a, b in _norm_cases if normalize_contract(a) != b]
-check("归一化 16 组用例", not _bad, str(_bad))
+check("归一化 %d 组用例" % len(_norm_cases), not _bad, str(_bad))
 check("非字符串原样返回(监控池 dict 不被破坏)", normalize_contract({'contract': 1}) == {'contract': 1})
+
+# 看涨看跌自动识别(前端 _autoCp 调用的就是同一套规则)
+_cp_cases = [
+    ('lc2611-C-144000', 'C'), ('lc2611-c-144000', 'C'), ('LC2611-P-144000', 'P'),
+    ('lc2611-c144000', 'C'),  ('ao611P2500', 'P'),       ('br2610c15800', 'C'),
+    ('sf611C6800', 'C'),      ('SR611C6000', 'C'),
+    ('cu2610', ''),           ('aoc5000', ''),           ('hc2610', ''),
+    ('lc2611X144000', ''),    ('', ''),
+    # 品种前缀自带 c/p: 必须取最右侧真实标志位, 不能撞上前缀里的 c/p
+    ('hc2610P6000', 'P'),     ('sp2610C6000', 'C'),      ('sc2601p5000', 'P'),
+    ('pp2601C8000', 'C'),     ('ap2601p9000', 'P'),      ('p2601C8000', 'C'),
+    # 缺少月份无法与品种前缀区分 → 不认(真实期权代码必含月份)
+    ('AOC5000', ''),          ('ao-c-5000', ''),
+]
+_badcp = [(a, detect_call_put(a), b) for a, b in _cp_cases if detect_call_put(a) != b]
+check("看涨看跌识别 %d 组用例" % len(_cp_cases), not _badcp, str(_badcp))
+
+# 24 个品种代码自带 C/P — 不能被误判成看涨看跌
+_selfcp = ['cu','pb','hc','sp','sc','bc','p','c','cs','pp','pg','CF','AP','CJ',
+           'PF','PK','CY','ZC','PX','PR','IC','lc','ps','ec']
+_selferr = []
+_selftot = 0
+for _v in _selfcp:
+    for _mth in ('2610', '611', '2701'):
+        for _cp in ('C', 'P'):
+            _selftot += 1
+            if detect_call_put('%s%s%s6000' % (_v, _mth, _cp)) != _cp.upper():
+                _selferr.append('%s%s%s6000' % (_v, _mth, _cp))
+        _selftot += 1
+        if detect_call_put('%s%s' % (_v, _mth)) != '':
+            _selferr.append('%s%s(无C/P却被识别)' % (_v, _mth))
+check("24 个自带 C/P 品种全部正确区分(%d 例)" % _selftot, not _selferr, str(_selferr[:8]))
+
+# find_cp_index: 分隔式/紧凑式定位到正确的 C/P 位, 不是品种代码里的 c/p
+check("find_cp_index 定位分隔式", find_cp_index('lc2611-c-144000') == 7)
+check("find_cp_index 定位紧凑式", find_cp_index('br2610c15800') == 6)
+check("find_cp_index 品种自带c不误判", find_cp_index('cu2610') is None)
+check("find_cp_index 双 c/p 取最右侧", find_cp_index('hc2610p6000') == 6)
 
 # 大小写不同但内容相同 → 只留一条(不重复出现在筛选下拉)
 trade_upsert({'underlying':'nz1','contract':'nz1C5000','op_type':'open','direction':'buy',
