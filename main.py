@@ -2402,6 +2402,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* 中国习惯: 盈利=红, 亏损=绿 (与开仓模块一致) */
 .tbl .pos{color:var(--bad)}
 .tbl .neg{color:var(--good)}
+/* 详情面板顶部 meta 里的 <b class="pos/neg"> 不在 .tbl 内, 单独覆盖 */
+#tradesArea .pos{color:var(--bad);font-weight:600}
+#tradesArea .neg{color:var(--good);font-weight:600}
 .tbl .actions{text-align:right}
 .tbl .actions button{margin-left:4px}
 
@@ -3893,7 +3896,7 @@ const TradeUI = {
     const g = this.groups.find(x => x.underlying === d.underlying) || {};
     const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '—');
     const pnl = g.total_pnl;
-    const pnlStr = pnl ? (pnl > 0 ? '+CN¥' : 'CN¥') + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—';
+    const pnlStr = pnl ? (pnl > 0 ? '+CN¥' : (pnl < 0 ? '-CN¥' : 'CN¥')) + Math.abs(pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—';
     $('tdMeta').innerHTML = `
       <span class="tag ${g.direction==='buy'?'buy':(g.direction==='sell'?'sell':'')}">${dirTxt}</span>
       &nbsp;开仓时间 <b>${this.fmtDate(g.open_date)}</b>
