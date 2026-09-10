@@ -4229,9 +4229,13 @@ const TradeUI = {
       $('tmDirection').disabled = false;
       $('tmCloseQtyHint').textContent = '';
       const _autoCp = () => {
-        const code = String(inp.value || '').toUpperCase();
-        if (/P/.test(code)) $('tmCallPut').value = 'P';
-        else if (/C/.test(code)) $('tmCallPut').value = 'C';
+        const code = String(inp.value || '').toUpperCase().replace(/\s+/g, '');
+        // 期权代码格式: 品种 + 月份 + C/P + 行权价
+        // ⚠ 只认「月份数字后面」的 C/P — 品种代码自带 P/C 的很多(棕榈油 p / 聚丙烯 pp / 苹果 ap / 花生 pk / 玉米 c / 棉花 cf),
+        //   若在整串里找 P/C 会把 p2601C8000(棕榈油看涨) 误判成看跌
+        let m = code.match(/[0-9]([CP])(?=[0-9]|$)/);
+        if (!m) m = code.match(/([CP])(?=[0-9]+$)/);   // 兜底: 省略月份时(如 AOC5000)取后跟数字的 C/P
+        if (m) $('tmCallPut').value = m[1];
       };
       inp.addEventListener('input', _autoCp);
       if (!preset.call_put) _autoCp();
