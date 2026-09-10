@@ -18,7 +18,10 @@ archive/
 .workbuddy/
 
 # ===== 测试临时产物 =====
-.e2e-chrome/
+.e2e-chrome*/
+.e2e-data*/
+_tmp_*
+.tmp_*/
 
 # ===== 系统文件 =====
 Thumbs.db

@@ -1,12 +1,44 @@
 // OpenCalc v49 UI E2E: 填参数→计算→阶梯→保存方案→刷新→调出方案 (13 项断言)
 // 运行前置:
-//   1. 软件服务运行在 8765 (启动 dist/OpenCalc.exe 或 python main.py)
+//   1. 软件服务运行在 8765, ⚠⚠ 必须用测试数据目录启动, 否则会往真实记录里写测试数据:
+//        OC_DATA_DIR=<临时目录> python main.py      (或 OC_DATA_DIR=<临时目录> dist/OpenCalc.exe)
+//      脚本会自动检查: 服务未用 OC_DATA_DIR 锁定时拒绝运行(除非设 OC_E2E_FORCE=1)
 //   2. Chrome headless 调试端口 9222:
 //      "C:\...\chrome.exe" --headless=new --disable-gpu --no-first-run \
 //        --remote-debugging-port=9222 --user-data-dir=<临时目录> about:blank
 //   3. node oc_cdp_test.js   (退出码 0=全过; 1=有断言失败; 2=脚本错误)
-const BASE = 'http://127.0.0.1:8765';
+const BASE = process.env.OC_E2E_BASE || 'http://127.0.0.1:8765';   // 测试时可指向别的端口
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ⚠ 数据安全闸门: E2E 会写入/删除交易记录, 绝不能跑在真实数据上.
+//   服务由 OC_DATA_DIR 启动时 /api/funds/data-info 会返回 env_locked=true.
+async function guardRealData() {
+  if (process.env.OC_E2E_FORCE === '1') {
+    console.log('⚠ 已用 OC_E2E_FORCE=1 跳过数据安全检查, 本次会写入当前数据目录');
+    return;
+  }
+  let info = null;
+  try {
+    info = await (await fetch(BASE + '/api/funds/data-info')).json();
+  } catch (e) {
+    console.log('无法读取 /api/funds/data-info (服务未启动?), 跳过安全检查:', e.message);
+    return;
+  }
+  if (!info || !info.env_locked) {
+    console.error('');
+    console.error('❌ 拒绝运行: 服务没有使用测试数据目录。');
+    console.error('   当前数据目录:', (info && info.data_dir) || '(未知)');
+    console.error('   记录数:', (info && info.record_count) || 0);
+    console.error('');
+    console.error('   本脚本会新建/删除交易记录, 跑在真实数据上会污染或清空你的记录。');
+    console.error('   请改用测试目录启动服务:');
+    console.error('     OC_DATA_DIR=<临时目录> python main.py');
+    console.error('   确实要在当前目录上跑(自担风险): 设 OC_E2E_FORCE=1 重跑。');
+    console.error('');
+    process.exit(2);
+  }
+  console.log('✅ 数据安全检查通过(测试数据目录:', info.data_dir + ')');
+}
 
 async function getWsUrl() {
   for (let i = 0; i < 30; i++) {
@@ -46,6 +78,7 @@ function check(name, ok, extra = '') {
 }
 
 async function main() {
+  await guardRealData();          // ⚠ 先确认不是跑在真实数据上, 再动任何记录
   const ws = new WebSocket(await getWsUrl());
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   ws.onmessage = ev => {
@@ -257,7 +290,10 @@ async function main() {
   await evalJs(ws, `TradeUI.refresh()`);
   await sleep(500);
   const poolText = await evalJs(ws, `document.getElementById('poolArea').innerText`);
-  check('监控池快照展示品种', /si/.test(poolText || '') && /cf/.test(poolText || '') && /2026-09-09/.test(poolText || ''), poolText.replace(/\s+/g,' ').slice(0,120));
+  // ⚠ 快照日期是「今天」, 不能写死日期(写死会在隔天/新库上失败) → 动态取当天
+  const _d = new Date();
+  const _today = _d.getFullYear() + '-' + String(_d.getMonth() + 1).padStart(2, '0') + '-' + String(_d.getDate()).padStart(2, '0');
+  check('监控池快照展示品种', /si/.test(poolText || '') && /cf/.test(poolText || '') && poolText.includes(_today), poolText.replace(/\s+/g,' ').slice(0,120));
   // 侧边栏导入导出按钮存在
   const sideBtns = await evalJs(ws, `JSON.stringify({ex: !!document.getElementById('btnExport'), im: !!document.getElementById('btnImport'), tabs: document.querySelectorAll('#mainTabs .maintab').length})`);
   const sb = JSON.parse(sideBtns);
@@ -692,6 +728,70 @@ async function main() {
     nf.sepCp[0] === 'C' && nf.sepCp[1] === 'P', JSON.stringify(nf.sepCp));
   check('看涨看跌自动识别: 前缀c不误判 / 缺月份不认',
     nf.sepCp[2] === 'P' && nf.sepCp[3] === '' && nf.sepCp[4] === '', JSON.stringify(nf.sepCp));
+
+  // ---- 场景Q (v50.31): 数据安全 — 软件目录内警告 + 自动备份 + 立即备份 ----
+  // 测试实例的数据目录在软件目录内(risky=true), 启动应显示顶部横幅 + 侧栏红点
+  const dq = await evalJs(ws, `JSON.stringify({ hasFn: typeof FundUI.checkDataSafety === 'function', hasOpen: typeof FundUI.openDataDir === 'function' })`);
+  check('存在数据安全检查方法', JSON.parse(dq).hasFn && JSON.parse(dq).hasOpen, dq);
+  const banner = await evalJs(ws, `JSON.stringify((() => {
+    const b = document.getElementById('dataRiskBanner');
+    return {
+      shown: !b.classList.contains('hidden'),
+      path: (document.getElementById('dataRiskPath')||{}).textContent || '',
+      hasMigrate: !!document.getElementById('dataRiskMigrate'),
+      dot: !document.getElementById('dataRiskDot').classList.contains('hidden'),
+      pos: getComputedStyle(b).position
+    };
+  })())`);
+  const bn0 = JSON.parse(banner);
+  check('数据在软件目录内 → 启动显示顶部警告横幅', bn0.shown && bn0.path.length > 0, banner);
+  check('警告横幅非阻塞(fixed 定位, 不挡操作)', bn0.pos === 'fixed' && bn0.hasMigrate, banner);
+  check('数据在软件目录内 → 侧栏按钮亮红点', bn0.dot, banner);
+  // 「稍后」可关闭横幅, 且不影响页面其余功能
+  await evalJs(ws, `document.getElementById('dataRiskLater').click()`);
+  await sleep(200);
+  const afterLater = await evalJs(ws, `JSON.stringify({ hidden: document.getElementById('dataRiskBanner').classList.contains('hidden'), calcUsable: !!document.getElementById('equity') })`);
+  check('点「稍后」横幅收起, 页面可正常操作', JSON.parse(afterLater).hidden && JSON.parse(afterLater).calcUsable, afterLater);
+
+  await evalJs(ws, `FundUI.openDataDir()`);
+  await sleep(700);
+  const dlg = await evalJs(ws, `JSON.stringify((() => {
+    const t = (id) => (document.getElementById(id)||{}).textContent || '';
+    return {
+      riskShown: !document.getElementById('setRisk').classList.contains('hidden'),
+      riskApp: t('setRiskApp'),
+      migrateVisible: document.getElementById('setMigrateSafe').style.display !== 'none',
+      bkDir: t('setBkDir'),
+      bkCnt: t('setBkCnt'),
+      curDir: t('setCurDir'),
+      dotShown: !document.getElementById('dataRiskDot').classList.contains('hidden')
+    };
+  })())`);
+  const dg = JSON.parse(dlg);
+  check('数据在软件目录内 → 弹窗显示红色警告', dg.riskShown && dg.riskApp.length > 0, dlg);
+  check('数据在软件目录内 → 显示「一键迁出」按钮', dg.migrateVisible, dlg);
+  check('数据在软件目录内 → 侧栏按钮亮红点', dg.dotShown, dlg);
+  check('弹窗显示自动备份位置与份数', dg.bkDir.length > 0 && /^\d+$/.test(dg.bkCnt), dlg);
+  check('弹窗显示当前数据目录', dg.curDir.includes('e2e-data') || dg.curDir.length > 0, dlg);
+
+  // 立即备份: 备份份数应 +1(或至少返回成功)
+  const bkBefore = await evalJs(ws, `(async () => {
+    const d = await (await fetch('/api/funds/data-info')).json();
+    return d.backup_count || 0;
+  })()`);
+  const bkNow = await evalJs(ws, `(async () => {
+    const r = await (await fetch('/api/funds/backup', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})).json();
+    const d = await (await fetch('/api/funds/data-info')).json();
+    return JSON.stringify({ok: r.ok, path: r.path||'', count: d.backup_count||0});
+  })()`);
+  const bn = JSON.parse(bkNow);
+  check('立即备份: 返回成功且份数增加', bn.ok && bn.count > bkBefore, 'before=' + bkBefore + ' ' + bkNow);
+  check('备份文件落在数据目录的 backup 子目录', /backup/.test(bn.path), bkNow);
+  // 备份列表接口可用
+  const bkList = await evalJs(ws, `(async () => { const d = await (await fetch('/api/funds/backups')).json(); return JSON.stringify({ok:d.ok, n:(d.backups||[]).length}); })()`);
+  const bl = JSON.parse(bkList);
+  check('备份列表接口返回条目', bl.ok && bl.n >= 1, bkList);
+  await evalJs(ws, `document.getElementById('setBg').classList.add('hidden')`);
 
   // ---- 场景N: 顶栏刷新按钮存在(在切换器后, 📌 前) ----
   const refreshBtn = await evalJs(ws, `JSON.stringify((() => {

@@ -1,9 +1,31 @@
 # -*- coding: utf-8 -*-
-"""开仓计算器 - 计算逻辑测试 (v4: 期货手数按风险金额推, 期权按权利金)"""
+"""开仓计算器 - 计算逻辑测试 (v4: 期货手数按风险金额推, 期权按权利金)
+
+⚠⚠⚠ 测试必须跑在「临时数据库」上, 绝不能碰用户真实数据 ⚠⚠⚠
+   历史事故: 本文件早期直接连 <源码目录>/data/funds.db 并 `DELETE FROM` 三张表,
+   跑一次测试就把用户的资金曲线 + 交易记录 + 监控池全部清空。
+   现在改为: 导入 main 之后立刻把 FUND_DB_PATH / CONFIG_PATH 指到临时目录,
+   所有数据操作都落在临时库; 真实库只读不写。
+"""
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ---- 关键: 在任何数据操作之前, 把数据库与配置全部隔离到临时目录 ----
+import tempfile as _tfp
+import main as _main_mod
+
+_TEST_ROOT = _tfp.mkdtemp(prefix="oc_tests_")
+_TEST_DB = os.path.join(_TEST_ROOT, "funds.db")
+_TEST_CFG = os.path.join(_TEST_ROOT, "config.json")
+_main_mod.FUND_DB_PATH = _TEST_DB           # 所有 main 内函数读的就是这个全局
+_main_mod.FUND_DB_CONN = None
+_main_mod.CONFIG_PATH = _TEST_CFG           # 别让测试改动真实 config.json
+if "oc_tests_" not in _main_mod.FUND_DB_PATH:
+    raise SystemExit("❌ 测试库未隔离(会破坏真实数据), 已拒绝运行: %s" % _main_mod.FUND_DB_PATH)
+_main_mod._fund_db()                        # 在临时目录建表, 后面直接连它删/插都安全
+
 from main import calc_futures, calc_options, get_contract, CONTRACTS, MIN_PROFIT_LOSS_RATIO, fund_upsert, fund_list_records, fund_yearly_summary, fund_combined_summary, fund_delete, fund_import_backup, fund_export_backup, FUND_STRATEGIES, get_settings, save_settings, trade_upsert, trade_list_records, trade_delete, trade_groups, trade_detail, trade_pool_upsert, trade_pool_list, trade_pool_delete
 
 PASS = 0
@@ -189,7 +211,7 @@ print("通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 # ==============================================================
 print("\n== 资金曲线 (fund_*) ==")
 import sqlite3
-_conn = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+_conn = sqlite3.connect(_main_mod.FUND_DB_PATH)
 _conn.execute("DELETE FROM records")  # 清理
 _conn.commit()
 _conn.close()
@@ -248,7 +270,7 @@ check("汇总包含两个策略", set(c_jan["strategies"]) == {"abe", "威科夫
 
 # 汇总缺失延续测试: abe 8月月末延续到 9月 (用户截图 case)
 # 清空重置场景: abe 8月(60000->70000)、威科夫 8月(50000->60000)、威科夫 9月(60000->50000)
-_conn = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+_conn = sqlite3.connect(_main_mod.FUND_DB_PATH)
 _conn.execute("DELETE FROM records"); _conn.commit(); _conn.close()
 fund_upsert("abe", 2025, 8, 60000, 70000, 1000, "")
 fund_upsert("威科夫", 2025, 8, 50000, 60000, 10000, "")
@@ -294,7 +316,7 @@ print("\n== 导出/导入备份 (fund_export/import_backup) ==")
 from main import fund_export_backup, fund_import_backup
 
 # 准备数据(先清空全部表, 避免之前的 trade 测试残留影响 records 计数)
-_conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+_conn3 = sqlite3.connect(_main_mod.FUND_DB_PATH)
 for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
@@ -306,7 +328,7 @@ check("导出包含 records 数组", isinstance(backup.get("records"), list) and
 check("导出含版本/时间戳", "backup_version" in backup and "exported_at" in backup)
 
 # 清空再导入 (模拟换电脑)
-_conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+_conn3 = sqlite3.connect(_main_mod.FUND_DB_PATH)
 for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
@@ -352,7 +374,7 @@ bk2 = fund_export_backup()
 check("导出包含 trades 数组", isinstance(bk2.get("trades"), list) and len(bk2["trades"]) == 2, str(len(bk2.get("trades") or [])))
 check("导出包含 trade_pools 数组", isinstance(bk2.get("trade_pools"), list) and len(bk2["trade_pools"]) == 1, str(len(bk2.get("trade_pools") or [])))
 # 清空三表后仅靠备份恢复
-_conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+_conn3 = sqlite3.connect(_main_mod.FUND_DB_PATH)
 for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
@@ -368,7 +390,7 @@ n4, _ = fund_import_backup(bk2)
 check("重复导入幂等(不翻倍)", len(trade_list_records()) == 2 and len(fund_list_records()) == 3 and len(trade_pool_list()) == 1,
       "trades=%s records=%s pools=%s" % (len(trade_list_records()), len(fund_list_records()), len(trade_pool_list())))
 # 清理, 不影响后续用例
-_conn3 = sqlite3.connect(os.path.join(os.path.dirname(__file__), "data", "funds.db"))
+_conn3 = sqlite3.connect(_main_mod.FUND_DB_PATH)
 for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
@@ -627,6 +649,95 @@ trade_import_record({'underlying': 'nz3', 'contract': 'NZ3c6000', 'op_type': 'op
                      'open_price': 100, 'qty': 1, 'premium': 100})
 _nz3 = [r for r in trade_list_records() if r['underlying'] == 'nz3']
 check("导入时合约也归一化", len(_nz3) == 1 and _nz3[0]['contract'] == 'nz3C6000', str(_nz3))
+
+# ===========================================================================
+# 11. 数据安全 (v50.31): 数据不能放在软件目录内 + 每次变动自动备份 + 换目录三表全迁移
+# ===========================================================================
+print("\n== 数据安全 ==")
+import glob
+import main as _ms
+from main import (data_dir_risky, suggest_safe_data_dir, fund_auto_backup,
+                  fund_backup_list, fund_backup_dir, fund_set_data_dir, AUTO_BACKUP_KEEP)
+
+# 11.1 数据在软件目录内 → 判定为危险; 软件目录之外 → 安全
+_saved_db = _ms.FUND_DB_PATH
+_ms.FUND_DB_PATH = _os.path.join(_ms._app_dir(), "data", "funds.db")
+check("数据落在软件目录内 → risky=True", data_dir_risky() is True)
+_ms.FUND_DB_PATH = _os.path.join(_td, "funds.db")
+check("数据在软件目录外 → risky=False", data_dir_risky() is False)
+
+# 11.2 推荐位置必须在软件目录之外
+_sug = suggest_safe_data_dir()
+check("推荐迁出位置不为空", bool(_sug), _sug)
+check("推荐位置在软件目录之外", _sug and not _ms._is_inside(_sug, _ms._app_dir()), _sug)
+
+# 11.3 自动备份: 生成文件 + 内容可用 + 轮转只留 N 份
+_ms.FUND_DB_PATH = _saved_db
+_bk1 = fund_auto_backup("测试", force=True)
+check("自动备份生成文件", bool(_bk1) and _os.path.exists(_bk1), str(_bk1))
+# ⚠ 必须关掉连接: Windows 下文件被打开着删不掉, 会让后面的轮转断言假失败
+_bkc = sqlite3.connect(_bk1)
+_bk_ok = _bkc.execute("SELECT COUNT(*) FROM trade_records").fetchone()[0] >= 0
+_bkc.close()
+check("备份文件是完整可读的库", _bk_ok)
+_bkset = glob.glob(_os.path.join(fund_backup_dir(), "funds_*.db"))
+check("备份目录可枚举", len(_bkset) >= 1, str(len(_bkset)))
+# 快速连续调用应被合并(2s 内不重复备份)
+_n_before = len(glob.glob(_os.path.join(fund_backup_dir(), "funds_*.db")))
+fund_auto_backup("快速第二次")      # 不 force → 应被 min_interval 合并掉
+check("短时间重复触发被合并(不产生新文件)",
+      len(glob.glob(_os.path.join(fund_backup_dir(), "funds_*.db"))) == _n_before)
+# 轮转: 造出超过上限的备份, 只保留 AUTO_BACKUP_KEEP 份
+_old_conn = _ms.FUND_DB_CONN
+for _i in range(AUTO_BACKUP_KEEP + 3):
+    _p = _os.path.join(fund_backup_dir(), "funds_20990101_0000%02d_000.db" % _i)
+    with open(_p, "wb") as _f:
+        _f.write(b"x")
+fund_auto_backup("触发轮转", force=True)
+_left = glob.glob(_os.path.join(fund_backup_dir(), "funds_*.db"))
+check("备份轮转只保留最近 %d 份" % AUTO_BACKUP_KEEP, len(_left) <= AUTO_BACKUP_KEEP, "实际 %d" % len(_left))
+check("备份列表按新→旧排序", (lambda L: len(L) == 0 or all(L[i]['mtime'] >= L[i+1]['mtime'] for i in range(len(L)-1)))(fund_backup_list()))
+
+# 11.4 切换数据目录必须迁移「全部三张表」(早期只迁资金曲线, 交易记录会静默丢失)
+_src_dir = _os.path.dirname(_ms.FUND_DB_PATH)
+_dst_dir = _os.path.join(_td, "moved")
+_os.makedirs(_dst_dir, exist_ok=True)
+# 造数据: 资金曲线 1 条 + 交易记录 2 条 + 监控池 1 条
+fund_upsert("abe", 2030, 1, 1000, 1100, 0, "迁移测试")
+trade_upsert({'underlying':'mvsafe','contract':'cu2610C80000','op_type':'open','direction':'buy',
+              'open_date':'2026-08-01','call_put':'C','open_price':100,'qty':2,'premium':200})
+trade_upsert({'underlying':'mvsafe','contract':'cu2610C80000','op_type':'close','direction':'sell',
+              'close_date':'2026-08-05','close_qty':1,'close_price':150,'pnl':50,'call_put':'C'})
+trade_pool_upsert({'contracts':['cu2610C80000'], 'note':'迁移测试'})
+_before_fund = len([r for r in fund_list_records() if r['year'] == 2030])
+_before_tr = len([r for r in trade_list_records() if r['underlying'] == 'mvsafe'])
+_before_pool = len([s for s in trade_pool_list() if s.get('note') == '迁移测试'])
+check("迁移前: 资金曲线已写入", _before_fund == 1, str(_before_fund))
+check("迁移前: 交易记录已写入(2 条)", _before_tr == 2, str(_before_tr))
+check("迁移前: 监控池已写入(1 条)", _before_pool == 1, str(_before_pool))
+# 切换目录(⚠ fund_set_data_dir 会写 config.json → 先把 CONFIG_PATH 指到临时文件, 别动真实配置)
+_saved_cfg = _ms.CONFIG_PATH
+_ms.CONFIG_PATH = _os.path.join(_td, "cfg.json")
+_mig, _st = fund_set_data_dir(_dst_dir)
+check("切换目录返回 migrated", _st == "migrated" and _mig > 0, "%s %s" % (_st, _mig))
+check("切换后库文件落在新目录", _os.path.exists(_os.path.join(_dst_dir, "funds.db")), _ms.FUND_DB_PATH)
+_after_fund = len([r for r in fund_list_records() if r['year'] == 2030])
+_after_tr = len([r for r in trade_list_records() if r['underlying'] == 'mvsafe'])
+_after_pool = len([s for s in trade_pool_list() if s.get('note') == '迁移测试'])
+check("迁移后: 资金曲线保留", _after_fund == _before_fund, "%d → %d" % (_before_fund, _after_fund))
+check("迁移后: 交易记录保留(旧版会丢)", _after_tr == _before_tr, "%d → %d" % (_before_tr, _after_tr))
+check("迁移后: 监控池保留", _after_pool == _before_pool, "%d → %d" % (_before_pool, _after_pool))
+# 迁移后持仓正确(FIFO 扣减后剩 1 手)
+_dmv = trade_detail('mvsafe')
+check("迁移后持仓计算正确(2 开 1 平 → 1 手)",
+      len(_dmv['holdings']) == 1 and _dmv['holdings'][0]['qty'] == 1, str(_dmv['holdings']))
+# 重复切换幂等(不会翻倍)
+fund_set_data_dir(_src_dir)
+fund_set_data_dir(_dst_dir)
+_tr_again = len([r for r in trade_list_records() if r['underlying'] == 'mvsafe'])
+check("反复切换数据目录幂等(不翻倍)", _tr_again == _before_tr, "实际 %d" % _tr_again)
+_ms.CONFIG_PATH = _saved_cfg
+check("切换数据目录时会先自动备份", len(fund_backup_list()) >= 1, str(len(fund_backup_list())))
 
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 50              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
+APP_VERSION = 51              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -471,9 +471,11 @@ def _app_config_dir():
     """配置目录(存 config.json):
     - 打包后 (frozen): %APPDATA%/OpenCalc
     - 开发时: 源码目录
-    """
+    ⚠ APPDATA 缺失时(少见: 精简环境/非 Explorer 启动)回退到 ~/AppData/Roaming —
+      不能直接回退到 ~, 否则会另开一个 <用户目录>/OpenCalc, 用户会以为数据丢了"""
     if getattr(sys, "frozen", False):
-        return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "OpenCalc")
+        base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(base, "OpenCalc")
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -502,30 +504,155 @@ def _persistent_data_dir():
     return os.path.join(_app_config_dir(), "data")
 
 
-# 启动时决定数据目录: 优先 config.json 里的 data_dir (用户自定义/云盘)
+def _app_dir():
+    """程序自身所在目录: 打包后 = exe 所在目录; 开发时 = 源码目录.
+    ⚠ 更新软件 = 替换/清理这个目录 → 数据绝不能放在它里面"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_inside(child, parent):
+    """child 是否位于 parent 目录内(含自身); 路径大小写/分隔符不敏感"""
+    try:
+        c = os.path.normcase(os.path.abspath(child)).rstrip("\\/")
+        p = os.path.normcase(os.path.abspath(parent)).rstrip("\\/")
+        return c == p or c.startswith(p + os.sep)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# 启动时决定数据目录, 优先级:
+#   1) 环境变量 OC_DATA_DIR (测试/便携模式: 一次运行不碰真实数据)
+#   2) config.json 里的 data_dir (用户自定义/网盘)
+#   3) 程序默认目录 (%APPDATA%/OpenCalc/data)
 _config = _load_config()
 _custom_data_dir = (_config.get("data_dir") or "").strip()
-if _custom_data_dir:
+_env_data_dir = (os.environ.get("OC_DATA_DIR") or "").strip()
+if _env_data_dir:
+    FUND_DB_PATH = os.path.join(os.path.abspath(os.path.expanduser(_env_data_dir)), "funds.db")
+elif _custom_data_dir:
     FUND_DB_PATH = os.path.join(os.path.abspath(os.path.expanduser(_custom_data_dir)), "funds.db")
 else:
     FUND_DB_PATH = os.path.join(_persistent_data_dir(), "funds.db")
 FUND_DB_CONN = None
 FUND_STRATEGIES = ["abe", "威科夫"]
 
+# 自动备份: 每次数据变动后把库快照到 <数据目录>/backup/, 只保留最近 N 份
+AUTO_BACKUP_KEEP = 20
+BACKUP_DIRNAME = "backup"
+_last_backup_ts = 0.0
+
+
+def data_dir_risky():
+    """数据目录是否落在软件目录内 — 更新软件(替换该目录)会连带删掉数据, 必须提醒用户迁出"""
+    return _is_inside(os.path.dirname(FUND_DB_PATH), _app_dir())
+
+
+def fund_backup_dir():
+    return os.path.join(os.path.dirname(FUND_DB_PATH), BACKUP_DIRNAME)
+
+
+def suggest_safe_data_dir():
+    """建议一个「软件目录之外」的数据目录, 供「一键迁出」使用.
+    取软件目录的上一级 + OpenCalc数据 (如 D:\\Workbuddy\\开仓计算器 → D:\\Workbuddy\\OpenCalc数据);
+    软件若装在盘根(没有上一级)则退回 <盘>:\\OpenCalc数据"""
+    app = _app_dir().rstrip("\\/")
+    parent = os.path.dirname(app)
+    if not parent or os.path.normcase(parent) == os.path.normcase(app):
+        drive = os.path.splitdrive(app)[0]
+        parent = (drive + os.sep) if drive else ""
+    if not parent:
+        return ""
+    return os.path.join(parent, "OpenCalc数据")
+
+
+def fund_auto_backup(reason="", force=False, min_interval=2.0):
+    """把当前库快照到 <数据目录>/backup/funds_<时间戳>.db, 轮转只留最近 AUTO_BACKUP_KEEP 份.
+    返回备份文件路径; 未备份返回 None.
+    ⚠ 用 sqlite3 的 backup API 而非文件复制 — 库可能正被写入, 直接拷文件可能拿到半截状态
+    ⚠ min_interval 内的重复触发合并成一次(导入/批量保存时会连续调用, 避免备份风暴)"""
+    global _last_backup_ts
+    now = time.time()
+    if not force and min_interval and (now - _last_backup_ts) < min_interval:
+        return None
+    conn_in = conn_out = None
+    out_path = None
+    try:
+        if not os.path.exists(FUND_DB_PATH):
+            return None
+        bdir = fund_backup_dir()
+        os.makedirs(bdir, exist_ok=True)
+        out_path = os.path.join(bdir, "funds_%s.db" % datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3])
+        conn_in = sqlite3.connect(FUND_DB_PATH)
+        conn_out = sqlite3.connect(out_path)
+        with conn_out:
+            conn_in.backup(conn_out)
+        conn_out.close()
+        conn_in.close()
+        conn_in = conn_out = None
+        # 轮转: 只保留最近 N 份(文件名内嵌时间戳, 按名排序即按时间排序)
+        files = sorted(f for f in os.listdir(bdir) if f.startswith("funds_") and f.endswith(".db"))
+        for f in files[:-AUTO_BACKUP_KEEP]:
+            try:
+                os.remove(os.path.join(bdir, f))
+            except OSError:
+                pass
+        _last_backup_ts = now
+        return out_path
+    except Exception:  # noqa: BLE001
+        for h in (conn_in, conn_out):
+            try:
+                if isinstance(h, sqlite3.Connection):
+                    h.close()
+            except Exception:  # noqa: BLE001
+                pass
+        # 失败时清掉可能写了一半的备份文件
+        if out_path and os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+        return None
+
+
+def fund_backup_list():
+    """返回备份文件列表(新→旧): [{name, path, size, mtime}]"""
+    bdir = fund_backup_dir()
+    out = []
+    try:
+        for f in os.listdir(bdir):
+            if f.startswith("funds_") and f.endswith(".db"):
+                p = os.path.join(bdir, f)
+                st = os.stat(p)
+                out.append({"name": f, "path": p, "size": st.st_size, "mtime": st.st_mtime})
+    except OSError:
+        pass
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
 
 def fund_set_data_dir(new_dir):
     """设置新的数据目录(可指向网盘同步文件夹), 并把现有记录合并迁移过去
     返回 (迁移条数, 说明文字); 相同目录返回 (0, "same")
+    ⚠ 必须迁移「全部三张表」: 资金曲线 records + 交易记录 trade_records + 监控池 trade_pool_snapshots.
+      早期版本只迁移了 records → 换数据目录后交易记录全没了(用户会以为数据丢了)
     """
     global FUND_DB_PATH, FUND_DB_CONN
+    if _env_data_dir:
+        raise ValueError("当前由 OC_DATA_DIR 环境变量锁定数据目录，无法在界面修改")
     new_dir = os.path.abspath(os.path.expanduser((new_dir or "").strip()))
     if not new_dir:
         raise ValueError("数据目录不能为空")
     cur_dir = os.path.dirname(FUND_DB_PATH)
     if os.path.normcase(new_dir) == os.path.normcase(cur_dir):
         return 0, "same"
-    # 读旧库全部记录(迁移用, 在关闭连接前)
+    # 读旧库全部数据(迁移用, 在关闭连接前) — 三张表都要
     old_records = fund_list_records()
+    old_trades = trade_list_records()
+    old_pools = trade_pool_list()
+    # 切换前先给旧库留一份完整快照(切完即分离, 出问题可回退)
+    fund_auto_backup("切换数据目录前", force=True)
     # 关闭旧连接, 避免文件锁
     if FUND_DB_CONN is not None:
         try:
@@ -545,21 +672,42 @@ def fund_set_data_dir(new_dir):
             cash=r.get("cash", 0),
         )
         migrated += 1
+    # 交易记录 / 监控池: 用保留原 id 的导入函数(幂等, 重复切换不会翻倍)
+    for t in old_trades:
+        try:
+            trade_import_record(t)
+            migrated += 1
+        except Exception:  # noqa: BLE001
+            pass
+    for p in old_pools:
+        try:
+            trade_pool_import_record(p)
+            migrated += 1
+        except Exception:  # noqa: BLE001
+            pass
     # 持久化配置
     cfg = _load_config()
     cfg["data_dir"] = new_dir
     _save_config(cfg)
     return migrated, "migrated"
 
-
 def fund_data_info():
     """返回当前数据位置信息(UI 显示用)"""
+    bks = fund_backup_list()
     return {
         "data_dir": os.path.dirname(FUND_DB_PATH),
         "db_path": FUND_DB_PATH,
         "db_exists": os.path.exists(FUND_DB_PATH),
         "record_count": len(fund_list_records()),
         "is_default": os.path.normcase(os.path.dirname(FUND_DB_PATH)) == os.path.normcase(_persistent_data_dir()),
+        # ⚠ 数据是否落在软件目录内: 更新软件会连带删除, 前端需醒目提醒并提供一键迁出
+        "risky": data_dir_risky(),
+        "app_dir": _app_dir(),
+        "suggest_dir": suggest_safe_data_dir(),     # 软件目录之外的推荐位置
+        "env_locked": bool(_env_data_dir),          # 由 OC_DATA_DIR 锁定(测试模式)时禁止改
+        "backup_dir": fund_backup_dir(),
+        "backup_count": len(bks),
+        "last_backup": bks[0] if bks else None,
     }
 
 
@@ -1916,6 +2064,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/funds/data-info":
             self._send(200, _json({"ok": True, **fund_data_info()}))
 
+        elif path == "/api/funds/backups":
+            self._send(200, _json({"ok": True, "backups": fund_backup_list()}))
+
         elif path == "/api/settings":
             self._send(200, _json({"ok": True, "settings": get_settings()}))
 
@@ -1949,6 +2100,7 @@ class Handler(BaseHTTPRequestHandler):
                 action = params.get("action", "upsert")
                 if action == "delete":
                     fund_delete(params["strategy"], int(params["year"]), int(params["month"]))
+                    fund_auto_backup("资金曲线-删除")
                     self._send(200, _json({"ok": True, "msg": "已删除"}))
                 else:
                     fund_upsert(
@@ -1961,10 +2113,14 @@ class Handler(BaseHTTPRequestHandler):
                         params.get("note", ""),
                         cash=params.get("cash", 0),
                     )
+                    fund_auto_backup("资金曲线-保存")
                     self._send(200, _json({"ok": True, "msg": "已保存"}))
                 return
             elif path == "/api/funds/import":
+                # 导入前先留一份(万一导入的内容不对还能退回)
+                fund_auto_backup("导入前", force=True)
                 imported, strategies = fund_import_backup(params)
+                fund_auto_backup("导入后", force=True)
                 self._send(200, _json({
                     "ok": True,
                     "msg": "导入完成",
@@ -1973,11 +2129,20 @@ class Handler(BaseHTTPRequestHandler):
                 }))
                 return
             elif path == "/api/funds/clear-all":
+                # ⚠ 清空前先备份: 清完再备份就只剩空库了, 起不到保护作用
+                fund_auto_backup("清除前", force=True)
                 ok, info = fund_clear_all_safe()
                 if ok:
                     self._send(200, _json({"ok": True, "remaining": info, "msg": "已清除全部记录"}))
                 else:
                     self._send(200, _json({"ok": False, "error": info}))
+                return
+            elif path == "/api/funds/backup":
+                p = fund_auto_backup("手动", force=True)
+                if p:
+                    self._send(200, _json({"ok": True, "path": p, "msg": "已备份"}))
+                else:
+                    self._send(200, _json({"ok": False, "error": "备份失败：数据文件不存在或不可写"}))
                 return
             elif path == "/api/funds/data-dir":
                 migrated, status = fund_set_data_dir(params.get("dir", ""))
@@ -2000,18 +2165,22 @@ class Handler(BaseHTTPRequestHandler):
             # ---- 期权交易记录 (POST) ----
             elif path == "/api/trades/upsert":
                 rec_id = trade_upsert(params)
+                fund_auto_backup("交易记录-保存")
                 self._send(200, _json({"ok": True, "id": rec_id, "msg": "已保存"}))
                 return
             elif path == "/api/trades/delete":
                 trade_delete(int(params["id"]))
+                fund_auto_backup("交易记录-删除")
                 self._send(200, _json({"ok": True, "msg": "已删除"}))
                 return
             elif path == "/api/trades/pool/upsert":
                 rec_id = trade_pool_upsert(params)
+                fund_auto_backup("监控池-保存")
                 self._send(200, _json({"ok": True, "id": rec_id, "msg": "已保存"}))
                 return
             elif path == "/api/trades/pool/delete":
                 trade_pool_delete(int(params["id"]))
+                fund_auto_backup("监控池-删除")
                 self._send(200, _json({"ok": True, "msg": "已删除"}))
                 return
 
@@ -2147,22 +2316,35 @@ def idle_watchdog(server, timeout=IDLE_EXIT_SECONDS):
 
 def main():
     # 单实例接管: 若 8765 已有实例在跑 → 旧版(<本版)请其退出后本实例接管; 同版/更新版则直接复用其窗口
-    peer = _peer_info()
-    if peer is not None:
-        if peer == 0 or peer < APP_VERSION:
-            _ask_shutdown()
-            for _ in range(10):            # 最多等 ~2s 让旧实例退出释放端口
-                time.sleep(0.2)
-                if _peer_info() is None:
-                    break
-        else:
-            open_browser("http://127.0.0.1:8765/")
-            return
+    #   设 OC_NO_TAKEOVER=1 可跳过此检查(配合 OC_PORT 另起一个实例做测试, 不影响正在用的窗口)
+    if not os.environ.get("OC_NO_TAKEOVER"):
+        peer = _peer_info()
+        if peer is not None:
+            if peer == 0 or peer < APP_VERSION:
+                _ask_shutdown()
+                for _ in range(10):            # 最多等 ~2s 让旧实例退出释放端口
+                    time.sleep(0.2)
+                    if _peer_info() is None:
+                        break
+            else:
+                open_browser("http://127.0.0.1:8765/")
+                return
 
     port = find_free_port()
     url = "http://127.0.0.1:%d/" % port
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.last_request_time = time.time()
+
+    # 启动即备份一次(即使本次不修改任何数据, 也留下一份"上次打开时"的状态)
+    try:
+        _bk = fund_auto_backup("启动", force=True)
+        if _bk:
+            print("已自动备份: %s" % _bk)
+        if data_dir_risky():
+            print("⚠ 数据目录在软件目录内(%s) — 更新软件会删除数据, 建议在「⚙ 数据位置」里迁到软件目录之外"
+                  % os.path.dirname(FUND_DB_PATH))
+    except Exception:  # noqa: BLE001
+        pass
 
     # 空闲自动退出(用户关闭窗口后自动回收进程)
     threading.Thread(target=idle_watchdog, args=(server,), daemon=True).start()
@@ -2761,6 +2943,16 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 </style>
 </head>
 <body data-theme="dark">
+<!-- 数据安全横幅: 数据落在软件目录内时由 checkDataSafety() 显示(非阻塞, 不打断使用) -->
+<div id="dataRiskBanner" class="hidden" style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#8c2f2f;color:#fff;padding:9px 14px;font-size:13px;line-height:1.6;display:flex;gap:12px;align-items:center;box-shadow:0 2px 10px rgba(0,0,0,.35)">
+  <span style="flex:1">
+    <b>⚠ 数据存在软件自己的文件夹里</b>（<span id="dataRiskPath" style="opacity:.85;word-break:break-all"></span>）
+    —— 以后更新软件（替换/清理该文件夹）会把记录一起删掉，建议立刻迁到软件目录之外。
+  </span>
+  <button class="btn xs" id="dataRiskMigrate" style="flex:none">一键迁出</button>
+  <button class="btn xs" id="dataRiskLater" style="flex:none">稍后</button>
+  <button class="btn xs" id="dataRiskClose" style="flex:none">✕</button>
+</div>
 <div class="app-shell">
   <aside class="side" id="mainTabs">
     <div class="maintab active" data-tab="calc"><span class="mi">🧮</span><span class="mt">开仓计算</span><small>期货 · 期权</small></div>
@@ -2769,7 +2961,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="side-extras">
       <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬆</button>
       <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬇</button>
-      <button class="side-btn" id="btnDataDir" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙</button>
+      <button class="side-btn" id="btnDataDir" style="position:relative" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙<span id="dataRiskDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
     </div>
   </aside>
@@ -3255,9 +3447,23 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <div class="modalbg hidden" id="setBg">
     <div class="modal">
       <h3><span class="dot"></span>⚙ 数据位置设置</h3>
+      <!-- ⚠ 数据落在软件目录内时的醒目警告: 更新软件会连数据一起删掉 -->
+      <div id="setRisk" class="hidden" style="background:#8c2f2f;color:#fff;border-radius:8px;padding:10px 12px;font-size:12.5px;line-height:1.75;margin-bottom:12px">
+        <b>⚠ 危险：数据存在软件自己的文件夹里</b><br>
+        当前路径属于软件目录（<span id="setRiskApp" style="opacity:.85"></span>）。<br>
+        <b>以后更新软件（替换/清理这个文件夹）会把记录一起删掉。</b><br>
+        请点下面的「一键迁出」，把数据挪到软件目录之外（比如 D:\Workbuddy 下另建一个数据文件夹）。
+      </div>
       <div style="color:var(--sub);font-size:12.5px;line-height:1.8;margin-bottom:10px">
         当前数据目录：<b id="setCurDir" style="color:var(--text);word-break:break-all">—</b><br>
         当前记录：<b id="setCurCnt" style="color:var(--accent)">—</b> 条
+      </div>
+      <div style="color:var(--sub);font-size:12.5px;line-height:1.8;margin-bottom:12px;border-top:1px dashed var(--line);padding-top:10px">
+        💾 <b>自动备份</b>：每次交易记录 / 资金曲线发生变动都会自动存一份快照。<br>
+        备份位置：<b id="setBkDir" style="color:var(--text);word-break:break-all">—</b><br>
+        已有备份：<b id="setBkCnt" style="color:var(--accent)">—</b> 份
+        <span id="setBkLast" style="opacity:.75"></span>
+        <button class="btn xs" id="setBkNow" style="margin-left:6px">立即备份</button>
       </div>
       <label>新的数据目录（建议填<u>网盘同步文件夹</u>，如 百度网盘/OneDrive/坚果云 的某个目录）</label>
       <div style="display:flex;gap:8px">
@@ -3268,6 +3474,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         换电脑时：新电脑装好网盘客户端同步该文件夹 → 在这里填<b>同一个路径</b> → 记录自动恢复。</div>
       <div class="modal-actions">
         <button class="btn" id="setCancel">取消</button>
+        <button class="btn" id="setMigrateSafe">一键迁出软件目录</button>
         <button class="btn primary" id="setSave">保存并迁移</button>
       </div>
     </div>
@@ -5053,11 +5260,53 @@ const FundUI = {
       $('setCurDir').textContent = d.data_dir;
       $('setCurCnt').textContent = d.record_count;
       $('setDir').value = d.data_dir;
+      // 数据落在软件目录内 → 醒目警告(更新软件会连数据一起删)
+      const risk = $('setRisk');
+      if (d.risky) { $('setRiskApp').textContent = d.app_dir; risk.classList.remove('hidden'); }
+      else { risk.classList.add('hidden'); }
+      // 自动备份信息
+      $('setBkDir').textContent = d.backup_dir || '—';
+      $('setBkCnt').textContent = d.backup_count || 0;
+      $('setBkLast').textContent = d.last_backup
+        ? '（最近 ' + new Date(d.last_backup.mtime*1000).toLocaleString('zh-CN', {hour12:false}) + '）' : '';
+      $('setMigrateSafe').style.display = d.risky ? '' : 'none';
       $('setBg').classList.remove('hidden');
       setTimeout(()=>$('setDir').focus(), 60);
     } catch (e) {
       alert('读取数据位置失败：' + e);
     }
+  },
+
+  // 立即手动备份一份
+  async backupNow(){
+    try {
+      const r = await fetchT('/api/funds/backup', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+      const d = await r.json();
+      if (d.ok) { alert('✅ 已备份到：\n' + d.path); this.openDataDir(); }
+      else { alert('备份失败：' + (d.error||'')); }
+    } catch (e) { alert('备份失败：' + e); }
+  },
+
+  // 一键迁出: 把数据挪到软件目录之外的推荐位置(后端算好, 避免前端拼路径出错)
+  async migrateOutOfAppDir(){
+    let suggested = '';
+    try {
+      suggested = (await (await fetchT('/api/funds/data-info')).json()).suggest_dir || '';
+    } catch (e) { /* 下面兜底 */ }
+    if (!suggested) { alert('未能自动推荐安全位置，请在下面手动填写一个软件目录之外的路径。'); return; }
+    if (!confirm('将把数据迁移到下面这个位置（软件目录之外，更新软件不会影响）：\n\n' + suggested + '\n\n确定继续吗？')) return;
+    try {
+      const r = await fetchT('/api/funds/data-dir', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({dir: suggested})}, 30000);
+      const d = await r.json();
+      if (d.ok) {
+        alert('✅ 已迁出到：\n' + d.data_dir + '\n\n共迁移 ' + d.migrated + ' 条记录。\n以后更新软件不会再动到这份数据。');
+        this.openDataDir();
+        this.refreshAll();
+      } else {
+        alert('迁出失败：' + (d.error||''));
+      }
+    } catch (e) { alert('迁出失败：' + e); }
   },
 
   async clearAllRecords(){
@@ -5094,6 +5343,15 @@ const FundUI = {
     const dir = $('setDir').value.trim();
     if (!dir) { alert('请输入数据目录路径'); return; }
     try {
+      // ⚠ 若目标目录落在软件目录内, 明确警告(否则用户又把数据放进会被更新的位置)
+      try {
+        const info = await (await fetchT('/api/funds/data-info')).json();
+        const norm = (p) => String(p||'').replace(/\//g,'\\').replace(/\\+$/,'').toLowerCase();
+        const t = norm(dir), a = norm(info.app_dir);
+        if (a && (t === a || t.startsWith(a + '\\'))) {
+          if (!confirm('⚠ 这个目录在软件自己的文件夹里面：\n' + dir + '\n\n以后更新软件（替换/清理该文件夹）会把记录一起删掉。\n\n确定还要用这里吗？')) return;
+        }
+      } catch (e) { /* 校验失败不阻断 */ }
       const r = await fetchT('/api/funds/data-dir', {method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify({dir})});
       const d = await r.json();
@@ -5132,6 +5390,15 @@ const FundUI = {
     $('setCancel').addEventListener('click', ()=>$('setBg').classList.add('hidden'));
     $('setBg').addEventListener('click', e=>{ if (e.target===$('setBg')) $('setBg').classList.add('hidden'); });
     $('setSave').addEventListener('click', ()=>this.saveDataDir());
+    $('setBkNow').addEventListener('click', ()=>this.backupNow());
+    $('setMigrateSafe').addEventListener('click', ()=>this.migrateOutOfAppDir());
+    // 数据安全横幅按钮
+    $('dataRiskMigrate').addEventListener('click', ()=>this.migrateOutOfAppDir());
+    $('dataRiskLater').addEventListener('click', ()=>$('dataRiskBanner').classList.add('hidden'));
+    $('dataRiskClose').addEventListener('click', ()=>{
+      sessionStorage.setItem('dataRiskClosed', '1');    // 本次会话不再提示
+      $('dataRiskBanner').classList.add('hidden');
+    });
     // 一键清除所有记录
     $('btnClearAll').addEventListener('click', ()=>this.clearAllRecords());
     // 联系作者(左下角浮动按钮)
@@ -5199,6 +5466,28 @@ const FundUI = {
   },
 
   /* ---- 数据获取 ---- */
+  // 启动时检查数据是否落在软件目录内: 是则亮红点 + 顶部横幅提醒(更新软件会删数据)
+  // ⚠ 用横幅而不是 confirm(): 阻塞对话框会打断用户, 也会卡住自动化测试
+  async checkDataSafety(){
+    try {
+      const d = await (await fetchT('/api/funds/data-info')).json();
+      const dot = $('dataRiskDot');
+      const banner = $('dataRiskBanner');
+      if (d.risky) {
+        if (dot) dot.classList.remove('hidden');
+        $('btnDataDir').title = '⚠ 数据存在软件目录内，更新软件会删除！点这里迁出';
+        if (banner && !sessionStorage.getItem('dataRiskClosed')) {
+          $('dataRiskPath').textContent = d.data_dir;
+          banner.classList.remove('hidden');
+        }
+      } else {
+        if (dot) dot.classList.add('hidden');
+        if (banner) banner.classList.add('hidden');
+        $('btnDataDir').title = '把数据存到网盘同步文件夹，换电脑不丢记录';
+      }
+    } catch (e) { /* 静默 */ }
+  },
+
   async refreshAll(){
     const s = this.strategy;
     if (s === 'combined') {
@@ -5496,6 +5785,8 @@ const FundUI = {
   },
 };
 FundUI.init();
+// 启动时检查数据是否落在软件目录内(更新软件会删数据) → 亮红点 + 提示一次
+try { FundUI.checkDataSafety(); } catch (e) { /* 启动检查失败不影响使用 */ }
 </script>
 </body>
 </html>
