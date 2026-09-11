@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 51              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
+APP_VERSION = 52              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -539,7 +539,7 @@ FUND_DB_CONN = None
 FUND_STRATEGIES = ["abe", "威科夫"]
 
 # 自动备份: 每次数据变动后把库快照到 <数据目录>/backup/, 只保留最近 N 份
-AUTO_BACKUP_KEEP = 20
+AUTO_BACKUP_KEEP = 10
 BACKUP_DIRNAME = "backup"
 _last_backup_ts = 0.0
 
@@ -617,7 +617,7 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0):
 
 
 def fund_backup_list():
-    """返回备份文件列表(新→旧): [{name, path, size, mtime}]"""
+    """返回备份文件列表(新→旧): [{name, path, size, mtime, records, trades}]"""
     bdir = fund_backup_dir()
     out = []
     try:
@@ -625,11 +625,71 @@ def fund_backup_list():
             if f.startswith("funds_") and f.endswith(".db"):
                 p = os.path.join(bdir, f)
                 st = os.stat(p)
-                out.append({"name": f, "path": p, "size": st.st_size, "mtime": st.st_mtime})
+                item = {"name": f, "path": p, "size": st.st_size, "mtime": st.st_mtime,
+                        "records": None, "trades": None}
+                # 顺带读出条数, 让用户在恢复前能看清这份备份里有什么
+                try:
+                    c = sqlite3.connect("file:%s?mode=ro" % p.replace("?", "%3f"), uri=True)
+                    item["records"] = c.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+                    item["trades"] = c.execute("SELECT COUNT(*) FROM trade_records").fetchone()[0]
+                    c.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                out.append(item)
     except OSError:
         pass
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
+
+
+def fund_restore_backup(name):
+    """用 <数据目录>/backup/<name> 这份 .db 快照覆盖当前库.
+
+    ⚠ 恢复前先把「当前状态」再存一份快照 → 恢复错了还能退回
+    ⚠ 用 sqlite3 backup API 反向写入, 不直接拷文件(库可能有关联的 -wal/-journal)
+    返回 {records, trades, pools, restored}
+    """
+    global FUND_DB_CONN
+    safe = os.path.basename((name or "").strip())
+    if not safe or not safe.startswith("funds_") or not safe.endswith(".db"):
+        raise ValueError("备份文件名不合法")
+    src = os.path.join(fund_backup_dir(), safe)
+    if not os.path.isfile(src):
+        raise ValueError("备份不存在：%s" % safe)
+    # 校验确实是本程序的备份(必须含三张表, 避免选到别的 sqlite 文件)
+    chk = sqlite3.connect("file:%s?mode=ro" % src.replace("?", "%3f"), uri=True)
+    try:
+        tables = {r[0] for r in chk.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        chk.close()
+    for t in ("records", "trade_records", "trade_pool_snapshots"):
+        if t not in tables:
+            raise ValueError("该文件不是本软件的完整备份（缺少 %s 表）" % t)
+    # 1) 恢复前保底: 当前状态再存一份
+    fund_auto_backup("恢复前", force=True)
+    # 2) 关连接, 用 backup API 把快照写回当前库
+    if FUND_DB_CONN is not None:
+        try:
+            FUND_DB_CONN.close()
+        except Exception:  # noqa: BLE001
+            pass
+        FUND_DB_CONN = None
+    src_conn = sqlite3.connect(src)
+    dst_conn = sqlite3.connect(FUND_DB_PATH)
+    try:
+        with dst_conn:
+            src_conn.backup(dst_conn)
+    finally:
+        src_conn.close()
+        dst_conn.close()
+    _fund_db()   # 重新打开并确保表结构
+    return {
+        "restored": safe,
+        "records": len(fund_list_records()),
+        "trades": len(trade_list_records()),
+        "pools": len(trade_pool_list()),
+    }
+
 
 
 def fund_set_data_dir(new_dir):
@@ -799,76 +859,69 @@ def set_window_pin(pin):
         return False
 
 
-def browse_folder():
-    """弹出 Windows 原生文件夹选择对话框, 返回选中的绝对路径(取消返回 None)
-    用 IFileOpenDialog (Vista+ 现代 COM 接口), 原生 Unicode 解决 SHBrowseForFolder 在 Win10/11 1809+ 上的中文乱码
+def fs_list_dirs(path=""):
+    """列出目录下的子文件夹与可用盘符, 供软件内置的「文件夹浏览器」使用.
+
+    ⚠ 不用 Windows 原生对话框: 原实现走 COM IFileOpenDialog, vtable 槽位算错
+      (SetOptions 应在 9 / SetTitle 17 / GetResult 20, 却写成 19/21/22) → 调用直接失败;
+      且对话框无属主窗口, 在浏览器窗口前面弹不出来, 用户体感就是「点了没反应」。
+    返回: {ok, path, parent, dirs:[名称], drives:[C:\\], sep}
     """
-    if os.name != "nt":
-        return None
+    raw = (path or "").strip().strip('"')
+    if raw:
+        target = os.path.abspath(os.path.expanduser(raw))
+    else:
+        target = os.path.dirname(FUND_DB_PATH)
+    # 路径不可用时回退: 先回盘根, 再回用户目录
+    if not os.path.isdir(target):
+        drive, _ = os.path.splitdrive(os.path.abspath(target))
+        for cand in ((drive + os.sep) if drive else "", os.path.expanduser("~")):
+            if cand and os.path.isdir(cand):
+                target = cand
+                break
+        else:
+            target = os.path.expanduser("~")
+    drives = []
+    if os.name == "nt":
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            root = letter + ":\\"
+            if os.path.exists(root):
+                drives.append(root)
+    dirs = []
+    err = ""
     try:
-        import ctypes
-        from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_ulong, c_ushort, c_ubyte, c_int, c_uint, c_long
-        ole32 = ctypes.windll.ole32
-        ole32.CoInitialize(None)
-
-        class GUID(ctypes.Structure):
-            _fields_ = [
-                ("Data1", c_ulong),
-                ("Data2", c_ushort),
-                ("Data3", c_ushort),
-                ("Data4", c_ubyte * 8),
-            ]
-        def G(d1, d2, d3, b):
-            return GUID(d1, d2, d3, (c_ubyte * 8)(*b))
-
-        CLSID_FileOpenDialog = G(0xDC1C5A9C, 0xE88A, 0x4DDE, (0xA5, 0xA1, 0x60, 0xF8, 0x2A, 0x20, 0xAE, 0xF7))
-        IID_IUnknown        = G(0x00000000, 0x0000, 0x0000, (0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46))
-        IID_IShellItem      = G(0x43826D1E, 0xE718, 0x42EE, (0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B, 0xFE))
-
-        # CoCreateInstance(CLSID_FileOpenDialog) → IUnknown*
-        ppv = c_void_p()
-        hr = ole32.CoCreateInstance(byref(CLSID_FileOpenDialog), None, 0x1, byref(IID_IUnknown), byref(ppv))
-        if hr < 0 or not ppv.value:
-            ole32.CoUninitialize()
-            return None
-        p = ppv.value
-        vt = ctypes.cast(p, POINTER(c_void_p))
-
-        FOS_PICKFOLDERS    = 0x00000020
-        FOS_FORCEFILESYSTEM= 0x00000040
-        SIGDN_FILESYSPATH  = 0x80058000
-
-        # vtable 槽位 (IFileOpenDialog + 父接口继承顺序):
-        # 0-2 IUnknown; 3 IModalWindow::Show; 4-20 IFileDialog(17 个); 21-22 IFileOpenDialog::GetResults/GetSelectedItems
-        # IFileDialog 方法顺序: SetFileTypes..SetFilter(17 项) + SetOptions(19) + GetOptions(20) + SetTitle(21)
-        IFileDialog_SetOptions = ctypes.WINFUNCTYPE(c_long, c_void_p, c_uint)(vt[19])
-        IFileDialog_SetOptions(p, FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
-        IFileDialog_SetTitle   = ctypes.WINFUNCTYPE(c_long, c_void_p, c_wchar_p)(vt[21])
-        IFileDialog_SetTitle(p, c_wchar_p("请选择资金数据目录"))
-        IModalWindow_Show      = ctypes.WINFUNCTYPE(c_long, c_void_p, c_void_p)(vt[3])
-        hr = IModalWindow_Show(p, None)
-        path = None
-        if hr == 0:   # 用户选了文件夹
-            IFileOpenDialog_GetResult = ctypes.WINFUNCTYPE(c_long, c_void_p, POINTER(c_void_p))(vt[22])
-            pItem = c_void_p()
-            if IFileOpenDialog_GetResult(p, byref(pItem)) == 0 and pItem.value:
-                # IShellItem vtable: 5=GetDisplayName
-                sit = ctypes.cast(pItem.value, POINTER(c_void_p))
-                IShellItem_GetDisplayName = ctypes.WINFUNCTYPE(c_long, c_void_p, c_int, POINTER(c_wchar_p))(sit[5])
-                pStr = c_wchar_p()
-                if IShellItem_GetDisplayName(pItem.value, SIGDN_FILESYSPATH, ctypes.byref(pStr)) == 0 and pStr.value:
-                    path = pStr.value
-                ole32.CoTaskMemFree(pStr)
-                ctypes.WINFUNCTYPE(c_ulong, c_void_p)(sit[2])(pItem.value)  # Release
-        ctypes.WINFUNCTYPE(c_ulong, c_void_p)(vt[2])(p)  # Release
-        ole32.CoUninitialize()
-        return path
-    except Exception:  # noqa: BLE001
-        try:
-            ole32.CoUninitialize()
-        except Exception:
-            pass
-        return None
+        with os.scandir(target) as it:
+            for e in it:
+                if e.name.startswith("."):
+                    continue                      # 跳过隐藏目录(.git 等)
+                try:
+                    if not e.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                # 跳过系统隐藏目录(如 C:\$Recycle.Bin)
+                try:
+                    if getattr(e.stat(), "st_file_attributes", 0) & 0x2:
+                        continue
+                except OSError:
+                    pass
+                dirs.append(e.name)
+    except OSError as e:
+        err = "无法读取该目录: %s" % e
+    dirs.sort(key=lambda n: n.lower())
+    parent = os.path.dirname(target.rstrip("\\/"))
+    if not parent or os.path.normcase(parent) == os.path.normcase(target):
+        parent = ""                                # 已在盘根 → 没有上一级
+    return {
+        "ok": not err,
+        "error": err,
+        "path": target,
+        "parent": parent,
+        "dirs": dirs,
+        "drives": drives,
+        "sep": os.sep,
+        "count": len(dirs),
+    }
 
 
 def _fund_db():
@@ -2067,6 +2120,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/funds/backups":
             self._send(200, _json({"ok": True, "backups": fund_backup_list()}))
 
+        elif path == "/api/fs/list":
+            # 内置文件夹浏览器: 列子目录 + 盘符(替代原来会静默失败的 Windows 原生对话框)
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            want = (qs.get("path") or [""])[0]
+            self._send(200, _json(fs_list_dirs(want)))
+
         elif path == "/api/settings":
             self._send(200, _json({"ok": True, "settings": get_settings()}))
 
@@ -2154,12 +2213,10 @@ class Handler(BaseHTTPRequestHandler):
                     "msg": "数据位置已更新" if status != "same" else "当前已是该位置，无需迁移",
                 }))
                 return
-            elif path == "/api/funds/browse":
-                p = browse_folder()
-                if p:
-                    self._send(200, _json({"ok": True, "path": p}))
-                else:
-                    self._send(200, _json({"ok": False, "error": "未选择文件夹（已取消）"}))
+            elif path == "/api/funds/restore":
+                # 用 backup 目录里的某个 .db 快照恢复当前库(恢复前会给当前库再存一份)
+                cnt = fund_restore_backup(params.get("name", ""))
+                self._send(200, _json({"ok": True, **cnt, "msg": "已恢复"}))
                 return
 
             # ---- 期权交易记录 (POST) ----
@@ -3459,11 +3516,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         当前记录：<b id="setCurCnt" style="color:var(--accent)">—</b> 条
       </div>
       <div style="color:var(--sub);font-size:12.5px;line-height:1.8;margin-bottom:12px;border-top:1px dashed var(--line);padding-top:10px">
-        💾 <b>自动备份</b>：每次交易记录 / 资金曲线发生变动都会自动存一份快照。<br>
+        💾 <b>自动备份</b>：每次交易记录 / 资金曲线发生变动都会自动存一份快照，<b>最多保留最近 10 份</b>。<br>
         备份位置：<b id="setBkDir" style="color:var(--text);word-break:break-all">—</b><br>
         已有备份：<b id="setBkCnt" style="color:var(--accent)">—</b> 份
         <span id="setBkLast" style="opacity:.75"></span>
         <button class="btn xs" id="setBkNow" style="margin-left:6px">立即备份</button>
+        <div class="tip" style="margin-top:6px">点任意一份右侧的「恢复」即可把数据退回到那一刻（恢复前会自动把当前状态再存一份，可以再退回来）。</div>
+        <div id="setBkList" style="margin-top:8px;max-height:190px;overflow:auto;border:1px solid var(--line);border-radius:8px"></div>
       </div>
       <label>新的数据目录（建议填<u>网盘同步文件夹</u>，如 百度网盘/OneDrive/坚果云 的某个目录）</label>
       <div style="display:flex;gap:8px">
@@ -3476,6 +3535,25 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <button class="btn" id="setCancel">取消</button>
         <button class="btn" id="setMigrateSafe">一键迁出软件目录</button>
         <button class="btn primary" id="setSave">保存并迁移</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文件夹浏览器 弹窗 (替代原来会静默失败的 Windows 原生对话框) -->
+  <div class="modalbg hidden" id="pickBg">
+    <div class="modal" style="width:min(680px,94vw)">
+      <h3><span class="dot"></span>选择文件夹</h3>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <button class="btn xs" id="pickUp" style="flex:none">↑ 上一级</button>
+        <input id="pickPath" type="text" autocomplete="off" spellcheck="false" style="flex:1"
+               placeholder="可直接输入或粘贴路径后回车">
+      </div>
+      <div id="pickDrives" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+      <div id="pickList" style="height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px"></div>
+      <div class="tip" style="margin-top:8px">双击文件夹进入；选中后点「选择此文件夹」。</div>
+      <div class="modal-actions">
+        <button class="btn" id="pickCancel">取消</button>
+        <button class="btn primary" id="pickOk">选择此文件夹</button>
       </div>
     </div>
   </div>
@@ -5271,6 +5349,7 @@ const FundUI = {
         ? '（最近 ' + new Date(d.last_backup.mtime*1000).toLocaleString('zh-CN', {hour12:false}) + '）' : '';
       $('setMigrateSafe').style.display = d.risky ? '' : 'none';
       $('setBg').classList.remove('hidden');
+      this.loadBackups();                      // 备份列表(含每份的条数 + 恢复按钮)
       setTimeout(()=>$('setDir').focus(), 60);
     } catch (e) {
       alert('读取数据位置失败：' + e);
@@ -5282,9 +5361,99 @@ const FundUI = {
     try {
       const r = await fetchT('/api/funds/backup', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
       const d = await r.json();
-      if (d.ok) { alert('✅ 已备份到：\n' + d.path); this.openDataDir(); }
+      if (d.ok) { this.openDataDir(); }
       else { alert('备份失败：' + (d.error||'')); }
     } catch (e) { alert('备份失败：' + e); }
+  },
+
+  /* ---- 备份列表: 展示每份快照的时间/条数, 支持一键恢复 ---- */
+  async loadBackups(){
+    const box = $('setBkList');
+    if (!box) return;
+    box.innerHTML = '<div style="padding:10px;color:var(--sub);font-size:12.5px">读取中…</div>';
+    try {
+      const d = await (await fetchT('/api/funds/backups')).json();
+      const list = d.backups || [];
+      if (!list.length) {
+        box.innerHTML = '<div style="padding:12px;color:var(--sub);font-size:12.5px">还没有备份（做一次增删改就会自动生成）</div>';
+        return;
+      }
+      box.innerHTML = list.map((b, i) => {
+        const t = new Date(b.mtime * 1000).toLocaleString('zh-CN', {hour12:false});
+        const info = (b.records == null) ? '' :
+          ('资金 ' + b.records + ' 条 · 交易 ' + (b.trades==null?'?':b.trades) + ' 条');
+        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;'
+          + (i ? 'border-top:1px solid var(--line);' : '') + '">'
+          + '<span style="flex:1;min-width:0">'
+          + '<b style="font-size:12.5px">' + t + '</b>'
+          + (i === 0 ? ' <span style="color:var(--accent);font-size:11.5px">最新</span>' : '')
+          + '<br><span style="color:var(--sub);font-size:11.5px">' + info + '</span>'
+          + '</span>'
+          + '<button class="btn xs" data-bkrestore="' + b.name + '">恢复</button>'
+          + '</div>';
+      }).join('');
+      box.querySelectorAll('[data-bkrestore]').forEach(btn => {
+        btn.addEventListener('click', () => this.restoreBackup(btn.dataset.bkrestore));
+      });
+    } catch (e) {
+      box.innerHTML = '<div style="padding:10px;color:var(--sub);font-size:12.5px">读取备份失败：' + e + '</div>';
+    }
+  },
+
+  async restoreBackup(name){
+    if (!confirm('⚠ 将用这份备份【覆盖当前数据】：\n' + name
+      + '\n\n当前的数据会先自动备份一份，所以还能再退回来。\n\n确定恢复吗？')) return;
+    try {
+      const r = await fetchT('/api/funds/restore', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name})}, 30000);
+      const d = await r.json();
+      if (!d.ok) { alert('恢复失败：' + (d.error||'')); return; }
+      alert('✅ 已恢复\n\n资金曲线 ' + d.records + ' 条 · 交易记录 ' + d.trades + ' 条 · 监控池 ' + d.pools + ' 条');
+      this.openDataDir();
+      this.refreshAll();
+    } catch (e) { alert('恢复失败：' + e); }
+  },
+
+  /* ---- 内置文件夹浏览器(不依赖 COM/tkinter, 原生对话框在部分机器上会静默失败) ---- */
+  async browseDataDir(){
+    $('pickBg').classList.remove('hidden');
+    await this.pickLoad($('setDir').value.trim() || '');
+  },
+
+  async pickLoad(path){
+    try {
+      const d = await (await fetchT('/api/fs/list?path=' + encodeURIComponent(path || ''))).json();
+      if (!d.ok && d.error) { /* 目录读不了也照样展示盘符, 不静默 */ }
+      this.pickCur = d.path || '';
+      $('pickPath').value = this.pickCur;
+      // 盘符快捷区
+      $('pickDrives').innerHTML = (d.drives || []).map(function (dr) {
+        return '<button class="btn xs" data-pickdrive="' + dr + '">' + dr + '</button>';
+      }).join('');
+      $('pickDrives').querySelectorAll('[data-pickdrive]').forEach(btn => {
+        btn.addEventListener('click', () => this.pickLoad(btn.dataset.pickdrive));
+      });
+      // 目录列表
+      const rows = (d.dirs || []).map(function (n) {
+        return '<div data-pickdir="' + n + '" style="display:flex;align-items:center;gap:8px;padding:7px 10px;'
+          + 'border-bottom:1px solid var(--line);cursor:pointer">📁 <span style="flex:1">' + n + '</span></div>';
+      });
+      $('pickList').innerHTML = rows.length ? rows.join('')
+        : '<div style="padding:12px;color:var(--sub);font-size:12.5px">'
+          + (d.error ? ('读取失败：' + d.error) : '该目录下没有子文件夹') + '</div>';
+      $('pickList').querySelectorAll('[data-pickdir]').forEach(el => {
+        el.addEventListener('click', () => this.pickLoad(this.pickJoin(this.pickCur, el.dataset.pickdir)));
+        el.addEventListener('dblclick', () => this.pickLoad(this.pickJoin(this.pickCur, el.dataset.pickdir)));
+      });
+    } catch (e) {
+      $('pickList').innerHTML = '<div style="padding:12px;color:var(--sub);font-size:12.5px">读取失败：' + e + '</div>';
+    }
+  },
+
+  pickJoin(base, name){
+    if (!base) return name;
+    const sep = (base.indexOf('\\') >= 0) ? '\\' : '/';
+    return base.replace(/[\\/]+$/, '') + sep + name;
   },
 
   // 一键迁出: 把数据挪到软件目录之外的推荐位置(后端算好, 避免前端拼路径出错)
@@ -5323,19 +5492,6 @@ const FundUI = {
       }
     } catch (e) {
       alert('清除失败：' + e);
-    }
-  },
-
-  async browseDataDir(){
-    try {
-      const r = await fetchT('/api/funds/browse', {method:'POST'}, 30000);  // 弹框可能停留较久
-      const d = await r.json();
-      if (d.ok && d.path) {
-        $('setDir').value = d.path;
-      }
-      // 用户取消时不提示, 保持原值
-    } catch (e) {
-      // 静默
     }
   },
 
@@ -5406,6 +5562,19 @@ const FundUI = {
     $('contactClose').addEventListener('click', ()=>$('contactBg').classList.add('hidden'));
     $('contactBg').addEventListener('click', e=>{ if (e.target===$('contactBg')) $('contactBg').classList.add('hidden'); });
     $('setBrowse').addEventListener('click', ()=>this.browseDataDir());
+    // 内置文件夹浏览器
+    $('pickCancel').addEventListener('click', ()=>$('pickBg').classList.add('hidden'));
+    $('pickBg').addEventListener('click', e=>{ if (e.target===$('pickBg')) $('pickBg').classList.add('hidden'); });
+    $('pickUp').addEventListener('click', async ()=>{
+      const d = await (await fetchT('/api/fs/list?path=' + encodeURIComponent(this.pickCur || ''))).json();
+      this.pickLoad(d.parent || this.pickCur || '');
+    });
+    $('pickOk').addEventListener('click', ()=>{
+      const cur = (this.pickCur || '').trim();
+      if (cur) $('setDir').value = cur;
+      $('pickBg').classList.add('hidden');
+    });
+    $('pickPath').addEventListener('keydown', e=>{ if (e.key === 'Enter') this.pickLoad($('pickPath').value); });
     // 月度明细「显示全部 / 收起」
     $('btnShowAll').addEventListener('click', ()=>{
       this.showAllRows = !this.showAllRows;

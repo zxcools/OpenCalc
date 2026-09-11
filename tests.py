@@ -739,6 +739,40 @@ check("反复切换数据目录幂等(不翻倍)", _tr_again == _before_tr, "实
 _ms.CONFIG_PATH = _saved_cfg
 check("切换数据目录时会先自动备份", len(fund_backup_list()) >= 1, str(len(fund_backup_list())))
 
+# 11.5 内置文件夹浏览器 + 备份恢复 (v50.32)
+print("\n== 文件夹浏览 + 备份恢复 ==")
+from main import fs_list_dirs, fund_restore_backup
+
+_fd = fs_list_dirs(os.path.dirname(_ms.FUND_DB_PATH))
+check("fs_list_dirs 返回 ok", _fd.get("ok") is True, str(_fd))
+check("fs_list_dirs 返回目录名列表", isinstance(_fd.get("dirs"), list), str(_fd.get("dirs")))
+check("fs_list_dirs 返回 parent", "parent" in _fd, str(_fd.get("parent")))
+if os.name == "nt":
+    check("fs_list_dirs 返回盘符(Windows)", len(_fd.get("drives", [])) >= 1, str(_fd.get("drives")))
+check("fs_list_dirs 非法路径自动回退", fs_list_dirs("Z:\\不存在的\\路径\\xyz\\").get("ok") is True, "不应崩溃")
+
+# 备份恢复: 造一份带标记数据的备份, 再改库, 再恢复回来
+_rs_snap = fund_auto_backup("恢复测试", force=True)
+check("恢复测试: 先产生一份快照", bool(_rs_snap) and os.path.exists(_rs_snap), str(_rs_snap))
+fund_upsert("abe", 2040, 1, 100, 200, 0, "恢复测试标记")
+check("恢复测试: 写入标记记录", len([r for r in fund_list_records() if r['year'] == 2040]) == 1)
+_rs_name = os.path.basename(_rs_snap)
+_cnt = fund_restore_backup(_rs_name)
+check("恢复返回条数", _cnt.get("records") is not None, str(_cnt))
+check("恢复到快照后标记记录消失",
+      len([r for r in fund_list_records() if r['year'] == 2040]) == 0, str(fund_list_records()))
+# 非法文件名 / 目录穿越 / 不存在
+for _bad, _msg in (("../../funds.db", "文件名"), ("abc.db", "文件名"), ("funds_不存在.db", "不存在")):
+    try:
+        fund_restore_backup(_bad)
+        check("恢复拒绝非法输入[%s]" % _msg, False, "未拒绝")
+    except ValueError:
+        check("恢复拒绝非法输入[%s]" % _msg, True)
+check("恢复前会自动备份(可回退)", len(fund_backup_list()) >= 1, str(len(fund_backup_list())))
+# 备份列表带条数信息
+_bl = fund_backup_list()
+check("备份列表含条数字段", _bl and ("records" in _bl[0]) and ("trades" in _bl[0]), str(_bl[:1]))
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

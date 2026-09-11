@@ -793,6 +793,50 @@ async function main() {
   check('备份列表接口返回条目', bl.ok && bl.n >= 1, bkList);
   await evalJs(ws, `document.getElementById('setBg').classList.add('hidden')`);
 
+  // ---- 场景R (v50.32): 内置文件夹浏览器 + 备份恢复 ----
+  // 1) 备份列表: 弹窗里应有「恢复」按钮, 且每份带时间/条数
+  await evalJs(ws, `FundUI.openDataDir()`);
+  await sleep(900);
+  const bkUi = await evalJs(ws, `JSON.stringify((() => {
+    const box = document.getElementById('setBkList');
+    return {
+      hasRestore: box.querySelectorAll('[data-bkrestore]').length >= 1,
+      hasLatest: box.innerText.includes('最新'),
+      hasCount: box.innerText.includes('资金')
+    };
+  })())`);
+  const bkU = JSON.parse(bkUi);
+  check('备份列表展示「恢复」按钮与最新标记', bkU.hasRestore && bkU.hasLatest && bkU.hasCount, bkUi);
+  await evalJs(ws, `document.getElementById('setBg').classList.add('hidden')`);
+
+  // 2) 文件夹浏览器: 打开后能列出盘符/目录, 双击目录可进入, 选好后回填路径
+  await evalJs(ws, `FundUI.browseDataDir()`);
+  await sleep(700);
+  const pk = await evalJs(ws, `JSON.stringify((() => {
+    const m = document.getElementById('pickBg');
+    return {
+      shown: !m.classList.contains('hidden'),
+      drives: document.querySelectorAll('#pickDrives [data-pickdrive]').length,
+      dirs: document.querySelectorAll('#pickList [data-pickdir]').length,
+      path: document.getElementById('pickPath').value
+    };
+  })())`);
+  const pk0 = JSON.parse(pk);
+  check('文件夹浏览器: 弹窗打开并列出盘符/目录', pk0.shown && pk0.drives >= 1 && pk0.path.length > 0, pk);
+  // 进入一个目录(点第一个盘符), 再「选择此文件夹」回填
+  const pkNav = await evalJs(ws, `(async () => {
+    const dr = document.querySelector('#pickDrives [data-pickdrive]');
+    if (!dr) return JSON.stringify({ok:false});
+    dr.click();
+    await new Promise(r => setTimeout(r, 600));
+    const p1 = document.getElementById('pickPath').value;
+    document.getElementById('pickOk').click();
+    return JSON.stringify({ok:true, picked: p1, into: document.getElementById('setDir').value, modalHidden: document.getElementById('pickBg').classList.contains('hidden')});
+  })()`);
+  const pn = JSON.parse(pkNav);
+  check('文件夹浏览器: 进入目录后回填到数据目录输入框',
+    pn.ok && pn.picked === pn.into && pn.picked.length > 0 && pn.modalHidden, pkNav);
+
   // ---- 场景N: 顶栏刷新按钮存在(在切换器后, 📌 前) ----
   const refreshBtn = await evalJs(ws, `JSON.stringify((() => {
     const tb = document.querySelector('.topbtns');
