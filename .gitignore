@@ -31,6 +31,9 @@ OpenCalc_v*.spec
 
 # 界面验证截图(临时)
 _shot_*.png
+_logo_*.png
+_verify_*.js
+_tmp_*.py
 design/icon/_*.png
 
 # ===== 系统文件 =====
