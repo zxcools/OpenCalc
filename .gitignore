@@ -34,6 +34,7 @@ _shot_*.png
 _logo_*.png
 _verify_*.js
 _tmp_*.py
+_*.py
 design/icon/_*.png
 
 # ===== 系统文件 =====
