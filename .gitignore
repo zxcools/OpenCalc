@@ -26,6 +26,9 @@ _tmp_*
 # 运行中实例被改名后的残留(不能删, 进程还开着)
 dist/*_running.exe
 
+# 打包时的版本化 spec(标准名 OpenCalc.spec 保留)
+OpenCalc_v*.spec
+
 # ===== 系统文件 =====
 Thumbs.db
 .DS_Store
