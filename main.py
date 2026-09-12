@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 54              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
+APP_VERSION = 55              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -2435,7 +2435,7 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货开仓计算器</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=55">
 <script src="/chart.min.js"></script>
 <style>
 :root{
@@ -3031,7 +3031,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
   <header>
     <div class="brand">
-      <div class="logo"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="62" width="13" height="12" rx="2" fill="#7FA8CC"/><rect x="39" y="50" width="13" height="24" rx="2" fill="#7FA8CC"/><rect x="52" y="38" width="13" height="36" rx="2" fill="#7FA8CC"/><rect x="65" y="22" width="13" height="52" rx="2" fill="#E8B255"/></svg></div>
+      <div class="logo"><span id="logoIco"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="#7FA8CC" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="#E8B255"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/></svg></span></div>
       <div>
         <h1 id="appTitle">期货开仓计算器</h1>
         <p id="appSubtitle">风控仓位计算 · 盈亏比决策 · 保证金测算</p>
@@ -5216,8 +5216,15 @@ const FundUI = {
           trades: {t:'abe 期权交易记录', s:'策略: abe · 期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
           funds:  {t:'资金曲线',        s:'abe · 威科夫 多策略记录'}
         };
+        // header logo 跟随当前 tab, 与左侧栏图标保持一致
+        const logos = {
+          calc:   '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="#7FA8CC" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="#E8B255"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/></svg>',
+          trades: '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="48" height="11" rx="3" fill="#7FA8CC"/><rect x="26" y="53" width="30" height="11" rx="3" fill="#E8B255"/></svg>',
+          funds:  '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="#7FA8CC" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="#E8B255"/></svg>'
+        };
         const ti = titles[tab];
         if (ti) { $('appTitle').textContent = ti.t; $('appSubtitle').textContent = ti.s; }
+        if (logos[tab] && $('logoIco')) $('logoIco').innerHTML = logos[tab];
         if (tab === 'trades' && typeof TradeUI !== 'undefined') TradeUI.refresh();
         if (tab === 'funds' && (!this.monthly.length && !this.yearly.length)) {
           this.refreshAll();
