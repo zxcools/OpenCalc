@@ -29,6 +29,10 @@ dist/*_running.exe
 # 打包时的版本化 spec(标准名 OpenCalc.spec 保留)
 OpenCalc_v*.spec
 
+# 界面验证截图(临时)
+_shot_*.png
+design/icon/_*.png
+
 # ===== 系统文件 =====
 Thumbs.db
 .DS_Store
