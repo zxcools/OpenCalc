@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 53              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
+APP_VERSION = 54              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -2524,9 +2524,10 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .fzseg button.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .fzseg button:not(.active):hover{background:var(--panel2);color:var(--text)}
 .logo{width:46px;height:46px;border-radius:14px;flex:none;
-  background:linear-gradient(135deg,#3ecf8f,#93e6b8);
-  display:flex;align-items:center;justify-content:center;font-size:22px;
-  box-shadow:0 8px 24px rgba(62,207,143,.4)}
+  background:#0E1620;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 8px 24px rgba(10,18,28,.5)}
+.logo svg{width:34px;height:34px;display:block}
 .brand h1{font-size:21px;letter-spacing:.5px}
 .brand p{font-size:var(--fz-mid);color:var(--sub);margin-top:2px}
 .topbtns{display:flex;align-items:center;gap:10px}
@@ -2724,7 +2725,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .maintab{width:100%;padding:16px 4px;text-align:center;border-radius:14px;cursor:pointer;
   font-weight:600;font-size:13px;color:var(--sub);transition:all .25s;user-select:none;
   display:flex;flex-direction:column;align-items:center;gap:6px;line-height:1.2}
-.maintab .mi{font-size:22px;line-height:1}
+.maintab .mi{width:22px;height:22px;flex:none;display:flex;align-items:center;justify-content:center}
+.maintab .mi svg{width:100%;height:100%;display:block}
 .maintab small{font-weight:400;font-size:10px;opacity:.72}
 .maintab.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff;
   box-shadow:0 10px 26px rgba(62,207,143,.35)}
@@ -2831,7 +2833,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 @media (max-width:640px){
   .side{width:64px;padding:16px 6px;gap:10px}
   .maintab{font-size:11px;padding:12px 2px}
-  .maintab .mi{font-size:18px}
+  .maintab .mi{width:18px;height:18px}
   .maintab small{display:none}
 }
 
@@ -3014,9 +3016,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 </div>
 <div class="app-shell">
   <aside class="side" id="mainTabs">
-    <div class="maintab active" data-tab="calc"><span class="mi">🧮</span><span class="mt">开仓计算</span><small>期货 · 期权</small></div>
-    <div class="maintab" data-tab="trades"><span class="mi">📋</span><span class="mt">交易记录</span><small>abe 期权</small></div>
-    <div class="maintab" data-tab="funds"><span class="mi">📈</span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
+    <div class="maintab active" data-tab="calc"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="currentColor"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="currentColor" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="currentColor"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="currentColor"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="currentColor"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="currentColor"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="currentColor"/></svg></span><span class="mt">开仓计算</span><small>期货 · 期权</small></div>
+    <div class="maintab" data-tab="trades"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="currentColor"/><rect x="26" y="36" width="48" height="11" rx="3" fill="currentColor"/><rect x="26" y="53" width="30" height="11" rx="3" fill="currentColor" opacity=".55"/></svg></span><span class="mt">交易记录</span><small>abe 期权</small></div>
+    <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="currentColor"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="currentColor" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="currentColor"/></svg></span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
     <div class="side-extras">
       <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬆</button>
       <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬇</button>
@@ -3029,7 +3031,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
   <header>
     <div class="brand">
-      <div class="logo">◈</div>
+      <div class="logo"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="62" width="13" height="12" rx="2" fill="#7FA8CC"/><rect x="39" y="50" width="13" height="24" rx="2" fill="#7FA8CC"/><rect x="52" y="38" width="13" height="36" rx="2" fill="#7FA8CC"/><rect x="65" y="22" width="13" height="52" rx="2" fill="#E8B255"/></svg></div>
       <div>
         <h1 id="appTitle">期货开仓计算器</h1>
         <p id="appSubtitle">风控仓位计算 · 盈亏比决策 · 保证金测算</p>

@@ -1,0 +1,12 @@
+{
+  "brand": { "name_zh": "开仓计算", "name_en": "OpenCalc" },
+  "palette": { "primary": "#6F9BC2", "structural": "#0E1620", "accent": "#E3A93F", "panel": "#F3F0E8" },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    { "type": "rect", "x": 18, "y": 78, "w": 64, "h": 8, "r": 4, "fill": "structural" },
+    { "type": "rect", "x": 39, "y": 23, "w": 22, "h": 33, "r": 4, "fill": "primary" },
+    { "type": "rect", "x": 39, "y": 56, "w": 22, "h": 22, "r": 4, "fill": "accent" }
+  ],
+  "notes": "模块一 — 开仓计算。与主图标方案A 完全同一标记, 保证「应用图标 = 计算模块」的心智一致。单色识别特征: 1 条竖柱。"
+}

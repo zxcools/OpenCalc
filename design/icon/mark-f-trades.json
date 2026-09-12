@@ -1,0 +1,44 @@
+{
+  "brand": {
+    "name_zh": "交易记录",
+    "name_en": "OpenCalc"
+  },
+  "palette": {
+    "primary": "#6F9BC2",
+    "structural": "#0E1620",
+    "accent": "#E3A93F",
+    "panel": "#F3F0E8"
+  },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    {
+      "type": "rect",
+      "x": 16,
+      "y": 74,
+      "w": 68,
+      "h": 8,
+      "r": 4,
+      "fill": "structural"
+    },
+    {
+      "type": "rect",
+      "x": 26,
+      "y": 36,
+      "w": 48,
+      "h": 11,
+      "r": 3,
+      "fill": "primary"
+    },
+    {
+      "type": "rect",
+      "x": 26,
+      "y": 53,
+      "w": 30,
+      "h": 11,
+      "r": 3,
+      "fill": "accent"
+    }
+  ],
+  "notes": "模块二「交易记录」—— 两条不等长的横条左对齐、右端参差, 读作账目行(开仓一笔 + 平仓一笔), 琥珀那条 = 被高亮的那笔平仓盈亏。刻意与「阶梯」正交: 阶梯是竖向递增的块, 这里是横向参差的行 —— 单色下靠方向区分, 不靠颜色。"
+}

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-13.00 -13.00 126.00 126.00" width="126" height="126" role="img">
+<rect x="-13.00" y="-13.00" width="126.00" height="126.00" fill="#F3F0E8"/>
+<rect x="-13.00" y="-13.00" width="126.00" height="126.00" fill="none" stroke="#0E1620" stroke-width="0.6" stroke-dasharray="3 2.5"/>
+<rect x="16.000" y="74.000" width="68.000" height="8.000" rx="4" fill="#0E1620" stroke="none" stroke-width="2"/>
+<rect x="26.000" y="62.000" width="13.000" height="12.000" rx="2" fill="#6F9BC2" stroke="none" stroke-width="2"/>
+<rect x="39.000" y="50.000" width="13.000" height="24.000" rx="2" fill="#6F9BC2" stroke="none" stroke-width="2"/>
+<rect x="52.000" y="38.000" width="13.000" height="36.000" rx="2" fill="#6F9BC2" stroke="none" stroke-width="2"/>
+<rect x="65.000" y="22.000" width="13.000" height="52.000" rx="2" fill="#E3A93F" stroke="none" stroke-width="2"/>
+<text x="50.00" y="-4.55" font-family="Helvetica,Arial,sans-serif" font-size="4" fill="#0E1620" text-anchor="middle">clear space = X</text>
+</svg>

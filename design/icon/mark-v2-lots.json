@@ -1,0 +1,55 @@
+{
+  "brand": {
+    "name_zh": "开仓计算器 · 手数格",
+    "name_en": "OpenCalc"
+  },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    {
+      "type": "rect",
+      "x": 18,
+      "y": 80,
+      "w": 64,
+      "h": 8,
+      "r": 4,
+      "fill": "structural"
+    },
+    {
+      "type": "rect",
+      "x": 8,
+      "y": 48,
+      "w": 22,
+      "h": 24,
+      "r": 5,
+      "fill": "accent"
+    },
+    {
+      "type": "rect",
+      "x": 39,
+      "y": 48,
+      "w": 22,
+      "h": 24,
+      "r": 5,
+      "fill": "accent"
+    },
+    {
+      "type": "rect",
+      "x": 70,
+      "y": 48,
+      "w": 22,
+      "h": 24,
+      "r": 5,
+      "fill": "none",
+      "stroke": "structural",
+      "width": 6
+    }
+  ],
+  "notes": "方向三「手数格」—— 传达「算的是手数」。三个刻度格中两格点亮、一格留空 = 计算结果落在 2 手, 这是本工具最终的输出。实心 vs 空心是形状差异而非色差, 单色下照样读得出「2 格已选、1 格未选」。",
+  "palette": {
+    "primary": "#6F9BC2",
+    "structural": "#0E1620",
+    "accent": "#E3A93F",
+    "panel": "#F3F0E8"
+  }
+}

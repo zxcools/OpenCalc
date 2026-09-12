@@ -1,0 +1,46 @@
+{
+  "brand": {
+    "name_zh": "开仓计算器 · 额度刻度",
+    "name_en": "OpenCalc"
+  },
+  "palette": {
+    "primary": "#6F9BC2",
+    "structural": "#0E1620",
+    "accent": "#E3A93F",
+    "panel": "#F3F0E8"
+  },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    {
+      "type": "rect",
+      "x": 16,
+      "y": 80,
+      "w": 68,
+      "h": 8,
+      "r": 4,
+      "fill": "structural"
+    },
+    {
+      "type": "rect",
+      "x": 34,
+      "y": 18,
+      "w": 32,
+      "h": 22,
+      "r": 4,
+      "fill": "none",
+      "stroke": "structural",
+      "width": 6
+    },
+    {
+      "type": "rect",
+      "x": 34,
+      "y": 46,
+      "w": 32,
+      "h": 32,
+      "r": 4,
+      "fill": "accent"
+    }
+  ],
+  "notes": "方向三「额度刻度」—— 修正「窄高描边块被读成手机」的问题: 两段一律加宽到 32, 上段宽矮空心 = 额度之外的余量, 下段宽矮实心 = 按权益×风险额度切出来、真正投进去的那份预算。宽矮比例让它读成「量筒/额度条」而不是设备; 单色下实心/空心对比仍在。"
+}

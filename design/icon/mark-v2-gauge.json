@@ -1,0 +1,46 @@
+{
+  "brand": {
+    "name_zh": "开仓计算器 · 量筒",
+    "name_en": "OpenCalc"
+  },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    {
+      "type": "rect",
+      "x": 18,
+      "y": 80,
+      "w": 64,
+      "h": 8,
+      "r": 4,
+      "fill": "structural"
+    },
+    {
+      "type": "rect",
+      "x": 34,
+      "y": 12,
+      "w": 32,
+      "h": 64,
+      "r": 8,
+      "fill": "none",
+      "stroke": "structural",
+      "width": 7
+    },
+    {
+      "type": "rect",
+      "x": 42,
+      "y": 48,
+      "w": 16,
+      "h": 20,
+      "r": 5,
+      "fill": "accent"
+    }
+  ],
+  "notes": "方向一「量筒」—— 传达「测量一份额度」。容器描边 = 总权益这个上限; 容器内的实心块 = 按风险额度% 切出来、准备用作开仓预算的那一份。读数不依赖颜色: 单色下=一个空心容器里有一块实心, 层级仍在。",
+  "palette": {
+    "primary": "#6F9BC2",
+    "structural": "#0E1620",
+    "accent": "#E3A93F",
+    "panel": "#F3F0E8"
+  }
+}

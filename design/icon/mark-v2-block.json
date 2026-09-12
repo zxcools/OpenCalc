@@ -1,0 +1,44 @@
+{
+  "brand": {
+    "name_zh": "开仓计算器 · 额度切块",
+    "name_en": "OpenCalc"
+  },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    {
+      "type": "rect",
+      "x": 18,
+      "y": 80,
+      "w": 64,
+      "h": 8,
+      "r": 4,
+      "fill": "structural"
+    },
+    {
+      "type": "rect",
+      "x": 20,
+      "y": 8,
+      "w": 44,
+      "h": 44,
+      "r": 7,
+      "fill": "structural"
+    },
+    {
+      "type": "rect",
+      "x": 52,
+      "y": 52,
+      "w": 26,
+      "h": 26,
+      "r": 6,
+      "fill": "accent"
+    }
+  ],
+  "notes": "方向二「额度切块」—— 传达「从总量里按比例切出一份开仓额度」。大方块 = 账户总权益; 自其右下角分出、落在基线上的小方块 = 算出来要用的那一份预算。两个方块共边相接, 单色下合为一个阶梯状剪影, 仍能读出「一大一小、从整体分出局部」。",
+  "palette": {
+    "primary": "#6F9BC2",
+    "structural": "#0E1620",
+    "accent": "#E3A93F",
+    "panel": "#F3F0E8"
+  }
+}

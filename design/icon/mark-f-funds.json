@@ -1,0 +1,63 @@
+{
+  "brand": {
+    "name_zh": "资金曲线",
+    "name_en": "OpenCalc"
+  },
+  "palette": {
+    "primary": "#6F9BC2",
+    "structural": "#0E1620",
+    "accent": "#E3A93F",
+    "panel": "#F3F0E8"
+  },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    {
+      "type": "rect",
+      "x": 16,
+      "y": 74,
+      "w": 68,
+      "h": 8,
+      "r": 4,
+      "fill": "structural"
+    },
+    {
+      "type": "line",
+      "x1": 25,
+      "y1": 62,
+      "x2": 42,
+      "y2": 48,
+      "stroke": "primary",
+      "width": 11,
+      "cap": "round"
+    },
+    {
+      "type": "line",
+      "x1": 42,
+      "y1": 48,
+      "x2": 57,
+      "y2": 57,
+      "stroke": "primary",
+      "width": 11,
+      "cap": "round"
+    },
+    {
+      "type": "line",
+      "x1": 57,
+      "y1": 57,
+      "x2": 74,
+      "y2": 31,
+      "stroke": "primary",
+      "width": 11,
+      "cap": "round"
+    },
+    {
+      "type": "circle",
+      "cx": 75,
+      "cy": 30,
+      "r": 7,
+      "fill": "accent"
+    }
+  ],
+  "notes": "模块三「资金曲线」—— 用折线而非柱状: 主图标已经是「块状递增阶梯」, 若这里再用递增柱会在 20px 侧栏里糊成同一个形状。改成一笔带一次回撤的三段折线 + 末端圆点(当前权益), 圆点用台灯琥珀。单色下「细折线 + 端点」与阶梯的「粗块阶梯」轮廓完全不同。"
+}

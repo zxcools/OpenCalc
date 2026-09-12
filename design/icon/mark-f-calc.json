@@ -1,0 +1,62 @@
+{
+  "brand": {
+    "name_zh": "开仓计算",
+    "name_en": "OpenCalc"
+  },
+  "palette": {
+    "primary": "#6F9BC2",
+    "structural": "#0E1620",
+    "accent": "#E3A93F",
+    "panel": "#F3F0E8"
+  },
+  "canvas": 100,
+  "min_size_px": 16,
+  "motif": [
+    {
+      "type": "rect",
+      "x": 16,
+      "y": 74,
+      "w": 68,
+      "h": 8,
+      "r": 4,
+      "fill": "structural"
+    },
+    {
+      "type": "rect",
+      "x": 26,
+      "y": 62,
+      "w": 13,
+      "h": 12,
+      "r": 2,
+      "fill": "primary"
+    },
+    {
+      "type": "rect",
+      "x": 39,
+      "y": 50,
+      "w": 13,
+      "h": 24,
+      "r": 2,
+      "fill": "primary"
+    },
+    {
+      "type": "rect",
+      "x": 52,
+      "y": 38,
+      "w": 13,
+      "h": 36,
+      "r": 2,
+      "fill": "primary"
+    },
+    {
+      "type": "rect",
+      "x": 65,
+      "y": 22,
+      "w": 13,
+      "h": 52,
+      "r": 2,
+      "fill": "accent"
+    }
+  ],
+  "notes": "模块一「开仓计算」—— 与主图标完全同一标记。应用图标 = 计算模块, 心智直接对齐。该 tab 承载期货/期权测算 + 阶梯止盈, 也正是主图标要表达的内容。"
+}
