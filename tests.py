@@ -773,6 +773,21 @@ check("恢复前会自动备份(可回退)", len(fund_backup_list()) >= 1, str(l
 _bl = fund_backup_list()
 check("备份列表含条数字段", _bl and ("records" in _bl[0]) and ("trades" in _bl[0]), str(_bl[:1]))
 
+print("\n== 主表搜索(分组带合约列表) ==")
+# 主表搜索要能按合约号命中 → 分组结果必须带 contracts
+_gs_before = trade_groups()
+trade_upsert({'underlying': 'srch1', 'contract': 'cu2610C80000', 'op_type': 'open', 'direction': 'buy',
+              'open_date': '2026-08-01', 'call_put': 'C', 'open_price': 100, 'qty': 1, 'premium': 100})
+trade_upsert({'underlying': 'srch1', 'contract': 'cu2610P79000', 'op_type': 'open', 'direction': 'buy',
+              'open_date': '2026-08-02', 'call_put': 'P', 'open_price': 90, 'qty': 2, 'premium': 180})
+_g1 = [g for g in trade_groups() if g['underlying'] == 'srch1']
+check("分组结果带 contracts 字段", _g1 and isinstance(_g1[0].get('contracts'), list), str(_g1[:1]))
+check("contracts 含该标的全部合约(去重)",
+      _g1 and set(_g1[0]['contracts']) == {'cu2610C80000', 'cu2610P79000'}, str(_g1[0].get('contracts')))
+check("contracts 已排序", _g1 and _g1[0]['contracts'] == sorted(_g1[0]['contracts']), str(_g1[0].get('contracts')))
+check("分组仍带 close_status/open_date(主表渲染依赖)",
+      _g1 and _g1[0].get('close_status') and _g1[0].get('open_date') == '2026-08-01', str(_g1[:1]))
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

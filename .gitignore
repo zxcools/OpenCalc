@@ -23,6 +23,9 @@ archive/
 _tmp_*
 .tmp_*/
 
+# 运行中实例被改名后的残留(不能删, 进程还开着)
+dist/*_running.exe
+
 # ===== 系统文件 =====
 Thumbs.db
 .DS_Store

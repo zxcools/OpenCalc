@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 52              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
+APP_VERSION = 53              # 程序版本号(用于单实例接管判断: 旧版实例自动让位)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1731,6 +1731,8 @@ def trade_groups(strategy=None):
             "close_status": close_status,
             "total_pnl": round(total_pnl, 2),
             "last_close_date": last_close,
+            # 该标的用到的合约(主表搜索要能按合约号命中)
+            "contracts": sorted({(x.get("contract") or "").strip() for x in items if x.get("contract")}),
         })
     # 按开仓日期倒序: 最近开仓在最上
     groups.sort(key=lambda g: (g["open_date"] or ""), reverse=True)
@@ -3382,7 +3384,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="trades-layout">
         <div class="trades-main">
           <div class="card results">
-            <h2><span class="dot"></span>期权交易(按开仓时间倒序, 最近在最上, 最多 10 条)</h2>
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+              <h2 style="margin:0;flex:1;min-width:0"><span class="dot"></span>期权交易(按开仓时间倒序, 最近在最上, 最多 10 条)</h2>
+              <span id="tradesSearchHint" class="dim" style="font-size:12px;flex:none"></span>
+              <input id="tradesSearch" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="搜索 标的 / 合约 / 状态 / 日期" style="width:240px;flex:none">
+              <button class="btn xs ghost" id="tradesSearchClear" hidden style="flex:none">清除</button>
+            </div>
             <div class="tblwrap">
               <table class="tbl trades-tbl" id="tradesTable">
                   <thead><tr>
@@ -4412,6 +4420,7 @@ const TradeUI = {
   pool: [],             // 监控池快照历史
   poolCollapsed: {},    // {date: true/false} 历史快照折叠状态
   onlyOpen: false,      // 只展示未平仓
+  mainQuery: '',        // 主表搜索关键词(空=不过滤)
   showAll: false,       // 是否展开全部(>10)
 
   // 预处理: 空白是打字随手敲的 → 直接删; _ / 视为有意分段 → 统一成 '-'; 合并连续'-'; 去首尾'-'
@@ -4498,6 +4507,23 @@ const TradeUI = {
 
   async init(){
     $('tradesOnlyOpen').addEventListener('change', e => { this.onlyOpen = e.target.checked; this.renderMain(); });
+    // 主表搜索框: 输入即筛选(与「只展示未平仓」叠加生效)
+    $('tradesSearch').addEventListener('input', e => {
+      this.mainQuery = e.target.value;
+      $('tradesSearchClear').hidden = !this.mainQuery.trim();
+      this.renderMain();
+    });
+    $('tradesSearchClear').addEventListener('click', () => {
+      this.mainQuery = '';
+      $('tradesSearch').value = '';
+      $('tradesSearchClear').hidden = true;
+      this.renderMain();
+      $('tradesSearch').focus();
+    });
+    // 输入框内按 Esc 快速清空
+    $('tradesSearch').addEventListener('keydown', e => {
+      if (e.key === 'Escape') $('tradesSearchClear').click();
+    });
     $('btnShowAll').addEventListener('click', () => { this.showAll = true; this.renderMain(); });
     $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
     $('btnNewPool').addEventListener('click', () => this.openPoolModal());
@@ -4558,12 +4584,19 @@ const TradeUI = {
     const tb = document.querySelector('#tradesTable tbody');
     let rows = this.groups.slice();
     if (this.onlyOpen) rows = rows.filter(g => g.close_status !== '已平仓');
+    const q = (this.mainQuery || '').trim();
+    if (q) rows = rows.filter(g => this.matchGroup(g, q));
     const total = rows.length;
+    // 搜索命中数提示
+    const hint = $('tradesSearchHint');
+    if (hint) hint.textContent = q ? ('筛选出 ' + total + ' 条') : '';
     const limit = this.showAll ? total : this.MAX;
     const show = rows.slice(0, limit);
     $('btnShowAll').hidden = !this.showAll && total > this.MAX;
     if (!show.length){
-      tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--sub)">暂无记录，点上面「新建开仓」添加</td></tr>';
+      const msg = q ? ('没有匹配「' + q + '」的记录') : '暂无记录，点上面「新建开仓」添加';
+      tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--sub)">'
+        + escHtml(msg) + '</td></tr>';
       return;
     }
     tb.innerHTML = show.map(g => {
@@ -4599,6 +4632,22 @@ const TradeUI = {
         this.loadDetail(tr.dataset.u);
       });
     });
+  },
+
+  // 主表搜索: 命中 标的/合约/方向/状态/日期/盈亏; 空格分隔多个关键词时需全部命中
+  matchGroup(g, q){
+    const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '');
+    const pnl = g.total_pnl;
+    const hay = [
+      g.underlying || '',
+      (g.contracts || []).join(' '),
+      dirTxt, g.direction || '',
+      g.close_status || '',
+      g.open_date || '', g.last_close_date || '',
+      pnl == null ? '' : String(pnl),
+      pnl ? ('CN¥' + pnl) : '',
+    ].join(' ').toLowerCase();
+    return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.indexOf(t) >= 0);
   },
 
   async loadDetail(underlying){

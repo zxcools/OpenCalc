@@ -873,6 +873,84 @@ async function main() {
   const rt = JSON.parse(restoredTab);
   check('刷新后恢复原 tab(trades)', readyR && savedTab === 'trades' && rt.active === 'trades' && rt.tradesVisible && rt.saved === 'trades', restoredTab);
 
+  // ---- 场景S (v50.33): 交易记录主表搜索框 ----
+  const sBox = await evalJs(ws, `JSON.stringify((() => {
+    const inp = document.getElementById('tradesSearch');
+    const card = inp && inp.closest('.card');
+    return {
+      exists: !!inp,
+      inTableCard: !!(card && card.contains(document.getElementById('tradesTable'))),
+      placeholder: inp ? inp.placeholder : ''
+    };
+  })())`);
+  const sBoxObj = JSON.parse(sBox);
+  check('主表卡片头存在搜索框', sBoxObj.exists && sBoxObj.inTableCard, sBox);
+
+  const sRun = await evalJs(ws, `(async () => {
+    const inp = document.getElementById('tradesSearch');
+    const rows = () => [...document.querySelectorAll('#tradesTable tbody tr.clickable')];
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const before = rows().length;
+    if (!before) return JSON.stringify({skip: true});
+    const key = rows()[0].dataset.u;                 // 用第一行标的当关键词
+    inp.value = key; inp.dispatchEvent(new Event('input'));
+    await wait(300);
+    const one = rows();
+    const filterOk = one.length === 1 && one[0].dataset.u === key;
+    // 关键词是标的时, 表格里那一行必须还在
+    const hitOk = one.length >= 1 && one[0].dataset.u === key;
+    // 大小写不敏感
+    inp.value = key.toUpperCase(); inp.dispatchEvent(new Event('input'));
+    await wait(250);
+    const upperOk = rows().length === one.length;
+    // 多关键词(空格分隔) 全部命中
+    inp.value = key + ' 买入'; inp.dispatchEvent(new Event('input'));
+    await wait(250);
+    const multiOk = rows().length >= 1;
+    // 无匹配 → 空提示
+    inp.value = 'zzz_不存在的关键词'; inp.dispatchEvent(new Event('input'));
+    await wait(250);
+    const txt = document.querySelector('#tradesTable tbody').innerText;
+    const emptyOk = rows().length === 0 && txt.includes('没有匹配');
+    const hintEmpty = (document.getElementById('tradesSearchHint').textContent || '');
+    // 清除按钮 → 全部恢复
+    document.getElementById('tradesSearchClear').click();
+    await wait(300);
+    const restored = rows().length === before;
+    const clearHidden = document.getElementById('tradesSearchClear').hidden;
+    return JSON.stringify({before, key, filterOk, hitOk, upperOk, multiOk, emptyOk, restored, clearHidden, hintOnEmpty: hintEmpty});
+  })()`);
+  const sr = JSON.parse(sRun);
+  if (sr.skip) {
+    check('主表搜索: 有可筛选数据', false, '主表无行, 无法验证搜索');
+  } else {
+    check('搜索: 输入标的只显示该行', sr.filterOk, sRun);
+    check('搜索: 关键词大小写不敏感', sr.upperOk, sRun);
+    check('搜索: 多关键词(空格分隔)全部命中', sr.multiOk, sRun);
+    check('搜索: 无匹配显示空提示', sr.emptyOk, sRun);
+    check('搜索: 点清除恢复全部记录', sr.restored, sRun);
+    check('搜索: 清空后清除按钮自动隐藏', sr.clearHidden === true, sRun);
+  }
+  // 按合约号也能搜到(后端 groups 提供 contracts)
+  const sCon = await evalJs(ws, `(async () => {
+    const g = await (await fetch('/api/trades/groups')).json();
+    const withC = (g.groups || []).find(x => (x.contracts || []).length);
+    if (!withC) return JSON.stringify({skip: true});
+    const c = withC.contracts[0];
+    const inp = document.getElementById('tradesSearch');
+    inp.value = c; inp.dispatchEvent(new Event('input'));
+    await new Promise(r => setTimeout(r, 300));
+    const rows = [...document.querySelectorAll('#tradesTable tbody tr.clickable')];
+    document.getElementById('tradesSearchClear').click();
+    return JSON.stringify({contract: c, u: withC.underlying, hit: rows.some(r => r.dataset.u === withC.underlying), n: rows.length});
+  })()`);
+  const sc = JSON.parse(sCon);
+  if (sc.skip) {
+    check('搜索: 支持按合约号命中', false, '没有带合约的分组');
+  } else {
+    check('搜索: 支持按合约号命中', sc.hit, sCon);
+  }
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();
