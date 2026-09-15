@@ -800,6 +800,162 @@ check("contracts 已排序", _g1 and _g1[0]['contracts'] == sorted(_g1[0]['contr
 check("分组仍带 close_status/open_date(主表渲染依赖)",
       _g1 and _g1[0].get('close_status') and _g1[0].get('open_date') == '2026-08-01', str(_g1[:1]))
 
+print("\n== 检查更新 ==")
+# ⚠ 全部离线测: 打桩替换 _update_manifest, 不依赖 GitHub 可达(CI/断网也要能跑)
+import main as M
+
+_orig_manifest = M._update_manifest
+_orig_read = M._read_url_bytes
+
+# 1) 版本号格式化: 5040 → v50.40
+check("_version_name(5040) = v50.40", M._version_name(5040) == "v50.40", M._version_name(5040))
+check("_version_name(5041) = v50.41", M._version_name(5041) == "v50.41", M._version_name(5041))
+check("_version_name 三位数兜底", M._version_name(999) == "v9.99", M._version_name(999))
+
+# 2) 清单解析: 相对 url 拼成绝对, notes 支持字符串换行
+M._read_url_bytes = lambda url, timeout=None: (
+    '{"version": 5999, "version_name": "v59.99", "date": "2099-01-01",'
+    ' "url": "dist/OpenCalc.exe", "notes": "第一条\\n第二条\\n"}').encode('utf-8')
+_m = M._update_manifest()
+check("清单解析 version", _m["version"] == 5999, str(_m.get("version")))
+check("清单相对 url 拼成绝对", _m["url"].startswith("https://") and _m["url"].endswith("/dist/OpenCalc.exe"), _m["url"])
+check("清单 notes 字符串按行拆开", _m["notes"] == ["第一条", "第二条"], str(_m["notes"]))
+check("清单 notes 过滤空行", "" not in _m["notes"], str(_m["notes"]))
+
+# 3) 绝对 url 不被改写
+M._read_url_bytes = lambda url, timeout=None: (
+    '{"version": 5999, "url": "https://example.com/x/OpenCalc.exe"}').encode('utf-8')
+check("清单绝对 url 原样保留", M._update_manifest()["url"] == "https://example.com/x/OpenCalc.exe")
+
+# 4) 缺 version 字段 → 报错(不静默)
+def _bad_manifest(url, timeout=None):
+    return b'{"version_name": "v9.9"}'
+M._read_url_bytes = _bad_manifest
+try:
+    M._update_manifest()
+    _bad_ok = False
+except ValueError:
+    _bad_ok = True
+check("清单缺 version 字段报错", _bad_ok)
+
+# 5) 有新版本 → has_update=True
+M._read_url_bytes = lambda url, timeout=None: b'{"version": 9999, "version_name": "v99.99"}'
+_r = M.update_check()
+check("update_check ok=True", _r["ok"] is True, str(_r)[:120])
+check("update_check has_update (远端更新)", _r["has_update"] is True, str(_r.get("has_update")))
+check("update_check 带回本机版本号", _r["current"] == M.APP_VERSION, str(_r.get("current")))
+check("update_check 带回本机版本名", _r["current_name"] == M._version_name(M.APP_VERSION), str(_r.get("current_name")))
+check("update_check 带回 frozen 标志", isinstance(_r.get("frozen"), bool), str(_r.get("frozen")))
+
+# 6) 远端同版本 / 更旧 → has_update=False(不能提示降级)
+for _v, _tag in ((M.APP_VERSION, "同版本"), (M.APP_VERSION - 10, "远端更旧")):
+    M._read_url_bytes = ('{"version": %d}' % _v).encode('utf-8')
+    check("update_check 不误报更新(%s)" % _tag, M.update_check()["has_update"] is False)
+
+# 7) 网络异常 → ok=False 且带人话文案(不抛异常出去)
+def _boom(url, timeout=None):
+    raise OSError("urlopen error [Errno 11001] getaddrinfo failed")
+M._read_url_bytes = _boom
+_r2 = M.update_check()
+check("update_check 网络失败不抛异常", _r2["ok"] is False, str(_r2)[:120])
+check("update_check 网络失败给人话文案", "DNS" in _r2["error"] or "无法解析" in _r2["error"], _r2["error"])
+check("update_check 失败仍带回本机版本", _r2["current"] == M.APP_VERSION)
+
+def _timeout(url, timeout=None):
+    raise TimeoutError("timed out")
+M._read_url_bytes = _timeout
+check("网络异常翻译: 超时", "超时" in M.update_check()["error"], M.update_check()["error"])
+
+# 8) 下载: 内容过小 → 拒绝(防把错误页/重定向页存成 exe), 且不留 .part 垃圾
+M._read_url_bytes = lambda url, timeout=None: b'{"version": 9999, "url": "https://x.invalid/a.exe"}'
+_udir = M._update_dir()
+_import_urllib = __import__('urllib.request', fromlist=['urlopen'])
+
+
+class _FakeResp:
+    def __init__(self, data):
+        self._d = data
+        self.headers = {'Content-Length': str(len(data))}
+
+    def read(self, n=-1):
+        out, self._d = self._d, b''
+        return out
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_real_urlopen = _import_urllib.urlopen
+_import_urllib.urlopen = lambda req, timeout=None: _FakeResp(b'tiny')
+try:
+    M.update_download()
+    _small_ok = False
+except ValueError as e:
+    _small_ok = '异常' in str(e)
+check("下载拒绝过小内容(错误页防护)", _small_ok)
+check("下载失败不留 .part 残留", not [f for f in os.listdir(_udir) if f.endswith('.part')],
+      str([f for f in os.listdir(_udir) if f.endswith('.part')]))
+
+# 9) 下载: 已是最新 → 直接拒绝(不白下 10MB)
+M._read_url_bytes = lambda url, timeout=None: ('{"version": %d}' % M.APP_VERSION).encode('utf-8')
+try:
+    M.update_download()
+    _cur_ok = False
+except ValueError as e:
+    _cur_ok = '最新' in str(e)
+check("下载在已是最新时拒绝", _cur_ok)
+
+# 10) 下载: 正常路径 + sha256 校验
+_payload = b'X' * (1024 * 1024 + 128)
+_sha = __import__('hashlib').sha256(_payload).hexdigest()
+M._read_url_bytes = lambda url, timeout=None: (
+    '{"version": 9999, "version_name": "v99.99", "url": "https://x.invalid/a.exe", "sha256": "%s"}' % _sha).encode('utf-8')
+_import_urllib.urlopen = lambda req, timeout=None: _FakeResp(_payload)
+_d = M.update_download()
+check("下载成功返回路径", os.path.isfile(_d["path"]), str(_d)[:160])
+check("下载文件大小正确", _d["size"] == len(_payload), str(_d.get("size")))
+check("下载文件名含版本名", "v99.99" in os.path.basename(_d["path"]), os.path.basename(_d["path"]))
+check("下载未留 .part", not os.path.exists(_d["path"] + ".part"))
+
+# 11) sha256 不匹配 → 丢弃(且删掉半成品文件)
+M._read_url_bytes = lambda url, timeout=None: (
+    '{"version": 9999, "url": "https://x.invalid/a.exe", "sha256": "%s"}' % ('0' * 64)).encode('utf-8')
+try:
+    M.update_download()
+    _sha_ok = False
+except ValueError as e:
+    _sha_ok = '校验' in str(e)
+check("下载 sha256 不匹配被拒绝", _sha_ok)
+# 只校验「本次」没留下半成品: 上一条用例成功下载的 v99.99 文件还在, 不能一起算进来
+check("sha256 失败不留新的半成品(.part)",
+      not [f for f in os.listdir(_udir) if f.endswith('.part')], str(os.listdir(_udir)))
+_failed_target = os.path.join(_udir, 'OpenCalc_v99.99.exe')
+check("sha256 失败不覆盖旧的成功文件", os.path.isfile(_failed_target) and os.path.getsize(_failed_target) == len(_payload),
+      str(os.path.getsize(_failed_target)) if os.path.isfile(_failed_target) else 'missing')
+
+# 12) 备份列表: 空目录安全返回
+check("update_backup_list 空目录返回 []", isinstance(M.update_backup_list(), list))
+
+# 13) 备份当前版本: 开发模式(非 frozen)明确报错, 不假装成功
+try:
+    M.update_backup_current()
+    _bk_ok = False
+except ValueError as e:
+    _bk_ok = '开发模式' in str(e)
+check("非 exe 模式备份当前版本给出明确提示", _bk_ok)
+
+# 14) 更新目录在数据目录内(软件更新不会清掉下载好的新版本)
+check("更新目录位于数据目录下", M._is_inside(M._update_dir(), os.path.dirname(M.FUND_DB_PATH)), M._update_dir())
+check("更新目录不在软件目录内", not M.data_dir_risky() or not M._is_inside(M._update_dir(), M._app_dir()), M._update_dir())
+
+# 恢复打桩, 避免影响后续用例
+_import_urllib.urlopen = _real_urlopen
+M._update_manifest = _orig_manifest
+M._read_url_bytes = _orig_read
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

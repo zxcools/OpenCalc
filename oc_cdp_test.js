@@ -422,9 +422,12 @@ async function main() {
   // 4. tradesArea 内无重复标题(全局 header 由 appTitle 驱动)
   const tradeTitles = await evalJs(ws, `[...document.querySelectorAll('#tradesArea h1')].length`);
   check('tradesArea 内无重复 h1(标题仅全局 header 一个)', tradeTitles === 0, 'count=' + tradeTitles);
-  // 5. 侧边栏 side-extras 含 4 个图标按钮(导出/导入/数据位置/联系作者)
+  // 5. 侧边栏 side-extras 含 5 个图标按钮(导出/导入/数据位置/检查更新/联系作者)
   const sideBtnsCount = await evalJs(ws, `document.querySelectorAll('.side-extras .side-btn').length`);
-  check('侧边栏底部 4 个图标按钮(导出/导入/数据位置/联系作者)', sideBtnsCount === 4, 'count=' + sideBtnsCount);
+  check('侧边栏底部 5 个图标按钮(导出/导入/数据位置/检查更新/联系作者)', sideBtnsCount === 5, 'count=' + sideBtnsCount);
+  const sideBtnIds = await evalJs(ws, `[...document.querySelectorAll('.side-extras .side-btn')].map(b=>b.id).join(',')`);
+  check('侧边栏按钮 id 顺序 = btnExport/btnImport/btnDataDir/btnUpdate/btnContact',
+        sideBtnIds === 'btnExport,btnImport,btnDataDir,btnUpdate,btnContact', sideBtnIds);
   // 6. 资金曲线页面移除导入/导出/数据位置按钮(只保留「清除全部」, 用 fundsArea 内 querySelector 避免侧边栏 id 干扰)
   await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="funds"]').click()`);
   await sleep(600);
@@ -1284,6 +1287,138 @@ async function main() {
         JSON.stringify([fu.rvEditTitle, fu.rvEditBack, fu.rvEditAt]));
   check('复盘: 修改后内容更新且条数不变',
         fu.rvAfter.length === 2 && fu.rvAfter[0] === '第二条复盘(已改)', JSON.stringify(fu.rvAfter));
+
+  // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
+  const v541 = await evalJs(ws, `(() => {
+    const out = {};
+    // 1) 侧栏交易记录小字不能带冒号
+    out.sideSmall = [...document.querySelectorAll('#mainTabs .maintab small')].map(e => e.textContent.trim());
+    out.sideHasColon = [...document.querySelectorAll('#mainTabs .maintab small')]
+      .some(e => /^[：:]/.test(e.textContent.trim()));
+    // 2) 测算结果: 两列网格 + 无遗留 drow
+    // ⚠ 不能用 gridTemplateColumns 字符串分词数判断 — 浏览器会原样返回
+    //   "repeat(2, minmax(0px, 1fr))"(3 个空格分隔 token), 看起来像 3 列
+    //   改成看声明列数 + 强行排布后每行几个格子
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();
+    const df = document.getElementById('rDetailF');
+    out.fGrid = !!df && df.classList.contains('grid2');
+    out.fDrow = df ? df.querySelectorAll('.drow').length : -1;
+    out.fCells = df ? df.querySelectorAll('.dcell').length : -1;
+    // 用 computed grid-template-columns 的「声明列数」(repeat(n,...) 取 n)
+    // ⚠ 正则写在模板字符串里要写双反斜杠, 否则 \\d 会被吃成 d
+    const _gtc = df ? getComputedStyle(df).gridTemplateColumns : '';
+    const _rep = _gtc.match(/repeat\\(\\s*(\\d+)/);
+    out.fCols = _rep ? +_rep[1] : _gtc.split(' ').filter(x => x).length;
+    // 每行格子数: 按 rect.top 分组(同 top = 同一行).
+    // ⚠ 不能用 offsetTop: 此时若面板不可见, 所有 offset 都是 0 → 会假判成 8 个一行.
+    //   改成临时挂一个离屏但参与布局的容器量一次(量完立刻移除, 不动真实 DOM 状态)
+    if (df) {
+      const host = document.createElement('div');
+      host.style.cssText = 'position:absolute;left:-99999px;top:0;width:900px';
+      const probe = df.cloneNode(true);
+      host.appendChild(probe);
+      document.body.appendChild(host);
+      const tops = [...probe.querySelectorAll('.dcell')].map(c => Math.round(c.getBoundingClientRect().top));
+      out.fPerRow = tops.filter(t => t === tops[0]).length;
+      out.fRows = new Set(tops).size;
+      host.remove();
+    } else { out.fPerRow = -1; out.fRows = -1; }
+    // 每个格子都是「标签在上、数值在下」的块级布局
+    const c0 = df ? df.querySelector('.dcell') : null;
+    out.fCellStack = !!c0 && getComputedStyle(c0.querySelector('.k')).display === 'block'
+      && getComputedStyle(c0.querySelector('.v')).display === 'block';
+    // 标签必须留在 DOM 里(改成 title 提示也不能丢掉可见标签)
+    out.fLabels = df ? [...df.querySelectorAll('.dcell .k')].map(e => e.textContent.trim()) : [];
+    // 3) 期权测算卡也走两列
+    const do_ = document.getElementById('rDetailO');
+    out.oGrid = !!do_ && do_.classList.contains('grid2');
+    out.oDrow = do_ ? do_.querySelectorAll('.drow').length : -1;
+    // 4) 侧栏「⬆ 检查更新」按钮 + 红点元素存在
+    out.updBtn = !!document.getElementById('btnUpdate');
+    out.updDot = !!document.getElementById('updateDot');
+    out.updBg = !!document.getElementById('updateBg');
+    out.updBtnTitle = (document.getElementById('btnUpdate') || {}).title || '';
+    out.updActions = ['updDownload','updBackup','updOpenDir','updClose']
+      .filter(id => !document.getElementById(id)).length;   // 缺几个
+    return out;
+  })()`);
+
+  check('侧栏: 交易记录小字已去掉冒号',
+        v541.sideSmall.length === 4 && !v541.sideHasColon, JSON.stringify(v541.sideSmall));
+  check('侧栏: 小字内容为 期货 · 期权 / 期权模式 / 期货模式 / abe · 威科夫',
+        JSON.stringify(v541.sideSmall) === JSON.stringify(['期货 · 期权','期权模式','期货模式','abe · 威科夫']),
+        JSON.stringify(v541.sideSmall));
+  check('测算结果: 期货明细改为两列网格',
+        v541.fGrid && v541.fCols === 2 && v541.fPerRow === 2,
+        'grid2=' + v541.fGrid + ' cols=' + v541.fCols + ' perRow=' + v541.fPerRow);
+  check('测算结果: 8 项全部保留为 dcell 且无遗留 drow',
+        v541.fCells === 8 && v541.fDrow === 0, 'cells=' + v541.fCells + ' drow=' + v541.fDrow);
+  check('测算结果: 每格「标签在上 · 数值在下」', v541.fCellStack);
+  check('测算结果: 原有标签文字未丢失',
+        v541.fLabels.indexOf('开仓标的') >= 0 && v541.fLabels.indexOf('每手风险金额') >= 0
+        && v541.fLabels.indexOf('最大占用保证金') >= 0, JSON.stringify(v541.fLabels));
+  check('测算结果: 期权明细也改为两列', v541.oGrid && v541.oDrow === 0, 'drow=' + v541.oDrow);
+  check('侧栏: 存在「⬆ 检查更新」按钮', v541.updBtn, v541.updBtnTitle);
+  check('侧栏: 更新提示红点元素存在且默认隐藏', v541.updDot);
+  check('更新弹窗: DOM 完整(下载/备份/打开目录/关闭 齐全)', v541.updBg && v541.updActions === 0,
+        'missing=' + v541.updActions);
+
+  // 红点逻辑: 模拟有更新 → 亮; 无更新 → 灭
+  const dot = await evalJs(ws, `(() => {
+    const restore = UpdUI.info;
+    UpdUI.info = {ok: true, has_update: true, latest_name: 'v99.99'};
+    UpdUI.paintDot();
+    const on = !document.getElementById('updateDot').classList.contains('hidden');
+    const tOn = document.getElementById('btnUpdate').title;
+    UpdUI.info = {ok: true, has_update: false};
+    UpdUI.paintDot();
+    const off = document.getElementById('updateDot').classList.contains('hidden');
+    const tOff = document.getElementById('btnUpdate').title;
+    // 检查失败(网络不通)时不能亮红点误报
+    UpdUI.info = {ok: false, has_update: false, error: 'x'};
+    UpdUI.paintDot();
+    const errOff = document.getElementById('updateDot').classList.contains('hidden');
+    UpdUI.info = restore;
+    UpdUI.paintDot();
+    return {on, off, errOff, tOn, tOff};
+  })()`);
+  check('更新红点: 有新版本时亮起', dot.on, JSON.stringify(dot.tOn));
+  check('更新红点: 无新版本时消失', dot.off, JSON.stringify(dot.tOff));
+  check('更新红点: 检查失败时不误亮(不打扰)', dot.errOff);
+  check('更新按钮 title: 有更新时提示版本号', /v99\.99/.test(dot.tOn || ''), String(dot.tOn));
+  check('更新按钮 title: 无更新时为「检查更新」', /检查更新/.test(dot.tOff || ''), String(dot.tOff));
+
+  // 不自动弹窗: 页面加载后更新弹窗必须仍是关闭状态
+  check('更新: 启动静默检查不自动弹窗',
+        await evalJs(ws, `document.getElementById('updateBg').classList.contains('hidden')`));
+
+  // 接口契约: /api/update/check 在测试环境(可能断网)也必须返回结构化结果, 不能 500
+  const updApi = await evalJs(ws, `(async () => {
+    const r = await fetch('/api/update/check');
+    const d = await r.json();
+    return {status: r.status, ok: d.ok, cur: d.current,
+            keys: ['ok','current','current_name','latest','latest_name','has_update','notes','frozen']
+                  .filter(k => (k in d)).length,
+            err: d.error || ''};
+  })()`);
+  check('接口: /api/update/check 返回 200 且键位齐全',
+        updApi.status === 200 && updApi.keys === 8, JSON.stringify(updApi).slice(0, 160));
+  check('接口: /api/update/check 带回当前版本号',
+        updApi.cur === 5041, 'current=' + updApi.cur);
+  check('接口: 断网时 ok=false 且带人话错误(不抛 500)',
+        updApi.ok === true || (updApi.ok === false && updApi.err.length > 0),
+        updApi.ok ? 'online' : updApi.err);
+
+  const updBk = await evalJs(ws, `(async () => {
+    const r = await fetch('/api/update/backups');
+    const d = await r.json();
+    return {status: r.status, ok: d.ok, isArr: Array.isArray(d.backups),
+            vname: d.version_name, frozen: d.frozen};
+  })()`);
+  check('接口: /api/update/backups 返回 200 + 列表 + 版本名',
+        updBk.status === 200 && updBk.ok && updBk.isArr && /^v50\.41$/.test(updBk.vname || ''),
+        JSON.stringify(updBk));
+  check('接口: 开发模式 frozen=false (不谎报可替换 exe)', updBk.frozen === false, String(updBk.frozen));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

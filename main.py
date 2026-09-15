@@ -15,6 +15,7 @@
 """
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -31,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5040            # 与 README 版本号 v50.40 对齐(数值比较用于单实例接管)
+APP_VERSION = 5041            # 与 README 版本号 v50.41 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -702,6 +703,239 @@ def fund_restore_backup(name):
         "pools": len(trade_pool_list()),
     }
 
+
+# ===========================================================================
+# 检查更新 (v50.41)
+# ---------------------------------------------------------------------------
+# 更新源: GitHub 仓库 main 分支下的 version.json (清单) + dist/OpenCalc.exe (程序本体)
+#   version.json 结构: {"version":5041, "version_name":"v50.41", "date":"2026-09-17",
+#                      "notes":["..."], "url":"dist/OpenCalc.exe", "sha256":"...", ...}
+#   url 为相对路径时按 UPDATE_BASE 拼绝对地址, 也支持直接填完整 https 地址
+# ⚠ 只在用户点「检查更新」时联网, 不自动弹窗、不后台轮询 — 更新提示只落在侧栏小红点
+# ===========================================================================
+UPDATE_REPO = "zxcools/OpenCalc"
+UPDATE_BRANCH = "main"
+UPDATE_RAW_BASE = "https://raw.githubusercontent.com/%s/%s" % (UPDATE_REPO, UPDATE_BRANCH.lower())
+UPDATE_MANIFEST_URL = UPDATE_RAW_BASE + "/version.json"
+UPDATE_TIMEOUT = 8                       # 单次请求超时(秒), 不让界面卡住
+UPDATE_DL_UA = "OpenCalc-Updater/1.0"
+
+
+def _read_url_bytes(url, timeout=None):
+    """带 UA 的 GET(部分 CDN 对空 UA 返回 403), 返回 bytes; 失败抛异常"""
+    req = urllib.request.Request(url, headers={"User-Agent": UPDATE_DL_UA, "Cache-Control": "no-cache"})
+    with urllib.request.urlopen(req, timeout=timeout or UPDATE_TIMEOUT) as r:
+        return r.read()
+
+
+def _update_manifest():
+    """拉取并解析 version.json"""
+    raw = _read_url_bytes(UPDATE_MANIFEST_URL)
+    d = json.loads(raw.decode("utf-8-sig"))
+    if not isinstance(d, dict):
+        raise ValueError("更新清单格式不正确")
+    ver = d.get("version")
+    try:
+        ver = int(ver)
+    except (TypeError, ValueError):
+        raise ValueError("更新清单缺少合法的 version 字段")
+    # 下载地址: 相对路径 → 拼 raw 基址; 绝对 http(s) 直接用
+    url = (d.get("url") or "dist/OpenCalc.exe").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        url = UPDATE_RAW_BASE + "/" + url.lstrip("/")
+    notes = d.get("notes") or []
+    if isinstance(notes, str):
+        notes = [x for x in notes.split("\n") if x.strip()]
+    return {
+        "version": ver,
+        "version_name": (d.get("version_name") or ("v%s" % ver)).strip(),
+        "date": (d.get("date") or "").strip(),
+        "url": url,
+        "sha256": (d.get("sha256") or "").strip().lower(),
+        "size": d.get("size"),
+        "notes": [str(x).strip() for x in notes if str(x).strip()][:30],
+    }
+
+
+def update_check():
+    """检查是否有新版本. 返回 dict 供前端直接渲染.
+    ⚠ 不抛异常给 HTTP 层: 网络不通属于正常情况, 统一返回 ok=False + error 文案"""
+    cur = APP_VERSION
+    try:
+        m = _update_manifest()
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "current": cur,
+            "current_name": _version_name(cur),
+            # 失败时也带上完整键位: 前端按固定字段渲染, 缺键会让 JS 读到 undefined
+            "latest": None,
+            "latest_name": "",
+            "has_update": False,
+            "date": "",
+            "notes": [],
+            "download_url": "",
+            "size": None,
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "app_dir": _app_dir(),
+            "error": "检查更新失败：%s" % _friendly_net_err(e),
+        }
+    has_new = m["version"] > cur
+    return {
+        "ok": True,
+        "current": cur,
+        "current_name": _version_name(cur),
+        "latest": m["version"],
+        "latest_name": m["version_name"],
+        "has_update": has_new,
+        "date": m["date"],
+        "notes": m["notes"],
+        "download_url": m["url"],
+        "size": m["size"],
+        "frozen": bool(getattr(sys, "frozen", False)),   # 只有 exe 模式才谈得上替换程序
+        "app_dir": _app_dir(),
+    }
+
+
+def _version_name(v):
+    """5040 → v50.40 (与 README 的版本号写法对齐)"""
+    s = str(int(v))
+    if len(s) > 2:
+        return "v%s.%s" % (s[:-2], s[-2:])
+    return "v" + s
+
+
+def _friendly_net_err(e):
+    """把底层网络异常翻译成人话(用户看 'urlopen error timed out' 没有意义)"""
+    s = str(e)
+    low = s.lower()
+    if "timed out" in low or "timeout" in low:
+        return "连接超时，请检查网络后重试"
+    if "certificate" in low or "ssl" in low:
+        return "HTTPS 证书校验失败（可能是网络代理拦截）"
+    if "getaddrinfo" in low or "name or service" in low or "nodename" in low:
+        return "无法解析更新服务器地址，请检查网络或 DNS"
+    if "connection refused" in low or "unreachable" in low:
+        return "无法连接到更新服务器"
+    if "403" in s or "401" in s:
+        return "更新服务器拒绝访问（HTTP %s）" % s.split("403")[-1][:4].strip(" :")
+    if "404" in s:
+        return "更新清单不存在（仓库里还没有 version.json）"
+    return s[:120]
+
+
+def _update_dir():
+    """下载/备份落盘目录: <数据目录>/updates (数据目录外不会被软件更新清掉)"""
+    d = os.path.join(os.path.dirname(FUND_DB_PATH), "updates")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def update_download():
+    """下载最新版 exe 到 <数据目录>/updates/, 返回落地路径.
+    ⚠ 先写 .part 临时文件, 校验(大小/sha256)通过后再改名 → 中途断了不会留下半截 exe"""
+    m = _update_manifest()
+    if m["version"] <= APP_VERSION:
+        raise ValueError("当前已是最新版本（%s）" % _version_name(APP_VERSION))
+    out_dir = _update_dir()
+    fname = "OpenCalc_%s.exe" % m["version_name"].replace("/", "_")
+    final = os.path.join(out_dir, fname)
+    part = final + ".part"
+    total = 0
+    try:
+        req = urllib.request.Request(m["url"], headers={"User-Agent": UPDATE_DL_UA, "Cache-Control": "no-cache"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+            declared = r.headers.get("Content-Length")
+            while True:
+                chunk = r.read(262144)
+                if not chunk:
+                    break
+                f.write(chunk)
+                total += len(chunk)
+        # 大小校验: 小于 1MB 基本可以断定不是我们的 exe(拿到了错误页/重定向页)
+        if total < 1024 * 1024:
+            raise ValueError("下载内容异常（仅 %d 字节），可能是网络被拦截" % total)
+        if declared and declared.isdigit() and int(declared) != total:
+            raise ValueError("下载不完整（%d/%s 字节），请重试" % (total, declared))
+        if m["sha256"]:
+            h = hashlib.sha256()
+            with open(part, "rb") as f:
+                for chunk in iter(lambda: f.read(262144), b""):
+                    h.update(chunk)
+            if h.hexdigest().lower() != m["sha256"]:
+                raise ValueError("文件校验失败（sha256 不一致），已丢弃，请重新下载")
+        os.replace(part, final)
+        return {"path": final, "size": total, "version_name": m["version_name"], "dir": out_dir}
+    except Exception:
+        try:
+            if os.path.exists(part):
+                os.remove(part)
+        except OSError:
+            pass
+        raise
+
+
+def update_backup_current():
+    """把「当前正在运行的 exe」备份一份到 <数据目录>/updates/backup/.
+    ⚠ 运行中的 exe 不能覆盖, 但可以复制(Windows 允许读取运行中的文件) → 用分块读取而非 shutil.copy
+    ⚠ 文件名带时间戳: 用户可能连续备份多次, 不能互相覆盖
+    返回 {path, size, version_name}"""
+    exe = os.path.abspath(sys.executable) if getattr(sys, "frozen", False) else ""
+    if not exe or not os.path.isfile(exe):
+        raise ValueError("当前是开发模式（非 exe），无需备份程序本体")
+    bdir = os.path.join(_update_dir(), "backup")
+    os.makedirs(bdir, exist_ok=True)
+    name = "OpenCalc_%s_%s.exe" % (_version_name(APP_VERSION),
+                                   datetime.now().strftime("%Y%m%d_%H%M%S"))
+    dst = os.path.join(bdir, name)
+    total = 0
+    with open(exe, "rb") as src, open(dst, "wb") as out:
+        while True:
+            chunk = src.read(262144)
+            if not chunk:
+                break
+            out.write(chunk)
+            total += len(chunk)
+    # 只保留最近 5 份备份(与资金曲线备份同样的轮转思路, 避免无限堆积占用空间)
+    try:
+        files = sorted(f for f in os.listdir(bdir) if f.lower().endswith(".exe"))
+        for f in files[:-5]:
+            os.remove(os.path.join(bdir, f))
+    except OSError:
+        pass
+    return {"path": dst, "size": total, "version_name": _version_name(APP_VERSION), "dir": bdir}
+
+
+def update_backup_list():
+    """已备份的旧版本列表(新→旧)"""
+    bdir = os.path.join(_update_dir(), "backup")
+    out = []
+    try:
+        for f in os.listdir(bdir):
+            if f.lower().endswith(".exe"):
+                p = os.path.join(bdir, f)
+                st = os.stat(p)
+                out.append({"name": f, "path": p, "size": st.st_size, "mtime": st.st_mtime})
+    except OSError:
+        pass
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
+def update_open_folder(path=""):
+    """在资源管理器里定位文件/打开目录(下载完成后引导用户去替换程序)"""
+    target = (path or "").strip()
+    if target and os.path.exists(target):
+        if os.path.isfile(target):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(target)], close_fds=True)
+        else:
+            os.startfile(os.path.normpath(target))  # noqa: S606
+        return True
+    d = _update_dir()
+    if os.path.isdir(d):
+        os.startfile(os.path.normpath(d))  # noqa: S606
+        return True
+    return False
 
 
 def fund_set_data_dir(new_dir):
@@ -2279,6 +2513,19 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/settings":
             self._send(200, _json({"ok": True, "settings": get_settings()}))
 
+        # ---- 检查更新 ----
+        elif path == "/api/update/check":
+            self._send(200, _json(update_check()))
+        elif path == "/api/update/backups":
+            self._send(200, _json({"ok": True, "backups": update_backup_list(),
+                                   "version_name": _version_name(APP_VERSION),
+                                   "frozen": bool(getattr(sys, "frozen", False)),
+                                   "dir": _update_dir()}))
+        elif path == "/api/update/open-folder":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            ok = update_open_folder((qs.get("path") or [""])[0])
+            self._send(200, _json({"ok": ok, "msg": "已打开" if ok else "没有可打开的目录"}))
+
         elif path.startswith("/api/assets/"):
             name = path[len("/api/assets/"):]
             data, ctype = _read_asset_bytes(name)
@@ -2393,6 +2640,19 @@ class Handler(BaseHTTPRequestHandler):
 
             elif path == "/api/settings":
                 self._send(200, _json({"ok": True, "settings": save_settings(params)}))
+                return
+            # ---- 检查更新 (下载/备份都比较慢, 走 POST 并放宽前端 fetch 超时) ----
+            elif path == "/api/update/download":
+                try:
+                    self._send(200, _json({"ok": True, **update_download()}))
+                except Exception as e:  # noqa: BLE001
+                    self._send(200, _json({"ok": False, "error": _friendly_net_err(e)}))
+                return
+            elif path == "/api/update/backup-current":
+                try:
+                    self._send(200, _json({"ok": True, **update_backup_current()}))
+                except Exception as e:  # noqa: BLE001
+                    self._send(200, _json({"ok": False, "error": str(e)}))
                 return
             elif path == "/api/pin":
                 pinned = set_window_pin(bool(params.get("pin", True)))
@@ -2782,6 +3042,23 @@ select{cursor:pointer;appearance:none;
 .details .k{color:var(--sub)}
 .details .v{font-weight:600}
 .details .v.good{color:var(--good)} .details .v.bad{color:var(--bad)} .details .v.warn{color:var(--warn)} .details .v.gold{color:var(--gold)}
+/* 两列明细(测算结果): 每格上下两行(标签在上/数值在下), 8 项从 8 行压到 4 行 */
+.details.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}
+.details.grid2 .dcell{padding:9px 16px;border-bottom:1px dashed var(--border);min-width:0}
+.details.grid2 .dcell:nth-child(odd){border-right:1px dashed var(--border)}
+.details.grid2 .dcell:nth-last-child(-n+2){border-bottom:none}
+.details.grid2 .k{display:block;font-size:11.5px;line-height:1.35;margin-bottom:3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.details.grid2 .v{display:block;font-size:14.5px;font-variant-numeric:tabular-nums;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+/* 窄屏(单列布局/小窗口)退回一行一项, 免得数字被截断 */
+@media(max-width:560px){
+  .details.grid2{grid-template-columns:1fr}
+  .details.grid2 .dcell{border-right:none!important}
+  .details.grid2 .dcell:nth-last-child(-n+2){border-bottom:1px dashed var(--border)}
+  .details.grid2 .dcell:last-child{border-bottom:none}
+  .details.grid2 .k{white-space:normal}
+}
 
 /* 阶梯止盈 (期货, 独立方块) */
 .ladder-block{border:1px solid var(--border);border-radius:16px;padding:14px 16px;
@@ -3111,6 +3388,10 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 #calcArea .ratio-strip .r small{font-size:var(--fz-mid)}
 #calcArea .details .drow{font-size:var(--fz-td2);padding:12px 18px}
 #calcArea .drow .k{font-size:var(--fz-mid)}
+/* 两列明细在计算器页跟随「字号」设置缩放(标签/数值分别跟 k/v) */
+#calcArea .details.grid2 .dcell{padding:10px 16px}
+#calcArea .details.grid2 .k{font-size:var(--fz-micro)}
+#calcArea .details.grid2 .v{font-size:var(--fz-td2)}
 #calcArea .mode small{font-size:var(--fz-micro)}
 #calcArea .plans-item .meta{font-size:var(--fz-small)}
 #calcArea .plans-empty{font-size:var(--fz-lbl)}
@@ -3185,13 +3466,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 <div class="app-shell">
   <aside class="side" id="mainTabs">
     <div class="maintab active" data-tab="calc"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="var(--mk-main)" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="var(--mk-main)"/></svg></span><span class="mt">开仓计算</span><small>期货 · 期权</small></div>
-    <div class="maintab" data-tab="trades"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="48" height="11" rx="3" fill="var(--mk-main)"/><rect x="26" y="53" width="30" height="11" rx="3" fill="var(--mk-acc)"/></svg></span><span class="mt">交易记录</span><small>：期权模式</small></div>
-    <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>：期货模式</small></div>
+    <div class="maintab" data-tab="trades"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="48" height="11" rx="3" fill="var(--mk-main)"/><rect x="26" y="53" width="30" height="11" rx="3" fill="var(--mk-acc)"/></svg></span><span class="mt">交易记录</span><small>期权模式</small></div>
+    <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>期货模式</small></div>
     <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
     <div class="side-extras">
       <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬆</button>
       <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬇</button>
       <button class="side-btn" id="btnDataDir" style="position:relative" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙<span id="dataRiskDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
+      <button class="side-btn" id="btnUpdate" style="position:relative" title="检查更新">⬆<span id="updateDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
     </div>
   </aside>
@@ -3383,15 +3665,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <span class="badge bad hidden" id="rBadgeBad"><span class="ico">✕</span>不建议参与</span>
         </div>
         <div class="warnbox hidden" id="rWarn"></div>
-        <div class="details anim" id="rDetailF">
-          <div class="drow"><span class="k">开仓标的</span><span class="v" id="rContractF">—</span></div>
-          <div class="drow"><span class="k">合约乘数</span><span class="v" id="rMultF">—</span></div>
-          <div class="drow"><span class="k">每手保证金（参考占用，开仓价 × 乘数 × 16%）</span><span class="v money" id="rMarginF">—</span></div>
-          <div class="drow"><span class="k">每手风险金额（止损价差 × 乘数）</span><span class="v money good" id="rRiskF">—</span></div>
-          <div class="drow"><span class="k">每手止盈金额（止盈价差 × 乘数）</span><span class="v money bad" id="rRewardF">—</span></div>
-          <div class="drow"><span class="k">实际最大风险金额（每手风险 × 手数，≤ 预算）</span><span class="v money good" id="rRiskUsedF">—</span></div>
-          <div class="drow"><span class="k">按最大手数止盈可盈利（每手止盈 × 手数）</span><span class="v money bad" id="rMaxRewardF">—</span></div>
-          <div class="drow"><span class="k">最大占用保证金（每手 × 手数）</span><span class="v money gold" id="rMarginUsedF">—</span></div>
+        <div class="details grid2 anim" id="rDetailF">
+          <div class="dcell"><span class="k">开仓标的</span><span class="v" id="rContractF">—</span></div>
+          <div class="dcell"><span class="k">合约乘数</span><span class="v" id="rMultF">—</span></div>
+          <div class="dcell"><span class="k" title="开仓价 × 乘数 × 16%">每手保证金（参考占用）</span><span class="v money" id="rMarginF">—</span></div>
+          <div class="dcell"><span class="k" title="止损价差 × 乘数">每手风险金额</span><span class="v money good" id="rRiskF">—</span></div>
+          <div class="dcell"><span class="k" title="止盈价差 × 乘数">每手止盈金额</span><span class="v money bad" id="rRewardF">—</span></div>
+          <div class="dcell"><span class="k" title="每手风险 × 手数，≤ 预算">实际最大风险金额</span><span class="v money good" id="rRiskUsedF">—</span></div>
+          <div class="dcell"><span class="k" title="每手止盈 × 手数">按最大手数止盈可盈利</span><span class="v money bad" id="rMaxRewardF">—</span></div>
+          <div class="dcell"><span class="k" title="每手保证金 × 手数">最大占用保证金</span><span class="v money gold" id="rMarginUsedF">—</span></div>
         </div>
         <div class="anim" style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn xs" id="btnAddToTrade" title="把当前开仓价/止损价/止盈价与上面的测算结果一键写入「交易记录：期货模式」">📥 加入记录</button>
@@ -3428,10 +3710,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="s">1 手价格 · 已含乘数</div>
           </div>
         </div>
-        <div class="details anim" id="rDetailO" style="margin-top:16px">
-          <div class="drow"><span class="k">开仓标的</span><span class="v" id="rContractO">—</span></div>
-          <div class="drow"><span class="k">期权合约乘数</span><span class="v" id="rMultO">—</span></div>
-          <div class="drow"><span class="k">占用资金（权利金 × 手数）</span><span class="v money gold" id="rFundsO">—</span></div>
+        <div class="details grid2 anim" id="rDetailO" style="margin-top:16px">
+          <div class="dcell"><span class="k">开仓标的</span><span class="v" id="rContractO">—</span></div>
+          <div class="dcell"><span class="k">期权合约乘数</span><span class="v" id="rMultO">—</span></div>
+          <div class="dcell"><span class="k" title="权利金 × 手数">占用资金</span><span class="v money gold" id="rFundsO">—</span></div>
         </div>
         <div class="warnbox hidden" id="rWarnO"></div>
         <div class="tip">期权买入不占用保证金，资金按权利金全额占用。期权乘数请以交易所最新规定为准。</div>
@@ -3879,6 +4161,22 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="tip">本应用开源分享，你的支持是持续维护的最大动力 🙌</div>
       <div class="modal-actions">
         <button class="btn" id="contactClose">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 检查更新 modal -->
+  <div class="modalbg hidden" id="updateBg">
+    <div class="modal" style="width:min(700px,94vw)">
+      <h3><span class="dot"></span>⬆ 检查更新</h3>
+      <div id="updBody">
+        <div class="tip" style="text-align:center;padding:18px 0">正在检查…</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="updClose">关闭</button>
+        <button class="btn ghost" id="updOpenDir" style="display:none">📁 打开所在文件夹</button>
+        <button class="btn" id="updBackup" style="display:none" title="把当前正在运行的程序复制一份到 updates/backup/，方便随时退回">🛟 备份当前版本</button>
+        <button class="btn primary" id="updDownload" style="display:none">⬇ 下载最新版</button>
       </div>
     </div>
   </div>
@@ -6644,6 +6942,202 @@ const FundUI = {
 FundUI.init();
 // 启动时检查数据是否落在软件目录内(更新软件会删数据) → 亮红点 + 提示一次
 try { FundUI.checkDataSafety(); } catch (e) { /* 启动检查失败不影响使用 */ }
+
+/* ===========================================================================
+   检查更新 (v50.41)
+   - 不自动弹窗: 只有用户点侧栏「⬆」才打开弹窗
+   - 启动时静默查一次, 有新版本只在侧栏按钮上亮红点(不打扰)
+   - 「下载最新版」把新 exe 落到 <数据目录>/updates/, 不自动替换运行中的程序
+     (运行中的 exe 无法覆盖, 且自动替换太粗暴 → 交给用户手动替换)
+   =========================================================================== */
+const UpdUI = {
+  info: null,
+  busy: false,
+
+  async init(){
+    const btn = $('btnUpdate');
+    if (btn) btn.addEventListener('click', ()=>this.open());
+    $('updClose').addEventListener('click', ()=>$('updateBg').classList.add('hidden'));
+    $('updateBg').addEventListener('click', e=>{ if (e.target===$('updateBg')) $('updateBg').classList.add('hidden'); });
+    $('updDownload').addEventListener('click', ()=>this.download());
+    $('updBackup').addEventListener('click', ()=>this.backupCurrent());
+    $('updOpenDir').addEventListener('click', ()=>this.openFolder());
+    // 启动静默检查: 延迟 3 秒避开启动时的接口高峰; 失败什么都不做(不打扰用户)
+    setTimeout(()=>this.silentCheck(), 3000);
+  },
+
+  /* 静默检查: 只更新红点, 不开弹窗、不报错 */
+  async silentCheck(){
+    try {
+      const d = await (await fetchT('/api/update/check', null, 10000)).json();
+      this.info = d;
+      this.paintDot();
+    } catch (e) { /* 网络不通就静默跳过 */ }
+  },
+
+  paintDot(){
+    const dot = $('updateDot');
+    if (!dot) return;
+    const has = !!(this.info && this.info.ok && this.info.has_update);
+    dot.classList.toggle('hidden', !has);
+    const btn = $('btnUpdate');
+    if (btn) btn.title = has ? ('有新版本 ' + this.info.latest_name + '，点这里查看') : '检查更新';
+  },
+
+  /* 打开弹窗 → 现场再查一次(保证看到的是最新结果) */
+  async open(){
+    $('updateBg').classList.remove('hidden');
+    await this.render(true);
+  },
+
+  async render(fetchNow){
+    const box = $('updBody');
+    if (fetchNow || !this.info){
+      box.innerHTML = '<div class="tip" style="text-align:center;padding:18px 0">正在检查…</div>';
+      try {
+        this.info = await (await fetchT('/api/update/check', null, 12000)).json();
+      } catch (e) {
+        box.innerHTML = '<div class="warnbox">检查更新失败：无法访问更新服务器，请检查网络后重试</div>';
+        $('updDownload').style.display = 'none';
+        $('updBackup').style.display = 'none';
+        $('updOpenDir').style.display = this.info && this.info.frozen ? 'inline-block' : 'none';
+        return;
+      }
+    }
+    this.paintDot();
+    const d = this.info;
+    if (!d.ok){
+      box.innerHTML = '<div class="warnbox">' + escHtml(d.error || '检查失败') + '</div>'
+        + '<div class="tip">更新源：GitHub 上的 OpenCalc 仓库。网络受限时可稍后再试。</div>';
+      $('updDownload').style.display = 'none';
+      $('updBackup').style.display = 'none';
+      $('updOpenDir').style.display = this.info && this.info.frozen ? 'inline-block' : 'none';
+      return;
+    }
+    const curName = d.current_name || ('v' + d.current);
+    const isFrozen = !!d.frozen;
+    let html = '';
+    if (d.has_update){
+      html += '<div class="ratio-strip" style="margin-bottom:12px">'
+        + '<span class="l">发现新版本</span>'
+        + '<span class="badge good" style="font-size:15px">⬆ ' + escHtml(d.latest_name) + '</span>'
+        + '</div>'
+        + '<div style="color:var(--sub);font-size:12.5px;line-height:1.9;margin-bottom:10px">'
+        + '当前版本：<b style="color:var(--text)">' + escHtml(curName) + '</b>　→　'
+        + '最新版本：<b style="color:var(--accent)">' + escHtml(d.latest_name) + '</b>'
+        + (d.date ? '　<span style="opacity:.7">(' + escHtml(d.date) + ')</span>' : '')
+        + '</div>';
+      if (d.notes && d.notes.length){
+        html += '<div style="border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:12px;'
+          + 'max-height:200px;overflow:auto"><div style="font-size:12px;color:var(--sub);margin-bottom:6px">更新内容</div>'
+          + '<ul style="margin:0;padding-left:18px;font-size:12.5px;line-height:1.85">'
+          + d.notes.map(n=>'<li>' + escHtml(n) + '</li>').join('') + '</ul></div>';
+      }
+      if (isFrozen){
+        html += '<div class="tip">点「下载最新版」会把新程序存到数据目录下的 <b>updates</b> 文件夹（不影响当前运行的程序）。'
+          + '下载完成后关掉本窗口，用新文件替换原来的 OpenCalc.exe 即可。</div>';
+      } else {
+        html += '<div class="tip">当前是<b>开发模式</b>（源码运行），没有可替换的 exe。'
+          + '更新请直接 git pull 或更新源码目录。</div>';
+      }
+    } else {
+      html += '<div class="ratio-strip" style="margin-bottom:12px">'
+        + '<span class="l">当前版本 ' + escHtml(curName) + '</span>'
+        + '<span class="badge good" style="font-size:15px">✓ 已是最新</span>'
+        + '</div>'
+        + '<div class="tip">更新源：GitHub 上的 OpenCalc 仓库。点「⬆」可随时重新检查。</div>';
+    }
+    if (isFrozen){
+      html += '<div id="updBkBox" style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">'
+        + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+        + '<span style="font-size:12.5px;color:var(--sub)">🛟 已备份的旧版本</span>'
+        + '<span class="dim" style="font-size:11.5px">（最多保留 5 份，更新出问题可换回来）</span>'
+        + '</div><div id="updBkList" style="margin-top:8px;font-size:12px;color:var(--sub)">加载中…</div></div>';
+    }
+    box.innerHTML = html;
+    $('updDownload').style.display = (d.has_update && isFrozen) ? 'inline-block' : 'none';
+    $('updBackup').style.display = isFrozen ? 'inline-block' : 'none';
+    $('updOpenDir').style.display = isFrozen ? 'inline-block' : 'none';
+    $('updDownload').disabled = false;
+    $('updBackup').disabled = false;
+    if (isFrozen) this.renderBackupList();
+  },
+
+  async renderBackupList(){
+    const el = $('updBkList');
+    if (!el) return;
+    try {
+      const d = await (await fetchT('/api/update/backups')).json();
+      const list = (d.ok && d.backups) || [];
+      if (!list.length){
+        el.innerHTML = '暂无备份 — 点「🛟 备份当前版本」把现在这份存起来（建议每次更新前先备份）';
+        return;
+      }
+      el.innerHTML = list.map(b =>
+        '<div style="display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px dashed var(--line)">'
+        + '<span style="word-break:break-all">' + escHtml(b.name) + '</span>'
+        + '<span style="opacity:.75;white-space:nowrap">' + (b.size/1048576).toFixed(1) + ' MB</span>'
+        + '</div>').join('');
+    } catch (e) {
+      el.textContent = '读取备份列表失败';
+    }
+  },
+
+  async download(){
+    if (this.busy) return;
+    this.busy = true;
+    const b = $('updDownload');
+    const old = b.textContent;
+    b.disabled = true;
+    b.textContent = '⬇ 下载中…';
+    try {
+      // 下载可能要几十秒(10MB) → 单独放宽到 3 分钟
+      const d = await (await fetchT('/api/update/download', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: '{}'}, 180000)).json();
+      if (!d.ok){ alert('下载失败：' + (d.error || '未知错误')); return; }
+      b.style.display = 'none';
+      alert('✅ 已下载 ' + d.version_name + '（' + (d.size/1048576).toFixed(1) + ' MB）\n\n位置：' + d.path
+        + '\n\n更新方法：关闭本程序 → 用这个新文件替换原来的 OpenCalc.exe（建议先点「🛟 备份当前版本」）');
+      this.openFolder(d.path);
+      // 已经拿到新版了, 红点没必要再亮
+      if (this.info) { this.info.has_update = false; this.paintDot(); }
+    } catch (e) {
+      alert('下载失败：网络中断或超时，请重试');
+    } finally {
+      this.busy = false;
+      b.disabled = false;
+      b.textContent = old;
+    }
+  },
+
+  async backupCurrent(){
+    if (this.busy) return;
+    this.busy = true;
+    const b = $('updBackup');
+    const old = b.textContent;
+    b.disabled = true;
+    b.textContent = '🛟 备份中…';
+    try {
+      const d = await (await fetchT('/api/update/backup-current', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: '{}'}, 60000)).json();
+      if (!d.ok){ alert('备份失败：' + (d.error || '未知错误')); return; }
+      alert('✅ 已备份当前版本 ' + d.version_name + '（' + (d.size/1048576).toFixed(1) + ' MB）\n\n位置：' + d.path);
+      this.renderBackupList();
+    } catch (e) {
+      alert('备份失败：' + e.message);
+    } finally {
+      this.busy = false;
+      b.disabled = false;
+      b.textContent = old;
+    }
+  },
+
+  openFolder(path){
+    fetchT('/api/update/open-folder' + (path ? '?path=' + encodeURIComponent(path) : ''))
+      .catch(()=>{ /* 打开文件夹失败无所谓 */ });
+  },
+};
+try { UpdUI.init(); } catch (e) { /* 更新模块初始化失败不影响主功能 */ }
 </script>
 </body>
 </html>
