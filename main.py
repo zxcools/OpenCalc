@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5037            # 与 README 版本号 v50.35 对齐(数值比较用于单实例接管)
+APP_VERSION = 5038            # 与 README 版本号 v50.38 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -46,7 +46,13 @@ IDLE_EXIT_SECONDS = 7200     # 无请求空闲自动退出(2小时, 避免页面
 
 # ---------------------------------------------------------------------------
 # 合约数据表 (合约乘数: 每手对应的数量单位)
-# 结构: [code, 名称, 市场, 期货乘数, 期权乘数(None 表示与期货一致), 备注]
+# 结构: [code, 名称, 市场, 期货乘数, 期权乘数(None 表示与期货一致), 备注, 最小变动价位]
+# ⚠ 最小变动价位已逐个核对交易所官网/公告(最近核对 2026-09-15)。下面这些是调整过的, 改动前请再核:
+#    y 豆油 / p 棕榈油: 2→1 元/吨 (大商所〔2026〕32号, 2026-04-10 起)
+#    lc 碳酸锂: 50→20 元/吨 (广期所〔2024〕337号, 2024-12-17 结算起)
+#    ec 欧线集运: 0.1→0.5 点 (上期能源 2026-01-16 公告, 2026-05-11 起)
+#    PR 瓶片: 2 元/吨 (郑商所瓶片细则 2026-05-14); TL 30年国债: 0.01 元 (中金所交易细则第七条)
+# ⚠ 部分品种的「期权」最小变动价位与期货不同(如 AP 期货1/期权0.5、CF 期货5/期权1、PS 期货5/期权1、#    LG 期货0.5/期权0.25), 本表只存期货 tick; 期权模式目前不依赖 tick, 未拆列。
 # ---------------------------------------------------------------------------
 CONTRACTS = [
     # 上期所 (SHFE)
@@ -75,10 +81,10 @@ CONTRACTS = [
     ["bc", "国际铜", "能源中心", 5, None, "吨/手", 10],
     # 大商所 (DCE)
     ["m", "豆粕", "大商所", 10, None, "吨/手", 1],
-    ["y", "豆油", "大商所", 10, None, "吨/手", 2],
+    ["y", "豆油", "大商所", 10, None, "吨/手", 1],
     ["a", "豆一", "大商所", 10, None, "吨/手", 1],
     ["b", "豆二", "大商所", 10, None, "吨/手", 1],
-    ["p", "棕榈油", "大商所", 10, None, "吨/手", 2],
+    ["p", "棕榈油", "大商所", 10, None, "吨/手", 1],
     ["c", "玉米", "大商所", 10, None, "吨/手", 1],
     ["cs", "玉米淀粉", "大商所", 10, None, "吨/手", 1],
     ["jd", "鸡蛋", "大商所", 5, None, "吨/手", 1],
@@ -114,7 +120,7 @@ CONTRACTS = [
     ["SM", "锰硅", "郑商所", 5, None, "吨/手", 2],
     ["SH", "烧碱", "郑商所", 30, None, "吨/手", 1],
     ["PX", "对二甲苯", "郑商所", 5, None, "吨/手", 2],
-    ["PR", "瓶片", "郑商所", 15, None, "吨/手", 1],
+    ["PR", "瓶片", "郑商所", 15, None, "吨/手", 2],
     ["RS", "菜籽", "郑商所", 10, None, "吨/手", 1],
     ["WH", "强麦", "郑商所", 20, None, "吨/手", 1],
     # 中金所 (CFFEX)
@@ -124,13 +130,13 @@ CONTRACTS = [
     ["IM", "中证1000", "中金所", 200, None, "元/点", 0.2],
     ["T", "十年国债", "中金所", 10000, None, "元/点", 0.005],
     ["TF", "五年国债", "中金所", 10000, None, "元/点", 0.005],
-    ["TL", "三十年期国债", "中金所", 10000, None, "元/点", 0.005],
+    ["TL", "三十年期国债", "中金所", 10000, None, "元/点", 0.01],
     # 广期所 (GFEX)
     ["si", "工业硅", "广期所", 5, None, "吨/手", 5],
-    ["lc", "碳酸锂", "广期所", 1, None, "吨/手", 50],
+    ["lc", "碳酸锂", "广期所", 1, None, "吨/手", 20],
     ["ps", "多晶硅", "广期所", 3, None, "吨/手", 5],
     # 集运指数(欧线)
-    ["ec", "欧线集运", "能源中心", 50, None, "元/点", 0.1],
+    ["ec", "欧线集运", "能源中心", 50, None, "元/点", 0.5],
 ]
 
 # 主要品种的期权乘数 (与期货不同的单独列出; None = 与期货一致)
@@ -2435,7 +2441,7 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货开仓计算器</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.37">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.38">
 <script src="/chart.min.js"></script>
 <style>
 :root{
@@ -3268,11 +3274,11 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="tip">期权买入不占用保证金，资金按权利金全额占用。期权乘数请以交易所最新规定为准。</div>
       </div>
 
-      <!-- 最近保存的期货方案 (最多3组, 一键调出; 仅期货模式显示) -->
+      <!-- 最近保存的方案 (期货/期权各自独立, 各最多3组, 一键调出) -->
       <div id="recentPlans" class="hidden" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:2px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
           <span style="font-size:12.5px;color:var(--sub);letter-spacing:.5px">最近方案 <small style="opacity:.75">（最多保留最近 3 组）</small></span>
-          <button class="btn xs ghost" id="btnSavePlan" style="margin-left:auto" title="把当前开仓参数（标的/方向/价格/保证金率/风险额度/权益）保存为方案，点击「调出」一键恢复并重算">💾 保存当前方案</button>
+          <button class="btn xs ghost" id="btnSavePlan" style="margin-left:auto" title="保存当前参数为方案，点「调出」一键恢复并重算">💾 保存当前方案</button>
         </div>
         <div id="planList" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
@@ -4313,11 +4319,17 @@ function showError(msg){
 }
 
 /* =================================================================
-   最近方案 (期货): 保存当前参数, 最多保留 3 组; 平铺列表, 一键调出
+   最近方案 (期货 / 期权各自独立): 保存当前参数, 各最多保留 3 组; 平铺列表, 一键调出
    ================================================================= */
 const PLAN_KEY = 'oc_futures_plans';
 const PLAN_MAX = 3;
+const PLAN_KEY_O = 'oc_options_plans';   // 期权方案独立存储, 与期货互不挤占
+const PLAN_MAX_O = 3;
 let planList = [];
+let planListO = [];
+/* 当前模式对应的方案列表与上限 */
+function activePlans(){ return curMode === 'options' ? planListO : planList; }
+function activePlanMax(){ return curMode === 'options' ? PLAN_MAX_O : PLAN_MAX; }
 function escHtml(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -4325,23 +4337,44 @@ function escHtml(s){
 function loadPlans(){
   try { planList = JSON.parse(localStorage.getItem(PLAN_KEY) || '[]') || []; }
   catch(e){ planList = []; }
+  try { planListO = JSON.parse(localStorage.getItem(PLAN_KEY_O) || '[]') || []; }
+  catch(e){ planListO = []; }
 }
 function persistPlans(){
-  if (planList.length > PLAN_MAX) planList.length = PLAN_MAX;
-  try { localStorage.setItem(PLAN_KEY, JSON.stringify(planList)); } catch(e){}
+  if (curMode === 'options'){
+    if (planListO.length > PLAN_MAX_O) planListO.length = PLAN_MAX_O;
+    try { localStorage.setItem(PLAN_KEY_O, JSON.stringify(planListO)); } catch(e){}
+  } else {
+    if (planList.length > PLAN_MAX) planList.length = PLAN_MAX;
+    try { localStorage.setItem(PLAN_KEY, JSON.stringify(planList)); } catch(e){}
+  }
   renderPlans();
 }
 function renderPlans(){
   const box = $('planList');
   if (!box) return;
-  const show = curMode === 'futures';
-  $('recentPlans').classList.toggle('hidden', !show);
-  if (!show) return;
-  if (!planList.length){
-    box.innerHTML = '<div class="plans-empty">暂无保存方案 — 完成一次期货测算后点「💾 保存当前方案」，这里平铺显示最近 ' + PLAN_MAX + ' 组，点任意一条「调出」一键恢复并重算。</div>';
+  const isOpt = curMode === 'options';
+  $('recentPlans').classList.remove('hidden');          // 期货/期权都显示
+  const btn = $('btnSavePlan');
+  if (btn) btn.title = isOpt
+    ? '把当前期权参数（标的/每手权利金/风险额度/权益）保存为方案，点「调出」一键恢复并重算'
+    : '把当前开仓参数（标的/方向/价格/保证金率/风险额度/权益）保存为方案，点「调出」一键恢复并重算';
+  const list = activePlans();
+  const maxN = activePlanMax();
+  if (!list.length){
+    box.innerHTML = '<div class="plans-empty">暂无保存方案 — 完成一次' + (isOpt ? '期权' : '期货')
+      + '测算后点「💾 保存当前方案」，这里平铺显示最近 ' + maxN + ' 组，点任意一条「调出」一键恢复并重算。</div>';
     return;
   }
-  box.innerHTML = planList.map((p,i)=>{
+  box.innerHTML = list.map((p,i)=>{
+    if (isOpt){
+      return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' 权利金 ' + escHtml(p.entry) + '">' +
+        '<span class="nm">' + escHtml(p.contract) + ' <span class="d long">买</span> ' + escHtml(p.entry) + '</span>' +
+        '<span class="meta">' + escHtml(String(p.code||'').toUpperCase()) + ' · 权利金 ' + escHtml(p.entry) + ' 元/手 · 风险 ' + escHtml(p.riskPct) + '%' +
+        (p.eqWan ? ' · 权益 ' + escHtml(p.eqWan) + '万' : '') + '</span>' +
+        '<span class="go">调出</span>' +
+      '</div>';
+    }
     const dCls = p.dir === 'short' ? 'short' : 'long';
     const dTxt = p.dir === 'short' ? '空' : '多';
     return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' ' + dTxt + ' @' + escHtml(p.entry) + '">' +
@@ -4352,6 +4385,29 @@ function renderPlans(){
   }).join('');
 }
 function saveCurrentPlan(){
+  /* 期权模式: 保存 标的 / 每手权利金 / 风险额度 / 权益 */
+  if (curMode === 'options'){
+    if (!selCode.O){ alert('请先选择开仓标的'); return; }
+    const eqWanO = parseFloat($('equity').value);
+    const prem = parseFloat($('entryO').value);
+    if (!(eqWanO > 0 && prem > 0)){
+      alert('请先完整填写：总权益、开仓价（每手权利金），再保存方案');
+      return;
+    }
+    const co = CONTRACTS.find(x=>x.code.toLowerCase() === String(selCode.O).toLowerCase())
+      || {name: selCode.O, code: selCode.O};
+    const sigO = String(co.code).toLowerCase() + '|' + prem;
+    planListO = planListO.filter(x => (String(x.code).toLowerCase() + '|' + parseFloat(x.entry)) !== sigO);
+    planListO.unshift({
+      code: co.code,
+      contract: co.name,
+      entry: fmtTrim(prem),
+      riskPct: fmtTrim(parseFloat($('riskAmountO').value) || 3),
+      eqWan: fmtTrim(eqWanO),
+    });
+    persistPlans();
+    return;
+  }
   if (curMode !== 'futures') return;
   if (!selCode.F){ alert('请先选择开仓标的'); return; }
   const eqWan = parseFloat($('equity').value);
@@ -4382,6 +4438,22 @@ function saveCurrentPlan(){
 function recallPlan(p){
   if (!p) return;
   const c = CONTRACTS.find(x=>x.code.toLowerCase() === String(p.code).toLowerCase());
+  if (curMode === 'options'){
+    if (!c){ alert('当前品种表中找不到 ' + p.code + '，请重新搜索选择标的'); return; }
+    setMode('options');
+    $('cSearchO').value = c.name + ' ' + c.code + ' · ' + c.exchange;   // 同步搜索框显示
+    pickContract(c, 'O');                                 // 设置单位/行情(内部会触发一次计算)
+    $('entryO').value = p.entry;
+    const wantO = Number(p.riskPct);
+    if ([0.5, 1, 1.5, 2, 3].indexOf(wantO) >= 0) $('riskAmountO').value = String(wantO);
+    if (p.eqWan){                                          // 恢复该方案当时的总权益
+      equityByMode.options = p.eqWan;
+      $('equity').value = p.eqWan;
+      bindWanEquity();
+    }
+    onInput();
+    return;
+  }
   if (!c){ alert('当前品种表中找不到 ' + p.code + '，请重新搜索选择标的'); return; }
   setMode('futures');                                   // 切回期货模式(也会刷新方案区)
   $('cSearch').value = c.name + ' ' + c.code + ' · ' + c.exchange;   // 同步搜索框显示
@@ -4405,7 +4477,7 @@ $('btnSavePlan').addEventListener('click', saveCurrentPlan);
 $('planList').addEventListener('click', e=>{
   const it = e.target.closest('.plans-item');
   if (!it || it.dataset.idx === undefined) return;
-  recallPlan(planList[+it.dataset.idx]);
+  recallPlan(activePlans()[+it.dataset.idx]);   // 取当前模式的方案列表(期货/期权各一套)
 });
 
 init();

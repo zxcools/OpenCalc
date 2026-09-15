@@ -64,10 +64,22 @@ for row in CONTRACTS:
 
 print("\n== 最小变动价位 (tick) ==")
 check("每个品种都有 tick>0", all(row[6] > 0 for row in CONTRACTS), "缺 tick: %s" % [r[0] for r in CONTRACTS if r[6] <= 0])
-_t = {"rb": 1, "au": 0.02, "i": 0.5, "lc": 50, "IF": 0.2, "T": 0.005, "TA": 2, "ec": 0.1, "bu": 1, "j": 0.5}
+_t = {"rb": 1, "au": 0.02, "i": 0.5, "lc": 20, "IF": 0.2, "T": 0.005, "TA": 2, "ec": 0.5, "bu": 1, "j": 0.5}
 for code, expect in _t.items():
     c = get_contract(code)
     check("%s tick=%s" % (code, expect), c and abs(c["tick"] - expect) < 1e-9, str(c and c["tick"]))
+# 交易所调整过最小变动价位的品种 —— 已逐个核对公告, 防止回退(改错会让阶梯止盈取整/价格步进失准)
+_t_adj = {
+    "p":  1,     # 大商所〔2026〕32号: 2 → 1 元/吨, 2026-04-10 交易时起
+    "y":  1,     # 同上: 豆油与棕榈油一起调整
+    "PR": 2,     # 郑商所瓶片期货业务细则(2026-05-14): 2 元/吨
+    "TL": 0.01,  # 中金所30年期国债期货合约交易细则第七条: 0.01 元
+    "lc": 20,    # 广期所〔2024〕337号: 50 → 20 元/吨, 2024-12-17 结算时起
+    "ec": 0.5,   # 上期能源 2026-01-16 公告: 0.1 → 0.5 点, 2026-05-11 起
+}
+for code, expect in _t_adj.items():
+    c = get_contract(code)
+    check("调整过tick的 %s = %s" % (code, expect), c and abs(c["tick"] - expect) < 1e-9, str(c and c["tick"]))
 check("contract_list 含 tick", all("tick" in x for x in __import__("main").contract_list()))
 
 print("\n== 期货模式 (手数 = 预算 / 每手风险) ==")

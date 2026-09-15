@@ -1031,6 +1031,59 @@ async function main() {
   check('显示全部: 资金曲线按钮归属资金曲线(可见性由月度数决定)',
         tr.fExists && tr.fShouldHidden === tr.fNowHidden, tRun);
 
+  // ---- 场景U (v50.38): 期权模式「保存当前方案」(最多3组, 与期货互不挤占) ----
+  const optPlan = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();
+    await w(300);
+    localStorage.removeItem('oc_options_plans');   // 干净起点
+    setMode('options');
+    await w(300);
+    const vis = !document.getElementById('recentPlans').classList.contains('hidden');
+    document.getElementById('equity').value = '100';   // 保证权益>0 才可保存
+    const futBefore = JSON.parse(localStorage.getItem('oc_futures_plans') || '[]').length;
+    const put = async (code, prem, pct) => {
+      const c = CONTRACTS.find(x => x.code.toLowerCase() === String(code).toLowerCase());
+      pickContract(c, 'O');
+      document.getElementById('entryO').value = String(prem);
+      document.getElementById('riskAmountO').value = String(pct);
+      saveCurrentPlan();
+      await w(150);
+    };
+    // 存 4 组 → 只应保留最近 3 组
+    await put('si', 1200, 3);
+    await put('lc', 800, 1);
+    await put('p',  600, 2);
+    await put('cu', 400, 1.5);
+    const items = [...document.querySelectorAll('#planList .plans-item')];
+    const n = items.length;
+    const names = items.map(x => (x.querySelector('.nm') || {}).textContent.trim());
+    const ls = JSON.parse(localStorage.getItem('oc_options_plans') || '[]');
+    const futAfter = JSON.parse(localStorage.getItem('oc_futures_plans') || '[]').length;
+    const emptyTxt = n ? '' : document.getElementById('planList').textContent.trim();
+    // 调出第一条(最近保存的 cu 400) → 应恢复权利金
+    document.getElementById('entryO').value = '9999';
+    items[0].click();
+    await w(600);
+    const recalledEntry = document.getElementById('entryO').value;
+    const recalledMode = curMode;
+    // 切回期货模式: 方案区应显示期货那套(数量与期权不同源)
+    setMode('futures');
+    await w(300);
+    const futShown = document.querySelectorAll('#planList .plans-item').length;
+    const futCount = JSON.parse(localStorage.getItem('oc_futures_plans') || '[]').length;
+    return JSON.stringify({vis, n, names, lsLen: ls.length, lsCodes: ls.map(x => x.code + '@' + x.entry),
+                           futSame: futBefore === futAfter, futShown, futCount, recalledEntry, recalledMode, emptyTxt});
+  })()`);
+  const op = JSON.parse(optPlan);
+  check('期权模式: 也显示「最近方案」区', op.vis, optPlan);
+  check('期权模式: 保存方案后出现在列表里', op.n === 3, optPlan);
+  check('期权模式: 最多只保留最近 3 组', op.lsLen === 3, optPlan);
+  check('期权模式: 超出时淘汰最旧的(留下 lc/p/cu)', JSON.stringify(op.lsCodes) === JSON.stringify(['cu@400', 'p@600', 'lc@800']), optPlan);
+  check('期权模式: 不挤占期货方案', op.futSame, optPlan);
+  check('期权模式: 点「调出」恢复该方案的权利金', op.recalledEntry === '400' && op.recalledMode === 'options', optPlan);
+  check('期权模式: 切回期货后方案区换成期货那套', op.futShown === op.futCount, optPlan);
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();
