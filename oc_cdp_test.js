@@ -297,7 +297,7 @@ async function main() {
   // 侧边栏导入导出按钮存在
   const sideBtns = await evalJs(ws, `JSON.stringify({ex: !!document.getElementById('btnExport'), im: !!document.getElementById('btnImport'), tabs: document.querySelectorAll('#mainTabs .maintab').length})`);
   const sb = JSON.parse(sideBtns);
-  check('侧边栏导出/导入按钮 + 3个tab', sb.ex === true && sb.im === true && sb.tabs === 3, sideBtns);
+  check('侧边栏导出/导入按钮 + 4个tab(含交易记录:期货模式)', sb.ex === true && sb.im === true && sb.tabs === 4, sideBtns);
   // 箭头方向: 导出 ⬆(出去) / 导入 ⬇(进来)
   const arrowDir = await evalJs(ws, `JSON.stringify({ex: document.getElementById('btnExport').textContent.trim(), im: document.getElementById('btnImport').textContent.trim()})`);
   const ad = JSON.parse(arrowDir);
@@ -1031,7 +1031,7 @@ async function main() {
   check('显示全部: 资金曲线按钮归属资金曲线(可见性由月度数决定)',
         tr.fExists && tr.fShouldHidden === tr.fNowHidden, tRun);
 
-  // ---- 场景U (v50.38): 期权模式「保存当前方案」(最多3组, 与期货互不挤占) ----
+  // ---- 场景U (v50.39): 期权模式「保存当前方案」(最多10组, 与期货互不挤占) ----
   const optPlan = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
     document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();
@@ -1050,11 +1050,10 @@ async function main() {
       saveCurrentPlan();
       await w(150);
     };
-    // 存 4 组 → 只应保留最近 3 组
-    await put('si', 1200, 3);
-    await put('lc', 800, 1);
-    await put('p',  600, 2);
-    await put('cu', 400, 1.5);
+    // 存 12 组 → 只应保留最近 10 组(淘汰最旧的 si / lc)
+    const seq = [['si',1200,3],['lc',800,1],['p',600,2],['cu',400,1.5],['al',300,1],['zn',310,1],
+                 ['rb',350,2],['hc',360,2],['i',420,1.5],['j',430,1.5],['jm',440,1],['TA',500,3]];
+    for (const it of seq){ await put(it[0], it[1], it[2]); }
     const items = [...document.querySelectorAll('#planList .plans-item')];
     const n = items.length;
     const names = items.map(x => (x.querySelector('.nm') || {}).textContent.trim());
@@ -1077,12 +1076,131 @@ async function main() {
   })()`);
   const op = JSON.parse(optPlan);
   check('期权模式: 也显示「最近方案」区', op.vis, optPlan);
-  check('期权模式: 保存方案后出现在列表里', op.n === 3, optPlan);
-  check('期权模式: 最多只保留最近 3 组', op.lsLen === 3, optPlan);
-  check('期权模式: 超出时淘汰最旧的(留下 lc/p/cu)', JSON.stringify(op.lsCodes) === JSON.stringify(['cu@400', 'p@600', 'lc@800']), optPlan);
+  check('期权模式: 保存方案后出现在列表里', op.n === 10, optPlan);
+  check('期权模式: 最多只保留最近 10 组', op.lsLen === 10, optPlan);
+  check('期权模式: 超出时淘汰最旧的(si/lc 已被挤掉)', op.lsCodes.indexOf('si@1200') < 0 && op.lsCodes.indexOf('lc@800') < 0 && op.lsCodes[0] === 'TA@500', optPlan);
   check('期权模式: 不挤占期货方案', op.futSame, optPlan);
-  check('期权模式: 点「调出」恢复该方案的权利金', op.recalledEntry === '400' && op.recalledMode === 'options', optPlan);
+  check('期权模式: 点「调出」恢复该方案的权利金', op.recalledEntry === String(op.lsCodes[0].split('@')[1]) && op.recalledMode === 'options', optPlan);
   check('期权模式: 切回期货后方案区换成期货那套', op.futShown === op.futCount, optPlan);
+
+  // ---- 场景V (v50.39): 交易记录：期货模式 ----
+  const futRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    // 清掉本场景造的数据
+    const cleanUp = async (prefix) => {
+      const g = await (await fetch('/api/trades/groups?mode=futures')).json();
+      for (const it of (g.groups || [])) {
+        if (String(it.underlying).startsWith(prefix)) {
+          const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + it.underlying)).json();
+          for (const op of (d.operations || [])) {
+            await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+          }
+        }
+      }
+    };
+    await cleanUp('e2efut');
+    // 清掉本场景可能残留的复盘(上次跑崩留下的), 否则条数断言会被污染
+    const rvOld = await (await fetch('/api/trades/reviews?mode=futures')).json();
+    for (const x of (rvOld.reviews || [])) {
+      if (String(x.underlying).startsWith('e2efut')) {
+        await fetch('/api/trades/review/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: x.id})});
+      }
+    }
+    // 切到「交易记录：期货模式」tab
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(900);
+    const tabOk = TradeUI.mode === 'futures';
+    const poolTitle = q('poolTitle').textContent;
+    const mainTitle = q('mainTableTitle').textContent;
+    const layTm = document.querySelector('.trades-layout').dataset.tm;
+    // 新建开仓弹窗: 期权专有字段应隐藏, 初次止损止盈应可见
+    q('btnNewOpen').click();
+    await w(400);
+    const vis = id => { const el = q(id); if (!el) return false; const box = el.closest('label'); return !!(box && box.offsetParent !== null); };
+    const modal = {
+      contractHidden: !vis('tmContract'),
+      callPutHidden: !vis('tmCallPut'),
+      deltaHidden: !vis('tmOpenDelta') && !vis('tmTargetDelta'),
+      initStopShown: vis('tmInitStop'),
+      initTargetShown: vis('tmInitTarget'),
+      dirOpts: [...q('tmDirection').options].map(o => o.textContent),
+    };
+    // 填一条期货开仓并保存
+    q('tmUnderlying').value = 'e2efut01';
+    q('tmOpenPrice').value = '3500';
+    q('tmQty').value = '3';
+    q('tmPremium').value = '1680';
+    q('tmInitStop').value = '3450';
+    q('tmInitTarget').value = '3650';
+    q('tmDirection').value = 'buy';
+    const saveR = await TradeUI.submitModal();
+    await w(700);
+    q('tradeModalBg').classList.add('hidden');
+    // 期货列表出现, 期权列表不出现
+    const gf = await (await fetch('/api/trades/groups?mode=futures')).json();
+    const go = await (await fetch('/api/trades/groups?mode=options')).json();
+    const inFut = (gf.groups || []).some(x => x.underlying === 'e2efut01');
+    const inOpt = (go.groups || []).some(x => x.underlying === 'e2efut01');
+    // 打开详情 → 方向显示「多头」, 测算卡/复盘模块存在
+    await TradeUI.loadDetail('e2efut01');
+    await w(700);
+    const detailMeta = q('tdMeta').textContent;
+    const holdDirTxt = [...document.querySelectorAll('#tdHoldings tr td')].map(t => t.textContent).join('|');
+    const calcBox = q('tdCalcCard') ? q('tdCalcCard').textContent.trim() : '';
+    // 复盘: 新建 → 出现在最上
+    q('btnNewReview').click();
+    await w(300);
+    const rvAtDefault = q('rvAt').value;
+    q('rvContent').value = '第一条复盘(旧)';
+    q('rvAt').value = '2026-09-10T09:00';
+    await TradeUI.submitReview();
+    await w(600);
+    q('btnNewReview').click();
+    await w(300);
+    q('rvContent').value = '第二条复盘(新)';
+    q('rvAt').value = '2026-09-16T09:00';
+    await TradeUI.submitReview();
+    await w(600);
+    const rvItems = [...document.querySelectorAll('#reviewList .review-item .rv-c')].map(x => x.textContent);
+    const rvTimes = [...document.querySelectorAll('#reviewList .review-item .rv-t span')].map(x => x.textContent);
+    // 复盘按模式隔离: 期权模式查不到
+    const rvOpt = await (await fetch('/api/trades/reviews?mode=options')).json();
+    //「新建复盘」默认带当前时间
+    q('btnNewReview').click();
+    await w(250);
+    const rvNowDefault = q('rvAt').value;
+    TradeUI.closeReviewModal();
+    // 清理
+    await cleanUp('e2efut');
+    await fetch('/api/trades/review/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: (await (await fetch('/api/trades/reviews?mode=futures')).json()).reviews[0].id})});
+    const rvLeft = (await (await fetch('/api/trades/reviews?mode=futures')).json()).reviews.length;
+    return JSON.stringify({tabOk, poolTitle, mainTitle, layTm, modal, saveOk: !!saveR, inFut, inOpt,
+                           detailMeta, holdDirTxt, calcBox, rvAtDefault, rvItems, rvTimes,
+                           rvOptLen: (rvOpt.reviews || []).length, rvNowDefault, rvLeft});
+  })()`);
+  const fu = JSON.parse(futRun);
+  check('期货模式: tab 切换后 TradeUI.mode = futures', fu.tabOk, futRun);
+  check('期货模式: 监控池改名「期货模式监控池」', fu.poolTitle === '期货模式监控池', fu.poolTitle);
+  check('期货模式: 主表标题变「期货交易」', fu.mainTitle === '期货交易', fu.mainTitle);
+  check('期货模式: 布局 data-tm=futures', fu.layTm === 'futures', fu.layTm);
+  check('期货模式新建开仓: 隐藏 合约代码/看涨看跌/delta',
+        fu.modal.contractHidden && fu.modal.callPutHidden && fu.modal.deltaHidden, JSON.stringify(fu.modal));
+  check('期货模式新建开仓: 出现 初次止损价/初次止盈价',
+        fu.modal.initStopShown && fu.modal.initTargetShown, JSON.stringify(fu.modal));
+  check('期货模式新建开仓: 方向选项 = 多头/空头',
+        JSON.stringify(fu.modal.dirOpts) === JSON.stringify(['多头', '空头']), JSON.stringify(fu.modal.dirOpts));
+  check('期货模式: 记录写入期货列表且不出现在期权列表', fu.saveOk && fu.inFut && !fu.inOpt, futRun);
+  check('期货模式: 详情方向显示「多头」', fu.holdDirTxt.indexOf('多头') >= 0, fu.holdDirTxt.slice(0, 120));
+  check('期货模式: 详情 meta 显示初次止损/止盈',
+        fu.detailMeta.indexOf('初次止损价') >= 0 && fu.detailMeta.indexOf('初次止盈价') >= 0, fu.detailMeta.slice(0, 160));
+  check('期货模式: 详情有复盘模块 + 测算卡占位', !!fu.calcBox, fu.calcBox.slice(0, 90));
+  check('新建复盘: 默认带当前时间', /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(fu.rvNowDefault), fu.rvNowDefault);
+  check('复盘: 保存后按时间倒序(最近的在上)',
+        fu.rvItems.length === 2 && fu.rvItems[0] === '第二条复盘(新)' && fu.rvItems[1] === '第一条复盘(旧)',
+        JSON.stringify(fu.rvItems));
+  check('复盘: 与期权模式隔离', fu.rvOptLen === 0, '期权复盘数=' + fu.rvOptLen);
+  check('复盘: 删除生效', fu.rvLeft === 1, '剩余=' + fu.rvLeft);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

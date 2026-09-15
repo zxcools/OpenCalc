@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5038            # 与 README 版本号 v50.38 对齐(数值比较用于单实例接管)
+APP_VERSION = 5039            # 与 README 版本号 v50.39 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -578,6 +578,11 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0):
     返回备份文件路径; 未备份返回 None.
     ⚠ 用 sqlite3 的 backup API 而非文件复制 — 库可能正被写入, 直接拷文件可能拿到半截状态
     ⚠ min_interval 内的重复触发合并成一次(导入/批量保存时会连续调用, 避免备份风暴)"""
+    # 测试/批量造数时可用 OC_NO_AUTO_BACKUP=1 关闭自动备份: 每次数据变动都做一次全库快照,
+    # 批量删除(如 E2E 造数后清理)会连续触发备份+轮转, 既慢又会撞到文件批量删除保护
+    if os.environ.get("OC_NO_AUTO_BACKUP") == "1" and not force:
+        return None
+
     global _last_backup_ts
     now = time.time()
     if not force and min_interval and (now - _last_backup_ts) < min_interval:
@@ -680,6 +685,7 @@ def fund_restore_backup(name):
         except Exception:  # noqa: BLE001
             pass
         FUND_DB_CONN = None
+    _DB_SCHEMA_FOR["path"] = None   # 换库后需要重新建表/补列
     src_conn = sqlite3.connect(src)
     dst_conn = sqlite3.connect(FUND_DB_PATH)
     try:
@@ -726,6 +732,7 @@ def fund_set_data_dir(new_dir):
         except Exception:  # noqa: BLE001
             pass
         FUND_DB_CONN = None
+    _DB_SCHEMA_FOR["path"] = None   # 换库后需要重新建表/补列
     # 切到新目录并确保新库存在
     FUND_DB_PATH = os.path.join(new_dir, "funds.db")
     _fund_db()
@@ -930,77 +937,137 @@ def fs_list_dirs(path=""):
     }
 
 
+_DB_LOCAL = threading.local()      # 每线程一个连接
+_DB_LOCK = threading.RLock()       # 建表/补列串行化
+_DB_SCHEMA_FOR = {"path": None}    # 已完成建表/补列的库路径
+
+
 def _fund_db():
-    """懒加载 SQLite, 进程内单连接(后台线程 + 简单事务足够桌面应用)"""
+    """懒加载 SQLite。
+    ⚠ 必须「每线程一个连接」: 服务端是 ThreadingHTTPServer, 一个请求一个线程;
+      多线程共用一个 sqlite3 连接(即便 check_same_thread=False)会在并发时抛
+      sqlite3.InterfaceError: bad parameter or other API misuse —— 浏览器同时发
+      groups/pool/detail 多个请求时必现。
+    建表与补列只对同一个库路径做一次, 用锁保护。
+    """
     global FUND_DB_CONN
-    if FUND_DB_CONN is None:
+    conn = getattr(_DB_LOCAL, "conn", None)
+    # ⚠ 必须连库路径一起缓存: 用户切换数据目录后, 缓存的连接还指着旧库文件 → 会写到旧库里去
+    if conn is not None:
+        if getattr(_DB_LOCAL, "path", None) != FUND_DB_PATH:
+            conn = None
+        else:
+            try:
+                conn.execute("SELECT 1")     # 连接可能已被外部 close()(数据目录切换等)
+            except Exception:  # noqa: BLE001
+                conn = None
+    if conn is None:
         os.makedirs(os.path.dirname(FUND_DB_PATH), exist_ok=True)
-        FUND_DB_CONN = sqlite3.connect(FUND_DB_PATH, check_same_thread=False, isolation_level=None)
-        FUND_DB_CONN.row_factory = sqlite3.Row
-        FUND_DB_CONN.execute(
-            """
-            CREATE TABLE IF NOT EXISTS records (
-                strategy    TEXT    NOT NULL,
-                year        INTEGER NOT NULL,
-                month       INTEGER NOT NULL,
-                initial_equity REAL NOT NULL,
-                end_equity    REAL NOT NULL,
-                cash_flow     REAL NOT NULL DEFAULT 0,
-                cash          REAL NOT NULL DEFAULT 0,
-                note        TEXT,
-                monthly_pnl REAL,
-                month_return_rate REAL,
-                created_at  TEXT,
-                updated_at  TEXT,
-                PRIMARY KEY (strategy, year, month)
-            )
-            """
+        conn = sqlite3.connect(FUND_DB_PATH, check_same_thread=False, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        _DB_LOCAL.conn = conn
+        _DB_LOCAL.path = FUND_DB_PATH
+    FUND_DB_CONN = conn            # 兼容旧引用(仅代表当前线程)
+    with _DB_LOCK:
+        if _DB_SCHEMA_FOR["path"] == FUND_DB_PATH:
+            return conn
+        _db_ensure_schema(conn)
+        _DB_SCHEMA_FOR["path"] = FUND_DB_PATH
+    return conn
+
+
+def _db_ensure_schema(conn):
+    """建表 + 老库补列(幂等). 只在 _fund_db 首次拿到某库路径时执行一次."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS records (
+            strategy    TEXT    NOT NULL,
+            year        INTEGER NOT NULL,
+            month       INTEGER NOT NULL,
+            initial_equity REAL NOT NULL,
+            end_equity    REAL NOT NULL,
+            cash_flow     REAL NOT NULL DEFAULT 0,
+            cash          REAL NOT NULL DEFAULT 0,
+            note        TEXT,
+            monthly_pnl REAL,
+            month_return_rate REAL,
+            created_at  TEXT,
+            updated_at  TEXT,
+            PRIMARY KEY (strategy, year, month)
         )
-        # 兼容旧库: 若缺少 cash 列则 ALTER 添加
-        cols = [row[1] for row in FUND_DB_CONN.execute("PRAGMA table_info(records)").fetchall()]
-        if "cash" not in cols:
-            FUND_DB_CONN.execute("ALTER TABLE records ADD COLUMN cash REAL NOT NULL DEFAULT 0")
-        # 期权交易记录 (策略=abe, 与资金曲线共用 SQLite, 一次导出备份包含所有数据)
-        FUND_DB_CONN.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trade_records (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy      TEXT    NOT NULL DEFAULT 'abe',
-                underlying    TEXT    NOT NULL,     -- 开仓标的(合约基础), 如 ao611
-                contract      TEXT    NOT NULL,     -- 完整合约代码, 如 ao611P2500
-                op_type       TEXT    NOT NULL,     -- 'open' / 'close'
-                open_date     TEXT,                 -- YYYY-MM-DD
-                open_delta    REAL,
-                target_delta  REAL,
-                call_put      TEXT,                 -- 'C' 看涨 / 'P' 看跌
-                direction     TEXT    NOT NULL,     -- 'buy' 买入 / 'sell' 卖出
-                open_price    REAL,                 -- 开仓价(开仓记录)
-                qty           INTEGER NOT NULL,     -- 开仓/平仓数量(平仓记录存 close_qty)
-                premium       REAL    NOT NULL,     -- 权利金(元/手 × 数量)
-                close_qty     INTEGER,              -- 仅平仓: 平仓数量
-                close_price   REAL,                 -- 仅平仓: 平仓价
-                pnl           REAL,                 -- 仅平仓: 逐笔盈亏
-                close_date    TEXT,                 -- 仅平仓: 平仓日期
-                note          TEXT,
-                created_at    TEXT,
-                updated_at    TEXT
-            )
-            """
+        """
+    )
+    # 兼容旧库: 若缺少 cash 列则 ALTER 添加
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(records)").fetchall()]
+    if "cash" not in cols:
+        conn.execute("ALTER TABLE records ADD COLUMN cash REAL NOT NULL DEFAULT 0")
+    # 期权交易记录 (策略=abe, 与资金曲线共用 SQLite, 一次导出备份包含所有数据)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_records (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy      TEXT    NOT NULL DEFAULT 'abe',
+            underlying    TEXT    NOT NULL,     -- 开仓标的(合约基础), 如 ao611
+            contract      TEXT    NOT NULL,     -- 完整合约代码, 如 ao611P2500
+            op_type       TEXT    NOT NULL,     -- 'open' / 'close'
+            open_date     TEXT,                 -- YYYY-MM-DD
+            open_delta    REAL,
+            target_delta  REAL,
+            call_put      TEXT,                 -- 'C' 看涨 / 'P' 看跌
+            direction     TEXT    NOT NULL,     -- 'buy' 买入 / 'sell' 卖出
+            open_price    REAL,                 -- 开仓价(开仓记录)
+            qty           INTEGER NOT NULL,     -- 开仓/平仓数量(平仓记录存 close_qty)
+            premium       REAL    NOT NULL,     -- 权利金(元/手 × 数量)
+            close_qty     INTEGER,              -- 仅平仓: 平仓数量
+            close_price   REAL,                 -- 仅平仓: 平仓价
+            pnl           REAL,                 -- 仅平仓: 逐笔盈亏
+            close_date    TEXT,                 -- 仅平仓: 平仓日期
+            note          TEXT,
+            created_at    TEXT,
+            updated_at    TEXT
         )
-        # 监控池快照历史
-        FUND_DB_CONN.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trade_pool_snapshots (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                strategy       TEXT    NOT NULL DEFAULT 'abe',
-                snapshot_date  TEXT    NOT NULL,    -- YYYY-MM-DD
-                contracts      TEXT    NOT NULL,    -- JSON 数组: ["si","lc","fu",...]
-                note           TEXT,
-                created_at     TEXT
-            )
-            """
+        """
+    )
+    # 监控池快照历史
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_pool_snapshots (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy       TEXT    NOT NULL DEFAULT 'abe',
+            snapshot_date  TEXT    NOT NULL,    -- YYYY-MM-DD
+            contracts      TEXT    NOT NULL,    -- JSON 数组: ["si","lc","fu",...]
+            note           TEXT,
+            created_at     TEXT
         )
-    return FUND_DB_CONN
+        """
+    )
+    # 复盘笔记(期货模式详情页最下方)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_reviews (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode        TEXT    NOT NULL DEFAULT 'options',
+            underlying  TEXT    NOT NULL DEFAULT '',
+            review_at   TEXT    NOT NULL,     -- ISO 时间, 默认当前时间
+            content     TEXT    NOT NULL DEFAULT '',
+            created_at  TEXT
+        )
+        """
+    )
+    # ---- 老库补列(幂等): trade_records.mode/初次止损止盈/测算快照; 监控池.mode ----
+    def _ensure_cols(table, cols):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table).fetchall()}
+        for name, decl in cols:
+            if name not in have:
+                conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
+    _ensure_cols("trade_records", [
+        ("mode", "TEXT NOT NULL DEFAULT 'options'"),   # 'options' 期权 / 'futures' 期货
+        ("init_stop", "REAL"),                          # 期货: 初次止损价
+        ("init_target", "REAL"),                        # 期货: 初次止盈价
+        ("calc_json", "TEXT"),                          # 期货: 开仓计算器测算结果快照(JSON)
+    ])
+    _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
+    _ensure_cols("trade_reviews", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
 
 
 def _calc_record_metrics(initial_equity, end_equity, cash_flow):
@@ -1506,6 +1573,12 @@ def detect_call_put(c):
     return s[i].upper() if i is not None else ""
 
 
+def _mode_arg(v):
+    """解析 mode 参数: 只认 options/futures, 其余一律回退 options(老前端不带该参数时行为不变)"""
+    m = (v[0] if isinstance(v, (list, tuple)) and v else v) or "options"
+    return m if m in ("options", "futures") else "options"
+
+
 def _trade_record_to_dict(r):
     return {
         "id": r["id"],
@@ -1526,22 +1599,27 @@ def _trade_record_to_dict(r):
         "pnl": r["pnl"],
         "close_date": r["close_date"] or "",
         "note": r["note"] or "",
+        "mode": (r["mode"] if "mode" in r.keys() else "options") or "options",
+        "init_stop": (r["init_stop"] if "init_stop" in r.keys() else None),
+        "init_target": (r["init_target"] if "init_target" in r.keys() else None),
+        "calc_json": (r["calc_json"] if "calc_json" in r.keys() else None),
         "created_at": r["created_at"] or "",
         "updated_at": r["updated_at"] or "",
     }
 
 
-def trade_list_records(strategy=None):
-    """列出交易记录; strategy=None 时返回所有策略的记录."""
+def trade_list_records(strategy=None, mode=None):
+    """列出交易记录; strategy=None 返回所有策略; mode=None 返回所有模式(导出用)."""
     db = _fund_db()
+    sql, args = "SELECT * FROM trade_records", []
+    where = []
     if strategy:
-        rows = db.execute(
-            "SELECT * FROM trade_records WHERE strategy=? ORDER BY id ASC",
-            (strategy,),
-        ).fetchall()
-    else:
-        rows = db.execute("SELECT * FROM trade_records ORDER BY id ASC").fetchall()
-    return [_trade_record_to_dict(r) for r in rows]
+        where.append("strategy=?"); args.append(strategy)
+    if mode:
+        where.append("IFNULL(mode,'options')=?"); args.append(mode)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return [_trade_record_to_dict(r) for r in db.execute(sql + " ORDER BY id ASC", args).fetchall()]
 
 
 def trade_upsert(payload):
@@ -1608,11 +1686,15 @@ def trade_upsert(payload):
                 raise ValueError("%s不能为负数" % _label)
 
     rec_id = payload.get("id")
+    # 模式: options 期权(默认, 老数据行为不变) / futures 期货; 两套记录互不可见
+    if payload.get("mode") not in ("options", "futures"):
+        payload["mode"] = "options"
     fields = (
         "underlying", "contract", "op_type",
         "open_date", "open_delta", "target_delta", "call_put",
         "direction", "open_price", "qty", "premium",
         "close_qty", "close_price", "pnl", "close_date", "note",
+        "mode", "init_stop", "init_target", "calc_json",
     )
     # 兜底: close 类型允许 qty/premium 为空(平仓字段用 close_qty/pnl 表达; API 直调漏传不报错)
     if payload.get("op_type") == "close":
@@ -1634,12 +1716,14 @@ def trade_upsert(payload):
             contract = payload.get("contract")
             underlying = payload.get("underlying")
             opened = db.execute(
-                "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=?",
-                (strategy, underlying, _k(contract)),
+                "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? "
+                "AND underlying=? AND UPPER(TRIM(contract))=? AND IFNULL(mode,'options')=?",
+                (strategy, underlying, _k(contract), payload["mode"]),
             ).fetchone()[0]
             closed_ex = db.execute(
-                "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=? AND id<>?",
-                (strategy, underlying, _k(contract), rec_id),
+                "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? "
+                "AND underlying=? AND UPPER(TRIM(contract))=? AND id<>? AND IFNULL(mode,'options')=?",
+                (strategy, underlying, _k(contract), rec_id, payload["mode"]),
             ).fetchone()[0]
             if cq > opened - closed_ex:
                 raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed_ex))
@@ -1664,8 +1748,8 @@ def trade_upsert(payload):
     _cmp_vals = [payload.get(c) for c in _cmp_cols]
     db.execute(
         "DELETE FROM trade_records WHERE id<>? AND strategy=? AND underlying=? "
-        "AND UPPER(TRIM(contract))=? AND " + _cmp_sql,
-        (new_id, strategy, payload["underlying"], payload["contract"].upper(), *_cmp_vals),
+        "AND UPPER(TRIM(contract))=? AND IFNULL(mode,'options')=? AND " + _cmp_sql,
+        (new_id, strategy, payload["underlying"], payload["contract"].upper(), payload["mode"], *_cmp_vals),
     )
     return new_id
 
@@ -1675,11 +1759,12 @@ def trade_delete(rec_id):
     db.execute("DELETE FROM trade_records WHERE id=?", (rec_id,))
 
 
-def trade_groups(strategy=None):
+def trade_groups(strategy=None, mode="options"):
     """主表汇总: 按 underlying 分组(主键=开仓标的), 输出每组:
        direction(主要方向), open_date(首次开仓), close_status(未平/部分平/全平),
-       total_pnl(已实现盈亏), last_close_date(最后平仓日)."""
-    recs = trade_list_records(strategy)
+       total_pnl(已实现盈亏), last_close_date(最后平仓日).
+       mode: 'options' 期权模式 / 'futures' 期货模式 (两套记录互不可见)"""
+    recs = trade_list_records(strategy, mode)
     if not recs:
         return []
     by_u = {}
@@ -1745,12 +1830,13 @@ def trade_groups(strategy=None):
     return groups
 
 
-def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT):
+def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
     """单个标的详情: 上方持仓汇总(按 contract 分组, 仅算未平仓部分加权均价), 下方操作记录(按日期升序)."""
     db = _fund_db()
     rows = db.execute(
-        "SELECT * FROM trade_records WHERE strategy=? AND underlying=? ORDER BY id ASC",
-        (strategy, underlying),
+        "SELECT * FROM trade_records WHERE strategy=? AND underlying=? "
+        "AND IFNULL(mode,'options')=? ORDER BY id ASC",
+        (strategy, underlying, mode),
     ).fetchall()
     items = [_trade_record_to_dict(r) for r in rows]
     opens = [x for x in items if x["op_type"] == "open"]
@@ -1824,11 +1910,12 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT):
 
 
 # ----- 监控池快照 -----
-def trade_pool_list(strategy=TRADE_STRATEGY_DEFAULT):
+def trade_pool_list(strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
     db = _fund_db()
     rows = db.execute(
-        "SELECT * FROM trade_pool_snapshots WHERE strategy=? ORDER BY snapshot_date DESC, id DESC",
-        (strategy,),
+        "SELECT * FROM trade_pool_snapshots WHERE strategy=? AND IFNULL(mode,'options')=? "
+                "ORDER BY snapshot_date DESC, id DESC",
+        (strategy, mode),
     ).fetchall()
     out = []
     for r in rows:
@@ -1856,6 +1943,7 @@ def trade_pool_upsert(payload):
     contracts = [normalize_contract(c) for c in contracts]
     cs = json.dumps(contracts, ensure_ascii=False)
     note = payload.get("note") or ""
+    mode = payload.get("mode") if payload.get("mode") in ("options", "futures") else "options"
     rec_id = payload.get("id")
     if rec_id:
         existing = db.execute("SELECT snapshot_date FROM trade_pool_snapshots WHERE id=?", (rec_id,)).fetchone()
@@ -1868,8 +1956,9 @@ def trade_pool_upsert(payload):
         return rec_id
     today = payload.get("snapshot_date") or datetime.now().date().isoformat()
     db.execute(
-        "INSERT INTO trade_pool_snapshots (strategy, snapshot_date, contracts, note, created_at) VALUES (?, ?, ?, ?, ?)",
-        (TRADE_STRATEGY_DEFAULT, today, cs, note, now),
+        "INSERT INTO trade_pool_snapshots (strategy, snapshot_date, contracts, note, created_at, mode) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (TRADE_STRATEGY_DEFAULT, today, cs, note, now, mode),
     )
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -1887,6 +1976,49 @@ _TRADE_IMPORT_COLS = (
     "target_delta", "call_put", "direction", "open_price", "qty", "premium",
     "close_qty", "close_price", "pnl", "close_date", "note", "created_at", "updated_at",
 )
+
+
+def trade_review_to_dict(r):
+    return {"id": r["id"], "mode": (r["mode"] if "mode" in r.keys() else "options") or "options",
+            "underlying": r["underlying"] or "", "review_at": r["review_at"] or "",
+            "content": r["content"] or "", "created_at": r["created_at"] or ""}
+
+
+def trade_review_list(mode="options", underlying=None):
+    """复盘笔记列表: 按时间倒序(最近的在最上)。underlying=None → 该模式全部。"""
+    db = _fund_db()
+    sql = "SELECT * FROM trade_reviews WHERE IFNULL(mode,'options')=?"
+    args = [mode]
+    if underlying is not None:
+        sql += " AND underlying=?"; args.append(underlying)
+    rows = db.execute(sql + " ORDER BY review_at DESC, id DESC", args).fetchall()
+    return [trade_review_to_dict(r) for r in rows]
+
+
+def trade_review_upsert(payload):
+    """新增/更新复盘笔记。不传 review_at → 默认当前时间。"""
+    db = _fund_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    mode = payload.get("mode") if payload.get("mode") in ("options", "futures") else "options"
+    content = (payload.get("content") or "").strip()
+    if not content:
+        raise ValueError("复盘内容不能为空")
+    review_at = (payload.get("review_at") or "").strip() or now
+    rec_id = payload.get("id")
+    if rec_id:
+        if not db.execute("SELECT id FROM trade_reviews WHERE id=?", (rec_id,)).fetchone():
+            raise ValueError("复盘不存在 id=%s" % rec_id)
+        db.execute("UPDATE trade_reviews SET review_at=?, content=?, underlying=? WHERE id=?",
+                   (review_at, content, (payload.get("underlying") or "").strip(), rec_id))
+        return rec_id
+    db.execute(
+        "INSERT INTO trade_reviews (mode, underlying, review_at, content, created_at) VALUES (?,?,?,?,?)",
+        (mode, (payload.get("underlying") or "").strip(), review_at, content, now))
+    return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def trade_review_delete(rec_id):
+    _fund_db().execute("DELETE FROM trade_reviews WHERE id=?", (rec_id,))
 
 
 def trade_import_record(r):
@@ -2108,19 +2240,29 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/trades/groups":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             strategy = (qs.get("strategy") or [None])[0]   # None → 全部策略
-            self._send(200, _json({"ok": True, "groups": trade_groups(strategy)}))
+            mode = _mode_arg(qs.get("mode"))
+            self._send(200, _json({"ok": True, "groups": trade_groups(strategy, mode)}))
 
         elif path == "/api/trades/detail":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             underlying = qs.get("underlying", [""])[0]
             strategy = (qs.get("strategy") or [TRADE_STRATEGY_DEFAULT])[0]
+            mode = _mode_arg(qs.get("mode"))
             if not underlying:
                 self._send(200, _json({"ok": False, "error": "缺少 underlying"}))
                 return
-            self._send(200, _json({"ok": True, **trade_detail(underlying, strategy)}))
+            self._send(200, _json({"ok": True, **trade_detail(underlying, strategy, mode)}))
 
         elif path == "/api/trades/pool":
-            self._send(200, _json({"ok": True, "snapshots": trade_pool_list()}))
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            mode = _mode_arg(qs.get("mode"))
+            self._send(200, _json({"ok": True, "snapshots": trade_pool_list(TRADE_STRATEGY_DEFAULT, mode)}))
+
+        elif path == "/api/trades/reviews":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            mode = _mode_arg(qs.get("mode"))
+            u = (qs.get("underlying") or [None])[0]
+            self._send(200, _json({"ok": True, "reviews": trade_review_list(mode, u)}))
 
         elif path == "/api/funds/data-info":
             self._send(200, _json({"ok": True, **fund_data_info()}))
@@ -2256,6 +2398,11 @@ class Handler(BaseHTTPRequestHandler):
                 pinned = set_window_pin(bool(params.get("pin", True)))
                 self._send(200, _json({"ok": True, "pinned": pinned}))
                 return
+            elif path == "/api/trades/review/upsert":
+                result = {"ok": True, "id": trade_review_upsert(params)}
+            elif path == "/api/trades/review/delete":
+                trade_review_delete(params.get("id"))
+                result = {"ok": True}
             else:
                 self._send(404, _json({"ok": False, "error": "Not Found"}))
                 return
@@ -2441,7 +2588,7 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货开仓计算器</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.38">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.39">
 <script src="/chart.min.js"></script>
 <style>
 :root{
@@ -2761,6 +2908,14 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .chk input{accent-color:var(--accent);margin:0}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
+/* 期货/期权模式切换: 带 .opt-only 的元素只在期权模式显示(v50.39) */
+[data-tm="futures"] .opt-only{display:none !important}
+[data-tm="options"] .fut-only{display:none !important}
+/* 复盘笔记 */
+.review-item{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:8px}
+.review-item .rv-t{font-size:11.5px;color:var(--sub);display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.review-item .rv-c{font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.6}
+.review-item .rv-del{margin-left:auto;flex:none}
 .trades-layout.has-detail .trades-main{width:100%;min-width:0}
 .trades-layout.has-detail .trades-side{
   position:fixed;top:60px;right:0;width:min(1240px,86vw);height:calc(100vh - 60px);
@@ -3027,7 +3182,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 <div class="app-shell">
   <aside class="side" id="mainTabs">
     <div class="maintab active" data-tab="calc"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="var(--mk-main)" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="var(--mk-main)"/></svg></span><span class="mt">开仓计算</span><small>期货 · 期权</small></div>
-    <div class="maintab" data-tab="trades"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="48" height="11" rx="3" fill="var(--mk-main)"/><rect x="26" y="53" width="30" height="11" rx="3" fill="var(--mk-acc)"/></svg></span><span class="mt">交易记录</span><small>abe 期权</small></div>
+    <div class="maintab" data-tab="trades"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="48" height="11" rx="3" fill="var(--mk-main)"/><rect x="26" y="53" width="30" height="11" rx="3" fill="var(--mk-acc)"/></svg></span><span class="mt">交易记录</span><small>：期权模式</small></div>
+    <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>：期货模式</small></div>
     <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
     <div class="side-extras">
       <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬆</button>
@@ -3234,6 +3390,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="drow"><span class="k">按最大手数止盈可盈利（每手止盈 × 手数）</span><span class="v money bad" id="rMaxRewardF">—</span></div>
           <div class="drow"><span class="k">最大占用保证金（每手 × 手数）</span><span class="v money gold" id="rMarginUsedF">—</span></div>
         </div>
+        <div class="anim" style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn xs" id="btnAddToTrade" title="把当前开仓价/止损价/止盈价与上面的测算结果一键写入「交易记录：期货模式」">📥 加入记录</button>
+          <span class="dim" style="font-size:11.5px">写入「交易记录：期货模式」；标的默认取品种代码，可在记录里点 ✎ 补月份</span>
+        </div>
         <!-- 阶梯止盈: 以止损价差为 1R, 2R~5R 逐级目标价 (独立方块) -->
         <div class="ladder-block anim" id="rLadderF">
           <div class="ladder-hd">
@@ -3277,7 +3437,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <!-- 最近保存的方案 (期货/期权各自独立, 各最多3组, 一键调出) -->
       <div id="recentPlans" class="hidden" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:2px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
-          <span style="font-size:12.5px;color:var(--sub);letter-spacing:.5px">最近方案 <small style="opacity:.75">（最多保留最近 3 组）</small></span>
+          <span style="font-size:12.5px;color:var(--sub);letter-spacing:.5px">最近方案 <small style="opacity:.75">（最多保留最近 10 组）</small></span>
           <button class="btn xs ghost" id="btnSavePlan" style="margin-left:auto" title="保存当前参数为方案，点「调出」一键恢复并重算">💾 保存当前方案</button>
         </div>
         <div id="planList" style="display:flex;flex-direction:column;gap:6px"></div>
@@ -3392,11 +3552,11 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
         </div>
       </header>
-      <div class="trades-layout">
+      <div class="trades-layout" data-tm="options">
         <div class="trades-main">
           <div class="card results">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-              <h2 style="margin:0;flex:1;min-width:0"><span class="dot"></span>期权交易(按开仓时间倒序, 最近在最上, 默认 10 条)</h2>
+              <h2 style="margin:0;flex:1;min-width:0"><span class="dot"></span><span id="mainTableTitle">期权交易</span>(按开仓时间倒序, 最近在最上, 默认 10 条)</h2>
               <span id="tradesSearchHint" class="dim" style="font-size:12px;flex:none"></span>
               <button class="btn xs ghost" id="btnShowAllTrades" hidden style="flex:none" title="默认只显示最近 10 条, 点此展开全部">显示全部</button>
               <input id="tradesSearch" type="text" autocomplete="off" spellcheck="false"
@@ -3416,7 +3576,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           </div>
 
           <div class="card results" style="margin-top:14px">
-            <h2><span class="dot"></span>abe 期权监控池</h2>
+            <h2><span class="dot"></span><span id="poolTitle">abe 期权监控池</span></h2>
             <div id="poolArea"><div class="tip">暂无监控池快照，点下面按钮新建</div></div>
             <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn xs" id="btnNewPool">➕ 新建监控池快照</button>
@@ -3436,12 +3596,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               </div>
             </div>
             <div class="tip" id="tdMeta" style="margin:6px 0 10px"></div>
+            <div class="fut-only" id="tdCalcCard" style="margin:0 0 12px"></div>
             <h3 style="font-size:13px;margin:6px 0 8px;color:var(--accent2)">当前持仓(按合约汇总, 仅算未平仓部分)</h3>
             <div class="tblwrap">
               <table class="tbl trades-tbl">
                 <thead><tr>
-                  <th>合约代码</th><th>看涨看跌</th><th>方向</th>
-                  <th><span class="help-tip" data-tip="仅算未平仓部分(扣减已平仓后剩余的开仓手数)的加权均价, 不会受已平仓的开仓成本影响">开仓均价 ?</span></th><th>数量</th><th>权利金</th>
+                  <th>合约代码</th><th class="opt-only">看涨看跌</th><th>方向</th>
+                  <th><span class="help-tip" data-tip="仅算未平仓部分(扣减已平仓后剩余的开仓手数)的加权均价, 不会受已平仓的开仓成本影响">开仓均价 ?</span></th><th>数量</th><th class="th-prem">权利金</th>
                 </tr></thead>
                 <tbody id="tdHoldings"></tbody>
               </table>
@@ -3458,12 +3619,22 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               <table class="tbl trades-tbl">
                 <thead><tr>
                   <th>合约</th><th>日期</th><th>操作</th>
-                  <th>delta</th><th>目标</th><th>看涨看跌</th>
-                  <th>方向</th><th>数量</th><th>价格</th><th>权利金</th>
+                  <th class="opt-only">delta</th><th class="opt-only">目标</th><th class="opt-only">看涨看跌</th>
+                  <th>方向</th><th>数量</th><th>价格</th><th class="th-prem">权利金</th>
                   <th>平仓盈亏</th><th>状态</th><th>备注</th><th>操作</th>
                 </tr></thead>
                 <tbody id="tdOps"></tbody>
               </table>
+            </div>
+
+            <!-- 复盘笔记(期货模式) -->
+            <div class="fut-only" style="margin-top:16px;border-top:1px dashed var(--border);padding-top:12px">
+              <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                <h3 style="font-size:13px;margin:0;color:var(--accent2)">复盘笔记</h3>
+                <span class="dim" id="rvHint" style="font-size:11.5px"></span>
+                <button class="btn xs ghost" id="btnNewReview" style="margin-left:auto">➕ 新建复盘</button>
+              </div>
+              <div id="reviewList"><div class="tip">暂无复盘笔记，点右上角「新建复盘」记录一条</div></div>
             </div>
           </div>
         </aside>
@@ -3580,13 +3751,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
   <!-- 期权交易记录 录入/修改 弹窗 -->
   <div class="modalbg hidden" id="tradeModalBg">
-    <div class="modal" style="max-width:640px">
+    <div class="modal" style="max-width:640px" data-tm="options">
       <h3><span class="dot"></span><span id="tmTitle">新建开仓</span></h3>
       <div class="formgrid">
         <label><span class="req">开仓标的 <i>*</i></span>
           <input id="tmUnderlying" type="text" placeholder="如 ao611">
         </label>
-        <label id="tmContractWrap"><span class="req">合约代码 <i>*</i></span>
+        <label id="tmContractWrap" class="opt-only"><span class="req">合约代码 <i>*</i></span>
           <input id="tmContract" type="text" placeholder="如 ao611P2500">
         </label>
         <label id="tmOpTypeWrap" style="display:none">
@@ -3604,7 +3775,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <input id="tmCloseDate" type="date">
         </label>
 
-        <label>看涨/看跌
+        <label class="opt-only">看涨/看跌
           <select id="tmCallPut">
             <option value="">—</option>
             <option value="C">看涨</option>
@@ -3618,11 +3789,17 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           </select>
         </label>
 
-        <label>开仓 delta
+        <label class="opt-only">开仓 delta
           <input id="tmOpenDelta" type="number" step="0.01" min="0" max="1" placeholder="0.19">
         </label>
-        <label>目标 delta
+        <label class="opt-only">目标 delta
           <input id="tmTargetDelta" type="number" step="0.01" min="0" max="1" placeholder="0.45">
+        </label>
+        <label class="fut-only">初次止损价
+          <input id="tmInitStop" type="number" step="0.0001" min="0" placeholder="3450">
+        </label>
+        <label class="fut-only">初次止盈价
+          <input id="tmInitTarget" type="number" step="0.0001" min="0" placeholder="3650">
         </label>
 
         <label>开仓价
@@ -3640,7 +3817,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <span id="tmCloseQtyHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
 
-        <label>权利金(元)
+        <label><span class="th-prem-lbl">权利金(元)</span>
           <input id="tmPremium" type="number" step="0.01" min="0" placeholder="1400">
         </label>
         <label id="tmPnlWrap">平仓盈亏
@@ -3655,6 +3832,25 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="modal-actions">
         <button class="btn" id="tmCancel">取消</button>
         <button class="btn primary" id="tmSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 复盘笔记 弹窗 -->
+  <div class="modalbg hidden" id="reviewModalBg">
+    <div class="modal" style="max-width:560px">
+      <h3><span class="dot"></span><span id="rvTitle">新建复盘</span></h3>
+      <label>时间
+        <input id="rvAt" type="datetime-local">
+      </label>
+      <label style="margin-top:10px">内容
+        <textarea id="rvContent" rows="7" placeholder="今天怎么做的、哪里对、哪里错、下次怎么改…"
+          style="width:100%;resize:vertical;font-family:inherit;font-size:13px;line-height:1.6"></textarea>
+      </label>
+      <div id="rvError" style="color:#ff8484;font-size:12px;min-height:18px;margin-top:6px"></div>
+      <div class="modal-actions">
+        <button class="btn" id="rvCancel">取消</button>
+        <button class="btn primary" id="rvSave">保存</button>
       </div>
     </div>
   </div>
@@ -4195,7 +4391,9 @@ function calcFutures(){
     }).catch(()=>showError('应用服务连接已断开：请关闭窗口后重新双击桌面「期货开仓计算器」图标启动。测算在本机完成，无需联网。'));
 }
 
+let lastCalcF = null;   // 最近一次期货测算结果, 供「📥 加入记录」用
 function renderF(d){
+  lastCalcF = d;
   $('empty').classList.add('hidden');
   $('resultO').classList.add('hidden');
   $('resultF').classList.remove('hidden');
@@ -4322,9 +4520,9 @@ function showError(msg){
    最近方案 (期货 / 期权各自独立): 保存当前参数, 各最多保留 3 组; 平铺列表, 一键调出
    ================================================================= */
 const PLAN_KEY = 'oc_futures_plans';
-const PLAN_MAX = 3;
+const PLAN_MAX = 10;
 const PLAN_KEY_O = 'oc_options_plans';   // 期权方案独立存储, 与期货互不挤占
-const PLAN_MAX_O = 3;
+const PLAN_MAX_O = 10;
 let planList = [];
 let planListO = [];
 /* 当前模式对应的方案列表与上限 */
@@ -4350,6 +4548,71 @@ function persistPlans(){
   }
   renderPlans();
 }
+/* 把当前期货测算一键写入「交易记录：期货模式」 */
+async function addToTradeRecord(){
+  if (curMode !== 'futures'){ alert('请先切到开仓计算器的「期货模式」'); return; }
+  if (!selCode.F){ alert('请先选择开仓标的'); return; }
+  const eq = parseFloat($('equity').value);
+  const entry = parseFloat($('entry').value);
+  const stop = parseFloat($('stop').value);
+  const target = parseFloat($('target').value);
+  if (!(eq > 0 && entry > 0 && stop > 0 && target > 0)){
+    alert('请先完整填写：总权益、开仓价、止损价、止盈价');
+    return;
+  }
+  if (!lastCalcF){ alert('测算结果还没生成，请稍候再点'); return; }
+  const lots = lastCalcF.max_lots || 0;
+  if (!(lots > 0)){
+    alert('当前测算建议手数为 0（止损距离过大或预算不足），无法加入记录');
+    return;
+  }
+  const c = CONTRACTS.find(x => x.code.toLowerCase() === String(selCode.F).toLowerCase())
+    || {code: selCode.F, name: selCode.F};
+  const snap = {
+    code: c.code, name: c.name, dir: dirF,
+    entry: entry, stop: stop, target: target,
+    riskPct: fmtTrim(lastCalcF.risk_percent != null ? lastCalcF.risk_percent : 1),
+    budget: lastCalcF.budget,
+    lots: lots,
+    pl_ratio: lastCalcF.pl_ratio,
+    per_lot_risk: lastCalcF.per_lot_risk,
+    risk_used: lastCalcF.risk_used,
+    margin_used: lastCalcF.margin_used,
+    ladder: (lastCalcF.ladder || []).map(x => ({r: x.r, price: x.price})),
+  };
+  const payload = {
+    mode: 'futures',
+    underlying: c.code,
+    contract: c.code,
+    op_type: 'open',
+    direction: dirF === 'short' ? 'sell' : 'buy',
+    open_date: new Date().toISOString().slice(0, 10),
+    call_put: '',
+    open_price: entry,
+    qty: lots,
+    premium: lastCalcF.margin_used || 0,     // 期货: 该字段含义为「保证金」
+    init_stop: stop,
+    init_target: target,
+    calc_json: JSON.stringify(snap),
+    note: '来自开仓计算器 · ' + c.name + (dirF === 'short' ? ' 空头' : ' 多头')
+          + ' @' + fmtTrim(entry) + ' 止损' + fmtTrim(stop) + ' 止盈' + fmtTrim(target),
+  };
+  try {
+    const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)});
+    const d = await r.json();
+    if (!d.ok){ alert('加入记录失败：' + (d.error || '未知错误')); return; }
+    if (typeof TradeUI !== 'undefined'){
+      TradeUI.setMode('futures');
+      await TradeUI.refresh();
+    }
+    // 直接跳到交易记录：期货模式, 并打开该标的详情
+    const tab = document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]');
+    if (tab) tab.click();
+    if (typeof TradeUI !== 'undefined') TradeUI.loadDetail(c.code);
+  } catch (e) { alert('加入记录失败：' + e); }
+}
+
 function renderPlans(){
   const box = $('planList');
   if (!box) return;
@@ -4474,6 +4737,8 @@ function recallPlan(p){
 loadPlans();
 renderPlans();
 $('btnSavePlan').addEventListener('click', saveCurrentPlan);
+const _btnAttr = $('btnAddToTrade');
+if (_btnAttr) _btnAttr.addEventListener('click', addToTradeRecord);
 $('planList').addEventListener('click', e=>{
   const it = e.target.closest('.plans-item');
   if (!it || it.dataset.idx === undefined) return;
@@ -4576,6 +4841,43 @@ const TradeUI = {
   },
   contractFilter: '',   // 详情操作记录合约筛选(空=全部)
   MAX: 10,
+  mode: 'options',      // 'options' 期权模式 / 'futures' 期货模式(两个 tab 共用同一套界面)
+
+  /* 切模式: 只改状态与文案, 数据由 refresh() 拉 */
+  setMode(m){
+    const nm = (m === 'futures') ? 'futures' : 'options';
+    const changed = (this.mode !== nm);
+    this.mode = nm;
+    const isFut = nm === 'futures';
+    const lay = document.querySelector('.trades-layout'); if (lay) lay.dataset.tm = nm;
+    const md = $('tradeModalBg') && $('tradeModalBg').querySelector('.modal');
+    if (md) md.dataset.tm = nm;
+    if ($('mainTableTitle')) $('mainTableTitle').textContent = isFut ? '期货交易' : '期权交易';
+    if ($('poolTitle')) $('poolTitle').textContent = isFut ? '期货模式监控池' : 'abe 期权监控池';
+    document.querySelectorAll('.th-prem').forEach(el => { el.textContent = isFut ? '保证金' : '权利金'; });
+    const pl = document.querySelector('.th-prem-lbl');
+    if (pl) pl.textContent = isFut ? '保证金(元)' : '权利金(元)';
+    const se = $('tradesSearch');
+    if (se) se.placeholder = isFut ? '搜索 标的 / 状态 / 日期' : '搜索 标的 / 合约 / 状态 / 日期';
+    if ($('btnNewOpen')) $('btnNewOpen').textContent = '➕ 新建开仓';
+    if (changed){
+      this.detail = null; this.showAll = false; this.mainQuery = '';
+      if ($('tradesSearch')) $('tradesSearch').value = '';
+      if ($('tradesSearchClear')) $('tradesSearchClear').hidden = true;
+      this.closeDetail();
+    }
+  },
+
+  /* 方向文案: 期权 买入/卖出; 期货 多头/空头 */
+  dirTxt(d){
+    if (this.mode === 'futures') return d === 'buy' ? '多头' : (d === 'sell' ? '空头' : '—');
+    return d === 'buy' ? '买入' : (d === 'sell' ? '卖出' : '—');
+  },
+  /* 资金占用字段名: 期权 权利金 / 期货 保证金 */
+  premLabel(){ return this.mode === 'futures' ? '保证金' : '权利金'; },
+  /* 接口带 mode 参数 */
+  modeQ(){ return 'mode=' + this.mode; },
+  isFut(){ return this.mode === 'futures'; },
 
   fmtDate(d){
     if (!d) return '—';
@@ -4606,6 +4908,16 @@ const TradeUI = {
     $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
     $('btnNewPool').addEventListener('click', () => this.openPoolModal());
     $('btnPoolHistory').addEventListener('click', () => this.togglePoolHistory());
+    const _rv = $('btnNewReview');
+    if (_rv) _rv.addEventListener('click', () => this.openReviewModal());
+    const _rc = $('rvCancel');
+    if (_rc) _rc.addEventListener('click', () => this.closeReviewModal());
+    const _rs = $('rvSave');
+    if (_rs) _rs.addEventListener('click', () => this.submitReview());
+    const _rb = $('reviewModalBg');
+    if (_rb) _rb.addEventListener('click', e => { if (e.target === _rb) this.closeReviewModal(); });
+    const _at = $('rvAt');
+    if (_at) _at.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); this.submitReview(); } });
     $('tdClose').addEventListener('click', () => this.closeDetail());
     $('tdNewOpen').addEventListener('click', () => this.openEditModal('open', { underlying: this.detail ? this.detail.underlying : '' }));
     // 操作记录合约筛选
@@ -4644,8 +4956,8 @@ const TradeUI = {
   async refresh(){
     try {
       const [gr, pl] = await Promise.all([
-        fetchT('/api/trades/groups').then(r => r.json()),
-        fetchT('/api/trades/pool').then(r => r.json()),
+        fetchT('/api/trades/groups?' + this.modeQ()).then(r => r.json()),
+        fetchT('/api/trades/pool?' + this.modeQ()).then(r => r.json()),
       ]);
       this.groups = gr.ok ? gr.groups : [];
       this.pool = pl.ok ? pl.snapshots : [];
@@ -4683,7 +4995,7 @@ const TradeUI = {
       return;
     }
     tb.innerHTML = show.map(g => {
-      const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '—');
+      const dirTxt = this.dirTxt(g.direction);
       const dirTag = g.direction === 'buy' ? 'buy' : (g.direction === 'sell' ? 'sell' : '');
       const statusTag = g.close_status === '已平仓' ? 'closed' : (g.close_status === '部分平仓' ? 'partial' : 'unclosed');
       const pnl = g.total_pnl;
@@ -4731,7 +5043,7 @@ const TradeUI = {
 
   // 主表搜索: 命中 标的/合约/方向/状态/日期/盈亏; 空格分隔多个关键词时需全部命中
   matchGroup(g, q){
-    const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '');
+    const dirTxt = this.dirTxt(g.direction);
     const pnl = g.total_pnl;
     const hay = [
       g.underlying || '',
@@ -4747,12 +5059,126 @@ const TradeUI = {
 
   async loadDetail(underlying){
     try {
-      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying));
       const d = await r.json();
       if (!d.ok) { alert('加载详情失败: ' + d.error); return; }
       this.detail = d;
       this.renderDetail();
     } catch (e) { alert('加载详情失败: ' + e); }
+  },
+
+  /* 期货: 在 meta 行追加「初次止损/止盈」(取最早一条开仓记录上的值) */
+  futMetaExtra(d){
+    const opens = (d.operations || []).filter(o => o.op_type === 'open')
+      .sort((a, b) => String(a.open_date || '').localeCompare(String(b.open_date || '')));
+    const first = opens.find(o => o.init_stop != null || o.init_target != null) || opens[0] || {};
+    const s1 = first.init_stop != null ? first.init_stop.toLocaleString('en-US',{maximumFractionDigits:4}) : '—';
+    const t1 = first.init_target != null ? first.init_target.toLocaleString('en-US',{maximumFractionDigits:4}) : '—';
+    return `<br>初次止损价 <b>${s1}</b>&nbsp;&nbsp;初次止盈价 <b>${t1}</b>`;
+  },
+
+  /* 期货: 详情顶部展示来自开仓计算器的测算结果(取最早一条带快照的开仓记录) */
+  renderCalcCard(d){
+    const box = $('tdCalcCard');
+    if (!box) return;
+    if (!this.isFut()){ box.innerHTML = ''; return; }
+    const opens = (d.operations || []).filter(o => o.op_type === 'open')
+      .sort((a, b) => String(a.open_date || '').localeCompare(String(b.open_date || '')));
+    const src = opens.find(o => o.calc_json) || null;
+    let c = null;
+    if (src){ try { c = JSON.parse(src.calc_json); } catch(e){ c = null; } }
+    if (!c){
+      box.innerHTML = '<div class="tip" style="margin:0">暂无测算结果 — 在开仓计算器（期货模式）测算后点「📥 加入记录」，或编辑开仓记录补上。</div>';
+      return;
+    }
+    const money = v => v == null ? '—' : ('¥ ' + Number(v).toLocaleString('en-US',{maximumFractionDigits:2}));
+    const num = v => v == null ? '—' : Number(v).toLocaleString('en-US',{maximumFractionDigits:4});
+    const lad = (c.ladder || []).map(x => x.r + 'R ' + num(x.price)).join('  ·  ');
+    box.innerHTML =
+      '<div class="ratio-strip" style="margin-bottom:8px"><span class="l">开仓测算结果'
+      + '<span class="dim" style="font-size:11px">（开仓计算器 · ' + escHtml(c.name || c.code || '')
+      + ' ' + (c.dir === 'short' ? '空头' : '多头') + '）</span></span></div>'
+      + '<div class="details" style="margin-top:0">'
+      + '<div class="drow"><span class="k">开仓额度（预算）</span><span class="v money">' + money(c.budget) + '</span></div>'
+      + '<div class="drow"><span class="k">对应风险金额（权益 × ' + escHtml(String(c.riskPct)) + '%）</span><span class="v money good">' + money(c.budget) + '</span></div>'
+      + '<div class="drow"><span class="k">开仓手数</span><span class="v">' + (c.lots != null ? c.lots + ' 手' : '—') + '</span></div>'
+      + '<div class="drow"><span class="k">初次开仓盈亏比</span><span class="v">' + (c.pl_ratio != null ? Number(c.pl_ratio).toFixed(2) : '—') + '</span></div>'
+      + '<div class="drow"><span class="k">每手风险金额</span><span class="v money good">' + money(c.per_lot_risk) + '</span></div>'
+      + '<div class="drow"><span class="k">实际最大风险金额（每手风险 × 手数）</span><span class="v money good">' + money(c.risk_used) + '</span></div>'
+      + '<div class="drow"><span class="k">阶梯止盈参考价位</span><span class="v money gold">' + (lad || '—') + '</span></div>'
+      + '</div>';
+  },
+
+  /* ---- 复盘笔记 ---- */
+  async loadReviews(){
+    if (!this.isFut()){ this.reviews = []; this.renderReviews(); return; }
+    const u = (this.detail && this.detail.underlying) || '';
+    try {
+      const r = await fetchT('/api/trades/reviews?mode=futures&underlying=' + encodeURIComponent(u));
+      const d = await r.json();
+      this.reviews = d.ok ? (d.reviews || []) : [];
+    } catch (e) { this.reviews = []; }
+    this.renderReviews();
+  },
+  renderReviews(){
+    const box = $('reviewList');
+    if (!box) return;
+    const isFut = this.isFut();
+    const wrap = box.closest('.fut-only');
+    if (wrap) wrap.hidden = !isFut;
+    if (!isFut){ box.innerHTML = ''; return; }
+    const list = this.reviews || [];
+    if ($('rvHint')) $('rvHint').textContent = list.length ? ('共 ' + list.length + ' 条 · 按时间倒序') : '';
+    if (!list.length){
+      box.innerHTML = '<div class="tip">暂无复盘笔记，点右上角「新建复盘」记录一条</div>';
+      return;
+    }
+    box.innerHTML = list.map(x =>
+      '<div class="review-item"><div class="rv-t"><span>🕘 '
+      + escHtml(String(x.review_at || '').replace('T', ' ').slice(0, 16)) + '</span>'
+      + '<button class="btn xs ghost rv-del" data-rvdel="' + x.id + '">删除</button></div>'
+      + '<div class="rv-c">' + escHtml(x.content) + '</div></div>').join('');
+    box.querySelectorAll('[data-rvdel]').forEach(b =>
+      b.addEventListener('click', () => this.deleteReview(+b.dataset.rvdel)));
+  },
+  openReviewModal(){
+    const bg = $('reviewModalBg'); if (!bg) return;
+    const n = new Date();
+    const p = v => String(v).padStart(2, '0');
+    $('rvAt').value = n.getFullYear() + '-' + p(n.getMonth() + 1) + '-' + p(n.getDate())
+      + 'T' + p(n.getHours()) + ':' + p(n.getMinutes());   // 默认当前时间
+    $('rvContent').value = '';
+    $('rvError').textContent = '';
+    bg.classList.remove('hidden');
+    setTimeout(() => $('rvContent').focus(), 30);
+  },
+  closeReviewModal(){ const bg = $('reviewModalBg'); if (bg) bg.classList.add('hidden'); },
+  async submitReview(){
+    const errBox = $('rvError');
+    const content = $('rvContent').value.trim();
+    if (!content){ errBox.textContent = '复盘内容不能为空'; return; }
+    const payload = {
+      mode: 'futures',
+      underlying: (this.detail && this.detail.underlying) || '',
+      review_at: $('rvAt').value ? $('rvAt').value.replace('T', 'T') : '',
+      content: content,
+    };
+    try {
+      const r = await fetchT('/api/trades/review/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)});
+      const d = await r.json();
+      if (!d.ok){ errBox.textContent = d.error || '保存失败'; return; }
+      this.closeReviewModal();
+      this.loadReviews();
+    } catch (e) { errBox.textContent = '保存失败: ' + e; }
+  },
+  async deleteReview(id){
+    if (!confirm('删除这条复盘笔记?')) return;
+    try {
+      await fetchT('/api/trades/review/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id})});
+    } catch (e) {}
+    this.loadReviews();
   },
 
   renderDetail(){
@@ -4763,7 +5189,7 @@ const TradeUI = {
     $('tdTitle').textContent = d.underlying + ' 详情';
     // 顶部 meta: 方向/开仓时间/是否平仓/平仓盈亏/平仓时间
     const g = this.groups.find(x => x.underlying === d.underlying) || {};
-    const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '—');
+    const dirTxt = this.dirTxt(g.direction);
     const pnl = g.total_pnl;
     const pnlStr = pnl ? (pnl > 0 ? '+CN¥' : (pnl < 0 ? '-CN¥' : 'CN¥')) + Math.abs(pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—';
     $('tdMeta').innerHTML = `
@@ -4771,7 +5197,8 @@ const TradeUI = {
       &nbsp;开仓时间 <b>${this.fmtDate(g.open_date)}</b>
       &nbsp;状态 <span class="tag ${g.close_status==='已平仓'?'closed':(g.close_status==='部分平仓'?'partial':'unclosed')}">${escHtml(g.close_status||'—')}</span>
       &nbsp;平仓盈亏 <b class="${pnl>0?'pos':(pnl<0?'neg':'')}">${pnlStr}</b>
-      &nbsp;平仓时间 <b>${this.fmtDate(g.last_close_date)}</b>`;
+      &nbsp;平仓时间 <b>${this.fmtDate(g.last_close_date)}</b>`
+      + (this.isFut() ? this.futMetaExtra(d) : '');
 
     // 持仓汇总
     const hb = $('tdHoldings');
@@ -4781,7 +5208,7 @@ const TradeUI = {
       hb.innerHTML = d.holdings.map(h => `<tr>
         <td><b>${escHtml(h.contract)}</b></td>
         <td><span class="tag ${h.call_put==='P'?'short':(h.call_put==='C'?'long':'')}">${h.call_put==='P'?'看跌':(h.call_put==='C'?'看涨':'—')}</span></td>
-        <td><span class="tag ${h.direction==='buy'?'buy':'sell'}">${h.direction==='buy'?'买入':'卖出'}</span></td>
+        <td><span class="tag ${h.direction==='buy'?'buy':'sell'}">${this.dirTxt(h.direction)}</span></td>
         <td>${h.open_price.toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${h.qty}</td>
         <td>${h.premium.toLocaleString('en-US',{maximumFractionDigits:2})}</td>
@@ -4802,6 +5229,8 @@ const TradeUI = {
     if (contracts.indexOf(prevSel) >= 0) selF.value = prevSel;
     this.contractFilter = selF.value;
     this.renderOps();
+    this.renderCalcCard(d);     // 期货: 顶部测算结果卡
+    this.loadReviews();         // 期货: 底部复盘笔记
   },
 
   renderOps(){
@@ -4836,7 +5265,7 @@ const TradeUI = {
         <td>${o.open_delta!=null ? o.open_delta : '—'}</td>
         <td>${o.target_delta!=null ? o.target_delta : '—'}</td>
         <td><span class="tag ${o.call_put==='P'?'short':(o.call_put==='C'?'long':'')}">${o.call_put==='P'?'看跌':(o.call_put==='C'?'看涨':'—')}</span></td>
-        <td><span class="tag ${o.direction==='buy'?'buy':'sell'}">${o.direction==='buy'?'买入':'卖出'}</span></td>
+        <td><span class="tag ${o.direction==='buy'?'buy':'sell'}">${this.dirTxt(o.direction)}</span></td>
         <td>${qtyTxt}</td>
         <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${premiumTxt}</td>
@@ -4966,7 +5395,8 @@ const TradeUI = {
     if (!bg) return;
     // 重置
     ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
-     'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote'].forEach(id=>{ $(id).value=''; });
+     'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote',
+     'tmInitStop','tmInitTarget'].forEach(id=>{ const el=$(id); if (el) el.value=''; });
     $('tmCallPut').value = preset.call_put || '';
     $('tmDirection').value = preset.direction || 'buy';
     $('tmOpType').value = type;
@@ -4974,10 +5404,29 @@ const TradeUI = {
     const isOpen = type === 'open';
     const isEdit = !!preset.id;
     $('tmTitle').textContent = isEdit ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
+    // 字段随模式切换(方向选项文案 + 期货隐藏合约代码)
+    this.syncModalFields(isOpen);
 
     // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取); 方向自动取反且隐藏
     const contractInput = $('tmContract');
-    if (!isOpen && isEdit){
+    if (this.isFut()){
+      // 期货: 标的即合约, 不需要填合约代码/看涨看跌/delta; 平仓方向按持仓方向给出「卖出平多头/买入平空头」
+      const inp = document.createElement('input');
+      inp.id = 'tmContract'; inp.type = 'text'; inp.readOnly = true;
+      contractInput.replaceWith(inp);
+      const u = (this.detail && this.detail.underlying) || preset.underlying || '';
+      $('tmUnderlying').value = u;
+      $('tmUnderlying').readOnly = !!u;
+      inp.value = this.normalizeContract(u);
+      if (!isOpen){
+        const h = (this.detail && this.detail.holdings && this.detail.holdings[0]) || null;
+        const openDir = h ? h.direction : 'buy';
+        $('tmDirection').value = (openDir === 'buy') ? 'sell' : 'buy';
+        $('tmCloseQtyHint').textContent = h && h.qty ? ('已开仓剩余 ' + h.qty + ' 手, 最多可平 ' + h.qty) : '';
+      } else {
+        $('tmCloseQtyHint').textContent = '';
+      }
+    } else if (!isOpen && isEdit){
       // 修改已有平仓记录: 直接用 preset 数据填充, 不依赖 holdings(全部平完时 holdings 为空也能编辑)
       const inp = document.createElement('input');
       inp.id = 'tmContract';
@@ -5090,6 +5539,8 @@ const TradeUI = {
       $('tmCallPut').value = preset.call_put || '';
       $('tmDirection').value = preset.direction || 'buy';
       $('tmNote').value = preset.note || '';
+      if ($('tmInitStop')) $('tmInitStop').value = preset.init_stop != null ? preset.init_stop : '';
+      if ($('tmInitTarget')) $('tmInitTarget').value = preset.init_target != null ? preset.init_target : '';
     } else {
       // 默认日期
       const today = new Date().toISOString().slice(0,10);
@@ -5117,6 +5568,22 @@ const TradeUI = {
     if (hint) hint.textContent = remaining ? ('已开仓剩余 ' + remaining + ' 手, 最多可平 ' + remaining) : '该合约无可平仓余量';
   },
 
+  /* 弹窗字段随模式/开平切换: 方向选项文案 + 期货补初次止损止盈 */
+  syncModalFields(isOpen){
+    const isFut = this.isFut();
+    const dir = $('tmDirection');
+    if (dir){
+      dir.innerHTML = isOpen
+        ? (isFut ? '<option value="buy">多头</option><option value="sell">空头</option>'
+                 : '<option value="buy">买入</option><option value="sell">卖出</option>')
+        : (isFut ? '<option value="sell">卖出平多头</option><option value="buy">买入平空头</option>'
+                 : '<option value="buy">买入</option><option value="sell">卖出</option>');
+    }
+    const cw = $('tmContractWrap'); if (cw) cw.hidden = isFut;   // 期货无需合约代码(用标的)
+    const md = $('tradeModalBg') && $('tradeModalBg').querySelector('.modal');
+    if (md) md.dataset.tm = this.mode;
+  },
+
   collectFromModal(){
     const isOpen = $('tmOpType').value === 'open';
     const contractEl = $('tmContract');
@@ -5139,7 +5606,18 @@ const TradeUI = {
       pnl: $('tmPnl').value === '' ? null : parseFloat($('tmPnl').value),
       close_date: $('tmCloseDate').value,
       note: $('tmNote').value,
+      mode: this.mode,
     };
+    // 期货: 无合约代码/看涨看跌/delta; 合约 = 标的; 补初次止损止盈
+    if (this.isFut()){
+      fields.contract = TradeUI.normalizeContract(fields.underlying);
+      fields.call_put = '';
+      fields.open_delta = null;
+      fields.target_delta = null;
+      const _s = $('tmInitStop').value, _t = $('tmInitTarget').value;
+      fields.init_stop = _s === '' ? null : parseFloat(_s);
+      fields.init_target = _t === '' ? null : parseFloat(_t);
+    }
     return fields;
   },
 
@@ -5179,7 +5657,7 @@ const TradeUI = {
   /* 主表行修改/删除: 编辑最新一条 open 记录 / 删除该 underlying 全部记录 */
   async editUnderlying(underlying){
     try {
-      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying));
       const d = await r.json();
       if (!d.ok || !d.operations.length){ alert('无记录可编辑'); return; }
       // 取最早一条 open 记录(代表性"开仓内容")
@@ -5193,7 +5671,7 @@ const TradeUI = {
   async deleteUnderlying(underlying){
     if (!confirm('确认删除 ' + underlying + ' 的全部交易记录? 此操作不可恢复')) return;
     try {
-      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying));
       const d = await r.json();
       if (!d.ok){ alert('加载失败'); return; }
       for (const op of d.operations){
@@ -5302,23 +5780,28 @@ const FundUI = {
         localStorage.setItem('oc-last-tab', tab);
         $('calcArea').classList.toggle('hidden', tab !== 'calc');
         $('fundsArea').classList.toggle('hidden', tab !== 'funds');
-        $('tradesArea').classList.toggle('hidden', tab !== 'trades');
+        const isTradeTab = (tab === 'trades' || tab === 'tradesFut');
+        $('tradesArea').classList.toggle('hidden', !isTradeTab);
+        // 两个交易记录 tab 共用同一套界面, 靠 mode 切换字段与标签
+        if (isTradeTab && typeof TradeUI !== 'undefined') TradeUI.setMode(tab === 'tradesFut' ? 'futures' : 'options');
         // header 标题随 tab 联动
         const titles = {
           calc:   {t:'期货开仓计算器', s:'风控仓位计算 · 盈亏比决策 · 保证金测算'},
-          trades: {t:'abe 期权交易记录', s:'策略: abe · 期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
+          trades:    {t:'交易记录：期权模式', s:'期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
+          tradesFut: {t:'交易记录：期货模式', s:'期货开平仓逐笔记录 · 持仓汇总 · 复盘笔记'},
           funds:  {t:'资金曲线',        s:'abe · 威科夫 多策略记录'}
         };
         // header logo 跟随当前 tab, 与左侧栏图标保持一致
         const logos = {
           calc:   '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="#7FA8CC" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="#E8B255"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/></svg>',
-          trades: '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="48" height="11" rx="3" fill="#7FA8CC"/><rect x="26" y="53" width="30" height="11" rx="3" fill="#E8B255"/></svg>',
+          trades:    '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="48" height="11" rx="3" fill="#7FA8CC"/><rect x="26" y="53" width="30" height="11" rx="3" fill="#E8B255"/></svg>',
+          tradesFut: '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="30" height="11" rx="3" fill="#E8B255"/><rect x="26" y="53" width="48" height="11" rx="3" fill="#7FA8CC"/></svg>',
           funds:  '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="#7FA8CC" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="#E8B255"/></svg>'
         };
         const ti = titles[tab];
         if (ti) { $('appTitle').textContent = ti.t; $('appSubtitle').textContent = ti.s; }
         if (logos[tab] && $('logoIco')) $('logoIco').innerHTML = logos[tab];
-        if (tab === 'trades' && typeof TradeUI !== 'undefined') TradeUI.refresh();
+        if (isTradeTab && typeof TradeUI !== 'undefined') TradeUI.refresh();
         if (tab === 'funds' && (!this.monthly.length && !this.yearly.length)) {
           this.refreshAll();
         }
@@ -5326,7 +5809,7 @@ const FundUI = {
     });
     // 刷新后恢复上次所在页面(默认 calc)
     const saved = localStorage.getItem('oc-last-tab');
-    if (saved && saved !== 'calc' && ['trades','funds'].includes(saved)) {
+    if (saved && saved !== 'calc' && ['trades','tradesFut','funds'].includes(saved)) {
       document.querySelector('#mainTabs .maintab[data-tab="' + saved + '"]').click();
     }
   },

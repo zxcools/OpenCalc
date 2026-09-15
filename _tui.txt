@@ -1,0 +1,739 @@
+const TradeUI = {
+  groups: [],           // 主表行(按 underlying 聚合)
+  detail: null,         // 当前详情(underlying)
+  pool: [],             // 监控池快照历史
+  poolCollapsed: {},    // {date: true/false} 历史快照折叠状态
+  onlyOpen: false,      // 只展示未平仓
+  mainQuery: '',        // 主表搜索关键词(空=不过滤)
+  showAll: false,       // 是否展开全部(>10)
+
+  // 预处理: 空白是打字随手敲的 → 直接删; _ / 视为有意分段 → 统一成 '-'; 合并连续'-'; 去首尾'-'
+  //   'br 2610 C 15800' -> 'br-2610-C-15800' ; 'lc2611_C_144000' -> 'lc2611-C-144000'
+  tidySeps(s){
+    s = String(s || '').trim().replace(/\s+/g, '');
+    s = s.replace(/[_/]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return s;
+  },
+
+  // 合约代码归一化: 品种代码小写, C/P(看涨/看跌)大写, 分隔符统一
+  //   ⚠ 只改「月份/行权价之间」的 C/P — 品种代码自带 C/P 的多(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p),
+  //     整串盲目大写会把品种代码改坏
+  normalizeContract(c){
+    const low = this.tidySeps(c).toLowerCase();
+    if (!low) return low;
+    const i = this.findCpIndex(low);
+    if (i < 0) return low.replace(/-/g, '');
+    // C/P 两侧原本带 '-' 就保留分段, 否则输出紧凑写法
+    const ch = low[i].toUpperCase();
+    const hasL = i > 0 && low[i - 1] === '-';
+    const hasR = i + 1 < low.length && low[i + 1] === '-';
+    const left = low.slice(0, i).replace(/-/g, '');
+    const right = low.slice(i + 1).replace(/-/g, '');
+    if (!left) return right ? (ch + (hasR ? '-' : '') + right) : ch;
+    if (!right) return left + (hasL ? '-' : '') + ch;
+    return left + (hasL ? '-' : '') + ch + (hasR ? '-' : '') + right;
+  },
+
+  // 定位看涨看跌 C/P 的位置(与后端 find_cp_index 规则一致), 找不到返回 -1
+  //   紧凑式 lc2611c144000 / sf611c6800 | 分隔式 lc2611-c-144000 | 半分隔 lc2611-c144000
+  //   ⚠ 三重坑:
+  //     1) 24 个品种代码自带 C/P(玉米 c / 棉花 cf / 纸浆 sp / 聚丙烯 pp / 苹果 ap / 花生 pk);
+  //     2) 品种前缀的 c/p 也可能「看着合法」(hc2610P6000 里 c 与 P 都满足结构) → 取最右侧;
+  //     3) 判定依赖月份(3-4 位), 没有月份的写法不认(aoc5000 无法与品种前缀区分)
+  findCpIndex(s){
+    if (!s) return -1;
+    const SEP = '-_/ ';
+    const isSep = (v) => v === '' || SEP.indexOf(v) >= 0;
+    const isDigit = (v) => v >= '0' && v <= '9';
+    const runLeft = (i) => { let j = i - 1; while (j >= 0 && isDigit(s[j])) j--; return s.slice(j + 1, i); };
+    const runRight = (i) => { let j = i + 1; while (j < s.length && isDigit(s[j])) j++; return s.slice(i + 1, j); };
+    const hasMonth = (b) => /(^|[^0-9])[0-9]{3,4}([^0-9]|$)/.test(b);
+    const hasDigit = (b) => /[0-9]/.test(b);
+    const isMonthRun = (r) => r.length >= 3 && r.length <= 4;
+    let found = -1;
+    for (let i = 0; i < s.length; i++){
+      const ch = s[i];
+      if (ch !== 'c' && ch !== 'p') continue;
+      const left = i > 0 ? s[i - 1] : '';
+      const right = i + 1 < s.length ? s[i + 1] : '';
+      const lb = s.slice(0, i), rb = s.slice(i + 1);
+      let ok = false;
+      if (isDigit(left) && isDigit(right)){
+        // 紧凑式: 一侧是月份(3-4 位 run), 另一侧是行权价数字
+        if (isMonthRun(runLeft(i)) || isMonthRun(runRight(i))) ok = true;
+      } else if (isSep(left) && isSep(right)){
+        // 分隔式: 两侧块里须出现月份与行权价(月份可能在 C/P 左侧或右侧)
+        if ((hasMonth(lb) && hasDigit(rb)) || (hasDigit(lb) && hasMonth(rb))) ok = true;
+      } else if (isSep(left) && isDigit(right) && hasMonth(lb)){
+        ok = true;    // 半分隔式: lc2611-c144000
+      } else if (isDigit(left) && isSep(right) && hasMonth(rb)){
+        ok = true;    // 半分隔式(镜像)
+      }
+      if (ok) found = i;   // 继续往后找, 取最右侧
+    }
+    return found;
+  },
+
+  // 从合约代码推断看涨(C)/看跌(P), 识别不出返回 ''
+  detectCallPut(c){
+    const s = this.tidySeps(c).toLowerCase();
+    const i = this.findCpIndex(s);
+    return i >= 0 ? s[i].toUpperCase() : '';
+  },
+  contractFilter: '',   // 详情操作记录合约筛选(空=全部)
+  MAX: 10,
+
+  fmtDate(d){
+    if (!d) return '—';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+    return d;
+  },
+
+  async init(){
+    $('tradesOnlyOpen').addEventListener('change', e => { this.onlyOpen = e.target.checked; this.renderMain(); });
+    // 主表搜索框: 输入即筛选(与「只展示未平仓」叠加生效)
+    $('tradesSearch').addEventListener('input', e => {
+      this.mainQuery = e.target.value;
+      $('tradesSearchClear').hidden = !this.mainQuery.trim();
+      this.renderMain();
+    });
+    $('tradesSearchClear').addEventListener('click', () => {
+      this.mainQuery = '';
+      $('tradesSearch').value = '';
+      $('tradesSearchClear').hidden = true;
+      this.renderMain();
+      $('tradesSearch').focus();
+    });
+    // 输入框内按 Esc 快速清空
+    $('tradesSearch').addEventListener('keydown', e => {
+      if (e.key === 'Escape') $('tradesSearchClear').click();
+    });
+    $('btnShowAllTrades').addEventListener('click', () => { this.showAll = !this.showAll; this.renderMain(); });
+    $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
+    $('btnNewPool').addEventListener('click', () => this.openPoolModal());
+    $('btnPoolHistory').addEventListener('click', () => this.togglePoolHistory());
+    $('tdClose').addEventListener('click', () => this.closeDetail());
+    $('tdNewOpen').addEventListener('click', () => this.openEditModal('open', { underlying: this.detail ? this.detail.underlying : '' }));
+    // 操作记录合约筛选
+    $('tdContractFilter').addEventListener('change', e => {
+      this.contractFilter = e.target.value;
+      this.renderOps();
+    });
+    $('tdNewClose').addEventListener('click', () => {
+      if (!this.detail){ alert('请先在主表点开一个标的的详情'); return; }
+      if (!this.detail.holdings || !this.detail.holdings.length){ alert('当前持仓为空, 无可平仓的合约'); return; }
+      this.openEditModal('close', { underlying: this.detail.underlying });
+    });
+    // modal 关闭/保存
+    $('tmCancel').addEventListener('click', () => $('tradeModalBg').classList.add('hidden'));
+    $('tradeModalBg').addEventListener('click', e => { if (e.target === $('tradeModalBg')) $('tradeModalBg').classList.add('hidden'); });
+    $('tmSave').addEventListener('click', () => this.submitModal());
+    // 回车保存: 在 tradeModalBg 内任意 input/select 按 Enter 直接保存(shift+enter/textarea 不触发)
+    $('tradeModalBg').addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      if ($('tradeModalBg').classList.contains('hidden')) return;
+      if (e.target.tagName === 'TEXTAREA') return;
+      e.preventDefault();
+      $('tmSave').click();
+    });
+    // 侧边栏全局按钮: 委托给 FundUI(导出已含交易记录)
+    const se = $('btnExport'); const si = $('btnImport');
+    if (se) se.addEventListener('click', () => FundUI.exportBackup());
+    if (si) si.addEventListener('click', () => $('importFile').click());
+    const contact = $('btnContact');
+    if (contact) contact.addEventListener('click', () => {
+      const bg = $('contactBg'); if (bg) bg.classList.remove('hidden');
+    });
+    await this.refresh();
+  },
+
+  async refresh(){
+    try {
+      const [gr, pl] = await Promise.all([
+        fetchT('/api/trades/groups').then(r => r.json()),
+        fetchT('/api/trades/pool').then(r => r.json()),
+      ]);
+      this.groups = gr.ok ? gr.groups : [];
+      this.pool = pl.ok ? pl.snapshots : [];
+    } catch (e) { console.error('TradeUI refresh', e); this.groups = []; this.pool = []; }
+    this.renderMain();
+    this.renderPool();
+    if (this.detail) {
+      const u = this.detail.underlying;
+      this.loadDetail(u);
+    }
+  },
+
+  renderMain(){
+    const tb = document.querySelector('#tradesTable tbody');
+    let rows = this.groups.slice();
+    if (this.onlyOpen) rows = rows.filter(g => g.close_status !== '已平仓');
+    const q = (this.mainQuery || '').trim();
+    if (q) rows = rows.filter(g => this.matchGroup(g, q));
+    const total = rows.length;
+    // 搜索命中数提示
+    const hint = $('tradesSearchHint');
+    if (hint) hint.textContent = q ? ('筛选出 ' + total + ' 条') : '';
+    const limit = this.showAll ? total : this.MAX;
+    const show = rows.slice(0, limit);
+    const btnAll = $('btnShowAllTrades');
+    btnAll.hidden = total <= this.MAX;
+    btnAll.textContent = this.showAll ? '收起' : ('显示全部 ' + (total - this.MAX) + ' 条');
+    // 限高容器: 只要不是「展开且确实超长」, 就恢复自然高度
+    const tw = $('tradesTable').closest('.tblwrap');
+    if (tw && !(this.showAll && total > this.MAX)) { tw.style.maxHeight = ''; tw.classList.remove('capped'); }
+    if (!show.length){
+      const msg = q ? ('没有匹配「' + q + '」的记录') : '暂无记录，点上面「新建开仓」添加';
+      tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--sub)">'
+        + escHtml(msg) + '</td></tr>';
+      return;
+    }
+    tb.innerHTML = show.map(g => {
+      const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '—');
+      const dirTag = g.direction === 'buy' ? 'buy' : (g.direction === 'sell' ? 'sell' : '');
+      const statusTag = g.close_status === '已平仓' ? 'closed' : (g.close_status === '部分平仓' ? 'partial' : 'unclosed');
+      const pnl = g.total_pnl;
+      const pnlCls = pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '');
+      return `<tr class="clickable" data-u="${escHtml(g.underlying)}">
+        <td><b>${escHtml(g.underlying)}</b></td>
+        <td><span class="tag ${dirTag}">${dirTxt}</span></td>
+        <td>${this.fmtDate(g.open_date)}</td>
+        <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>
+        <td class="${pnlCls}" style="font-weight:600">${pnl ? (pnl > 0 ? '+' : '') + 'CN¥' + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+        <td>${this.fmtDate(g.last_close_date)}</td>
+        <td class="row-actions">
+          <button class="iconbtn" data-act="edit" data-u="${escHtml(g.underlying)}" title="修改开仓内容">✎</button>
+          <button class="iconbtn" data-act="del" data-u="${escHtml(g.underlying)}" title="删除该标的全部记录">🗑</button>
+        </td>
+      </tr>`;
+    }).join('');
+    // 展开态: 把高度锁成折叠态(表头 + MAX 行)的高度, 多出的行在容器内滚动 —— 页面高度与上方布局都不动
+    if (tw && this.showAll && total > this.MAX) {
+      const th = $('tradesTable').querySelector('thead');
+      const tr0 = tb.querySelector('tr');
+      const hHead = th ? th.getBoundingClientRect().height : 0;
+      const hRow = tr0 ? tr0.getBoundingClientRect().height : 0;
+      if (hHead && hRow) {
+        // +2 补表格自身边框/下沿, 与折叠态自然高度对齐(实测差 2px)
+        tw.style.maxHeight = (Math.ceil(hHead + hRow * this.MAX) + 2) + 'px';
+        tw.classList.add('capped');
+      }
+    }
+    // 行点击打开详情(操作列按钮不触发)
+    tb.querySelectorAll('tr.clickable').forEach(tr => {
+      tr.addEventListener('click', e => {
+        const btn = e.target.closest('[data-act]');
+        if (btn) {
+          e.stopPropagation();
+          const u = btn.dataset.u;
+          if (btn.dataset.act === 'edit') this.editUnderlying(u);
+          else if (btn.dataset.act === 'del') this.deleteUnderlying(u);
+          return;
+        }
+        this.loadDetail(tr.dataset.u);
+      });
+    });
+  },
+
+  // 主表搜索: 命中 标的/合约/方向/状态/日期/盈亏; 空格分隔多个关键词时需全部命中
+  matchGroup(g, q){
+    const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '');
+    const pnl = g.total_pnl;
+    const hay = [
+      g.underlying || '',
+      (g.contracts || []).join(' '),
+      dirTxt, g.direction || '',
+      g.close_status || '',
+      g.open_date || '', g.last_close_date || '',
+      pnl == null ? '' : String(pnl),
+      pnl ? ('CN¥' + pnl) : '',
+    ].join(' ').toLowerCase();
+    return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.indexOf(t) >= 0);
+  },
+
+  async loadDetail(underlying){
+    try {
+      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const d = await r.json();
+      if (!d.ok) { alert('加载详情失败: ' + d.error); return; }
+      this.detail = d;
+      this.renderDetail();
+    } catch (e) { alert('加载详情失败: ' + e); }
+  },
+
+  renderDetail(){
+    const d = this.detail;
+    if (!d) return;
+    document.querySelector('.trades-layout').classList.add('has-detail');
+    $('tradeDetailPanel').classList.remove('hidden');
+    $('tdTitle').textContent = d.underlying + ' 详情';
+    // 顶部 meta: 方向/开仓时间/是否平仓/平仓盈亏/平仓时间
+    const g = this.groups.find(x => x.underlying === d.underlying) || {};
+    const dirTxt = g.direction === 'buy' ? '买入' : (g.direction === 'sell' ? '卖出' : '—');
+    const pnl = g.total_pnl;
+    const pnlStr = pnl ? (pnl > 0 ? '+CN¥' : (pnl < 0 ? '-CN¥' : 'CN¥')) + Math.abs(pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—';
+    $('tdMeta').innerHTML = `
+      <span class="tag ${g.direction==='buy'?'buy':(g.direction==='sell'?'sell':'')}">${dirTxt}</span>
+      &nbsp;开仓时间 <b>${this.fmtDate(g.open_date)}</b>
+      &nbsp;状态 <span class="tag ${g.close_status==='已平仓'?'closed':(g.close_status==='部分平仓'?'partial':'unclosed')}">${escHtml(g.close_status||'—')}</span>
+      &nbsp;平仓盈亏 <b class="${pnl>0?'pos':(pnl<0?'neg':'')}">${pnlStr}</b>
+      &nbsp;平仓时间 <b>${this.fmtDate(g.last_close_date)}</b>`;
+
+    // 持仓汇总
+    const hb = $('tdHoldings');
+    if (!d.holdings.length){
+      hb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
+    } else {
+      hb.innerHTML = d.holdings.map(h => `<tr>
+        <td><b>${escHtml(h.contract)}</b></td>
+        <td><span class="tag ${h.call_put==='P'?'short':(h.call_put==='C'?'long':'')}">${h.call_put==='P'?'看跌':(h.call_put==='C'?'看涨':'—')}</span></td>
+        <td><span class="tag ${h.direction==='buy'?'buy':'sell'}">${h.direction==='buy'?'买入':'卖出'}</span></td>
+        <td>${h.open_price.toLocaleString('en-US',{maximumFractionDigits:4})}</td>
+        <td>${h.qty}</td>
+        <td>${h.premium.toLocaleString('en-US',{maximumFractionDigits:2})}</td>
+      </tr>`).join('');
+    }
+    // 合约筛选下拉: 选项 = 该标的下全部合约(按归一化后去重, 避免 br2610C15800 / br2610c15800 出现两行)
+    const _seen = {};
+    const contracts = [];
+    d.operations.forEach(o => {
+      const n = this.normalizeContract(o.contract);
+      const k = n.toUpperCase();
+      if (!_seen[k]){ _seen[k] = 1; contracts.push(n); }
+    });
+    const selF = $('tdContractFilter');
+    const prevSel = selF.value;
+    selF.innerHTML = '<option value="">全部合约</option>' + contracts.map(c =>
+      `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join('');
+    if (contracts.indexOf(prevSel) >= 0) selF.value = prevSel;
+    this.contractFilter = selF.value;
+    this.renderOps();
+  },
+
+  renderOps(){
+    const d = this.detail;
+    if (!d) return;
+    const ob = $('tdOps');
+    const _f = this.contractFilter ? this.contractFilter.toUpperCase() : '';
+    const ops = _f
+      ? d.operations.filter(o => this.normalizeContract(o.contract).toUpperCase() === _f)
+      : d.operations;
+    if (!ops.length){
+      ob.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:14px;color:var(--sub)">' +
+        (d.operations.length ? '该合约无操作记录' : '暂无操作记录') + '</td></tr>';
+      return;
+    }
+    ob.innerHTML = ops.map(o => {
+      const isOpen = o.op_type === 'open';
+      const dt = isOpen ? o.open_date : o.close_date;
+      const price = isOpen ? o.open_price : o.close_price;
+      // 计算该合约当前持仓状态(为该行提供 "状态" 字段)
+      const st = this._rowStatus(o, d);
+      const pnlCls = (o.pnl||0) > 0 ? 'pos' : ((o.pnl||0) < 0 ? 'neg' : '');
+      const opTag = isOpen ? 'open' : 'close';
+      const opTxt = isOpen ? '开仓' : '平仓';
+      // 权利金: 开仓显示金额, 平仓填 "/"(平仓不产生新权利金); 数量: 平仓显示 close_qty
+      const premiumTxt = isOpen ? o.premium.toLocaleString('en-US',{maximumFractionDigits:2}) : '/';
+      const qtyTxt = isOpen ? o.qty : (o.close_qty != null ? o.close_qty : o.qty);
+      return `<tr class="row-${opTag}">
+        <td><b>${escHtml(o.contract)}</b></td>
+        <td>${this.fmtDate(dt)}</td>
+        <td><span class="tag ${opTag}">${opTxt}</span></td>
+        <td>${o.open_delta!=null ? o.open_delta : '—'}</td>
+        <td>${o.target_delta!=null ? o.target_delta : '—'}</td>
+        <td><span class="tag ${o.call_put==='P'?'short':(o.call_put==='C'?'long':'')}">${o.call_put==='P'?'看跌':(o.call_put==='C'?'看涨':'—')}</span></td>
+        <td><span class="tag ${o.direction==='buy'?'buy':'sell'}">${o.direction==='buy'?'买入':'卖出'}</span></td>
+        <td>${qtyTxt}</td>
+        <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
+        <td>${premiumTxt}</td>
+        <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':(o.pnl<0?'-CN¥':'CN¥'))+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+        <td><span class="tag ${st.cls}">${st.txt}</span></td>
+        <td class="op-note"><span class="op-note-txt"${o.note ? ' title="' + escHtml(o.note) + '"' : ''}>${o.note ? escHtml(o.note) : '—'}</span></td>
+        <td class="row-actions">
+          <button class="iconbtn" data-edit="${o.id}" title="修改">✎</button>
+          <button class="iconbtn" data-del="${o.id}" title="删除">🗑</button>
+        </td>
+      </tr>`;
+    }).join('');
+    ob.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => {
+      const op = d.operations.find(x => x.id === +b.dataset.edit);
+      if (op) this.openEditModal(op.op_type, op);
+    }));
+    ob.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => this.deleteOp(+b.dataset.del)));
+  },
+
+  _rowStatus(op, detail){
+    // 统计该合约 open qty - close qty (FIFO): 当前剩余数量
+    const ops = detail.operations;
+    let opened = 0, closed = 0;
+    for (const x of ops){
+      if (x.contract !== op.contract) continue;
+      if (x.op_type === 'open') opened += x.qty;
+      else closed += (x.close_qty||0);
+    }
+    if (op.op_type === 'open'){
+      // 此 open 自身被后续 close 平掉的数量
+      let closedAfter = 0;
+      let seen = false;
+      for (const x of ops){
+        if (x === op){ seen = true; continue; }
+        if (!seen) continue;
+        if (x.contract !== op.contract) continue;
+        if (x.op_type === 'close') closedAfter += (x.close_qty||0);
+      }
+      const left = op.qty - closedAfter;
+      if (left <= 0) return { cls: 'closed', txt: '已平仓' };
+      if (closedAfter > 0) return { cls: 'partial', txt: '部分平仓' };
+      return { cls: 'unclosed', txt: '未平仓' };
+    } else {
+      // close 行: 显示此 close 是否为"全平"该 open
+      return { cls: 'close', txt: '平仓' };
+    }
+  },
+
+  closeDetail(){
+    this.detail = null;
+    $('tradeDetailPanel').classList.add('hidden');
+    document.querySelector('.trades-layout').classList.remove('has-detail');
+  },
+
+  renderPool(){
+    const box = $('poolArea');
+    if (!this.pool.length){
+      box.innerHTML = '<div class="tip">暂无监控池快照，点「➕ 新建监控池快照」记录当前品种</div>';
+      $('btnPoolHistory').hidden = true;
+      return;
+    }
+    $('btnPoolHistory').hidden = false;
+    // 最新快照展开, 历史快照折叠(可点击展开)
+    box.innerHTML = this.pool.map((s, idx) => {
+      const collapsed = idx > 0 && !this.poolCollapsed[s.snapshot_date];
+      const content = collapsed ? '' : `<div class="pool-content">${
+        s.contracts.map(c => `<span class="pool-chip">${escHtml(c)}</span>`).join('')
+      }</div>`;
+      const head = `<div class="pool-title${collapsed?' collapsed':''}" data-date="${escHtml(s.snapshot_date)}" data-id="${s.id}">
+        <span class="arrow">▼</span>
+        <span>${escHtml(s.snapshot_date)} 更新</span>
+        <span class="row-actions" style="margin-left:auto">
+          <button class="iconbtn" data-edit-pool="${s.id}" data-date="${escHtml(s.snapshot_date)}" data-cs='${escHtml(JSON.stringify(s.contracts))}' title="修改">✎</button>
+          <button class="iconbtn" data-del-pool="${s.id}" title="删除">🗑</button>
+        </span>
+      </div>`;
+      return `<div class="pool-block">${head}${content}</div>`;
+    }).join('');
+    box.querySelectorAll('.pool-title').forEach(t => t.addEventListener('click', e => {
+      const btn = e.target.closest('[data-edit-pool], [data-del-pool]');
+      if (btn) {
+        e.stopPropagation();
+        if (btn.hasAttribute('data-edit-pool')) {
+          this.openPoolModal({
+            id: +btn.dataset.editPool,
+            snapshot_date: btn.dataset.date,
+            contracts: JSON.parse(btn.dataset.cs),
+          });
+        } else {
+          this.deletePool(+btn.dataset.delPool);
+        }
+        return;
+      }
+      this.poolCollapsed[t.dataset.date] = !this.poolCollapsed[t.dataset.date];
+      this.renderPool();
+    }));
+    this.updatePoolHistoryBtn();
+  },
+
+  // 「查看历史快照」一键展开/收起历史快照(最新快照始终展开)
+  togglePoolHistory(){
+    const historical = this.pool.slice(1);   // 最新一条是 idx=0 始终展开
+    if (!historical.length) return;
+    const allExpanded = historical.every(s => this.poolCollapsed[s.snapshot_date] === true);
+    if (allExpanded){
+      // 当前全部展开 → 收起
+      historical.forEach(s => { this.poolCollapsed[s.snapshot_date] = false; });
+    } else {
+      // 当前有收起 → 全部展开
+      historical.forEach(s => { this.poolCollapsed[s.snapshot_date] = true; });
+    }
+    this.renderPool();
+  },
+
+  // 按当前折叠状态更新按钮文字
+  updatePoolHistoryBtn(){
+    const historical = this.pool.slice(1);
+    if (!historical.length){ $('btnPoolHistory').textContent = '📜 查看历史快照'; return; }
+    const allExpanded = historical.every(s => this.poolCollapsed[s.snapshot_date] === true);
+    $('btnPoolHistory').textContent = allExpanded ? '📜 收起历史快照' : '📜 查看历史快照';
+  },
+
+  /* ---------- 新建/编辑 开仓/平仓 弹框 (统一 modal) ---------- */
+  openEditModal(type, preset){
+    preset = preset || {};
+    const bg = $('tradeModalBg');
+    if (!bg) return;
+    // 重置
+    ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
+     'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote'].forEach(id=>{ $(id).value=''; });
+    $('tmCallPut').value = preset.call_put || '';
+    $('tmDirection').value = preset.direction || 'buy';
+    $('tmOpType').value = type;
+    $('tmError').textContent = '';
+    const isOpen = type === 'open';
+    const isEdit = !!preset.id;
+    $('tmTitle').textContent = isEdit ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
+
+    // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取); 方向自动取反且隐藏
+    const contractInput = $('tmContract');
+    if (!isOpen && isEdit){
+      // 修改已有平仓记录: 直接用 preset 数据填充, 不依赖 holdings(全部平完时 holdings 为空也能编辑)
+      const inp = document.createElement('input');
+      inp.id = 'tmContract';
+      inp.type = 'text';
+      contractInput.replaceWith(inp);
+      $('tmUnderlying').value = preset.underlying || '';
+      $('tmUnderlying').readOnly = true;
+      $('tmDirectionWrap').classList.add('disabled');
+      $('tmDirection').disabled = true;
+      $('tmDirection').value = preset.direction || 'sell';
+      $('tmCallPut').value = preset.call_put || '';
+      $('tmCallPut').disabled = true;
+      $('tmCloseQtyHint').textContent = '';
+    } else if (!isOpen && this.detail && this.detail.holdings && this.detail.holdings.length){
+      const sel = document.createElement('select');
+      sel.id = 'tmContract';
+      sel.dataset.contractSelect = '1';
+      this.detail.holdings.forEach((h, i) => {
+        const o = document.createElement('option');
+        o.value = h.contract;
+        o.dataset.remaining = h.qty;
+        o.dataset.opendir = h.direction;
+        o.dataset.callput = h.call_put || '';
+        o.textContent = `${h.contract} 看${h.call_put==='P'?'跌':'涨'} ${h.direction==='buy'?'买入':'卖出'} 余${h.qty}手 @均价${h.open_price}`;
+        if (i === 0) o.selected = true;
+        sel.appendChild(o);
+      });
+      contractInput.replaceWith(sel);
+      $('tmUnderlying').value = this.detail.underlying;
+      $('tmUnderlying').readOnly = true;
+      // 方向: 自动取反(跟随所选合约的开仓方向; 开仓买→平仓卖, 开仓卖→平仓买)
+      // 看涨看跌: 自动与原合约一致; 数量按实际平仓写; 权利金填 "/"(平仓不占用新权利金)
+      const _syncCp = () => {
+        const selEl = $('tmContract');
+        const opt = selEl.options[selEl.selectedIndex];
+        $('tmCallPut').value = opt ? (opt.dataset.callput || '') : '';
+      };
+      const _syncDir = () => {
+        const selEl = $('tmContract');
+        const opt = selEl.options[selEl.selectedIndex];
+        const openDir = opt ? (opt.dataset.opendir || 'buy') : 'buy';
+        $('tmDirection').value = openDir === 'buy' ? 'sell' : 'buy';
+      };
+      _syncDir(); _syncCp();
+      $('tmDirectionWrap').classList.add('disabled');
+      $('tmDirection').disabled = true;
+      $('tmContract').addEventListener('change', () => { _syncDir(); _syncCp(); this._refreshCloseQtyHint(); });
+      // 提示 close_qty 上限
+      this._refreshCloseQtyHint();
+    } else if (!isOpen){
+      alert('请先在详情页里打开一个标的, 再点击「新建平仓」');
+      return;
+    } else {
+      // 开仓: contract 是文本输入; 输入合约自动推断看涨看跌(带 P→看跌, 带 C→看涨, 忽略大小写)
+      const inp = document.createElement('input');
+      inp.id = 'tmContract';
+      inp.type = 'text';
+      inp.placeholder = '如 lc2611-C-144000 或 ao611P2500';
+      contractInput.replaceWith(inp);
+      $('tmUnderlying').value = preset.underlying || '';
+      $('tmUnderlying').readOnly = !!preset.underlying;
+      $('tmDirectionWrap').classList.remove('disabled');
+      $('tmDirection').disabled = false;
+      $('tmCloseQtyHint').textContent = '';
+      // 输入即自动填看涨看跌; 兼容 lc2611-C-144000(分隔) / ao611P2500(紧凑) 两种写法
+      // ⚠ 不能只按「有 C/P」判断 — 24 个品种代码自带 C/P(玉米 c / 棉花 cf / 纸浆 sp / 棕榈油 p / 聚丙烯 pp / 苹果 ap / 花生 pk)
+      const _autoCp = () => {
+        const cp = this.detectCallPut(inp.value);
+        if (cp) $('tmCallPut').value = cp;
+      };
+      inp.addEventListener('input', _autoCp);
+      // 失焦时把输入框内容格式化成规范写法(品种小写 + C/P 大写 + 分隔符统一), 与后端保存口径一致
+      inp.addEventListener('blur', () => {
+        const v = this.normalizeContract(inp.value);
+        if (v && v !== inp.value) inp.value = v;
+      });
+      if (!preset.call_put) _autoCp();
+    }
+
+    // 字段显示: 开仓需要 open_date/qty/premium/open_price; 平仓需要 close_date/close_qty/close_price/pnl
+    document.getElementById('tmOpenDate').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmOpenDelta').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmTargetDelta').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmOpenPrice').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmQty').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmPremium').parentElement.style.display = isOpen ? '' : 'none';
+    document.getElementById('tmCallPut').parentElement.style.display = '';   // 两模式都显示
+    document.getElementById('tmCallPut').disabled = !isOpen;                // 平仓自动, 只读
+    document.getElementById('tmCloseDate').parentElement.style.display = isOpen ? 'none' : '';
+    document.getElementById('tmCloseQtyWrap').style.display = isOpen ? 'none' : '';
+    document.getElementById('tmClosePriceWrap').style.display = isOpen ? 'none' : '';
+    document.getElementById('tmPnlWrap').style.display = isOpen ? 'none' : '';
+
+    // 预设值(编辑模式)
+    if (preset.id){
+      $('tmUnderlying').value = preset.underlying || '';
+      const contractEl = $('tmContract');
+      if (contractEl.tagName === 'INPUT') contractEl.value = preset.contract || '';
+      else if (contractEl.dataset.contractSelect){ /* 平仓 select 设 value */ contractEl.value = preset.contract || ''; }
+      $('tmOpenDate').value = preset.open_date || '';
+      $('tmCloseDate').value = preset.close_date || '';
+      $('tmOpenDelta').value = preset.open_delta != null ? preset.open_delta : '';
+      $('tmTargetDelta').value = preset.target_delta != null ? preset.target_delta : '';
+      $('tmOpenPrice').value = preset.open_price != null ? preset.open_price : '';
+      $('tmClosePrice').value = preset.close_price != null ? preset.close_price : '';
+      $('tmQty').value = preset.qty || '';
+      $('tmCloseQty').value = preset.close_qty || '';
+      $('tmPremium').value = preset.premium || '';
+      $('tmPnl').value = preset.pnl != null ? preset.pnl : '';
+      $('tmCallPut').value = preset.call_put || '';
+      $('tmDirection').value = preset.direction || 'buy';
+      $('tmNote').value = preset.note || '';
+    } else {
+      // 默认日期
+      const today = new Date().toISOString().slice(0,10);
+      if (isOpen) $('tmOpenDate').value = today;
+      else $('tmCloseDate').value = today;
+      // 开仓默认 contract = underlying (用户可改)
+      if (isOpen && preset.underlying) $('tmContract').value = preset.underlying;
+      // 行内+开仓默认 delta 0.3, 目标 0.45
+      if (isOpen && preset.underlying){
+        $('tmOpenDelta').value = '0.3';
+        $('tmTargetDelta').value = '0.45';
+      }
+    }
+    $('tmUnderlying').readOnly = preset.id ? true : (preset.underlying ? true : false);
+    bg.classList.remove('hidden');
+    bg.dataset.editing = preset.id || '';
+  },
+
+  _refreshCloseQtyHint(){
+    const sel = $('tmContract');
+    if (!sel || sel.tagName !== 'SELECT') return;
+    const opt = sel.options[sel.selectedIndex];
+    const remaining = opt ? +opt.dataset.remaining : 0;
+    const hint = $('tmCloseQtyHint');
+    if (hint) hint.textContent = remaining ? ('已开仓剩余 ' + remaining + ' 手, 最多可平 ' + remaining) : '该合约无可平仓余量';
+  },
+
+  collectFromModal(){
+    const isOpen = $('tmOpType').value === 'open';
+    const contractEl = $('tmContract');
+    const contractVal = contractEl.tagName === 'SELECT' ? contractEl.value : contractEl.value.trim();
+    const fields = {
+      id: $('tradeModalBg').dataset.editing || null,
+      op_type: isOpen ? 'open' : 'close',
+      underlying: $('tmUnderlying').value.trim(),
+      contract: TradeUI.normalizeContract(contractVal),
+      open_date: $('tmOpenDate').value,
+      open_delta: $('tmOpenDelta').value === '' ? null : parseFloat($('tmOpenDelta').value),
+      target_delta: $('tmTargetDelta').value === '' ? null : parseFloat($('tmTargetDelta').value),
+      call_put: $('tmCallPut').value,
+      direction: $('tmDirection').value,
+      open_price: $('tmOpenPrice').value === '' ? null : parseFloat($('tmOpenPrice').value),
+      qty: parseInt($('tmQty').value || '0', 10),
+      premium: parseFloat($('tmPremium').value || '0') || 0,
+      close_qty: parseInt($('tmCloseQty').value || '0', 10),
+      close_price: $('tmClosePrice').value === '' ? null : parseFloat($('tmClosePrice').value),
+      pnl: $('tmPnl').value === '' ? null : parseFloat($('tmPnl').value),
+      close_date: $('tmCloseDate').value,
+      note: $('tmNote').value,
+    };
+    return fields;
+  },
+
+  async submitModal(){
+    const f = this.collectFromModal();
+    const errBox = $('tmError');
+    if (!f.underlying) return errBox.textContent = '请填写开仓标的', false;
+    if (!f.contract) return errBox.textContent = '请填写合约代码', false;
+    if (f.op_type === 'open'){
+      if (!f.open_date) return errBox.textContent = '请填写开仓日期', false;
+      if (!(f.qty > 0)) return errBox.textContent = '请填写有效数量(>0)', false;
+    } else {
+      if (!f.close_date) return errBox.textContent = '请填写平仓日期', false;
+      if (!(f.close_qty > 0)) return errBox.textContent = '请填写平仓数量(>0)', false;
+    }
+    errBox.textContent = '';
+    try {
+      const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(f)});
+      const d = await r.json();
+      if (!d.ok) { errBox.textContent = '保存失败: ' + d.error; return false; }
+      $('tradeModalBg').classList.add('hidden');
+      await this.refresh();
+      return true;
+    } catch (e) { errBox.textContent = '保存失败: ' + fmtNetError(e); return false; }
+  },
+
+  async deleteOp(id){
+    if (!confirm('确认删除这条操作记录?')) return;
+    try {
+      const r = await fetchT('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+      const d = await r.json();
+      if (!d.ok) { alert('删除失败: ' + d.error); return; }
+      await this.refresh();
+    } catch (e) { alert('删除失败: ' + e); }
+  },
+
+  /* 主表行修改/删除: 编辑最新一条 open 记录 / 删除该 underlying 全部记录 */
+  async editUnderlying(underlying){
+    try {
+      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const d = await r.json();
+      if (!d.ok || !d.operations.length){ alert('无记录可编辑'); return; }
+      // 取最早一条 open 记录(代表性"开仓内容")
+      const open = d.operations.find(x => x.op_type === 'open');
+      if (!open){ alert('该标的没有开仓记录, 无需修改'); return; }
+      this.loadDetail(underlying);   // 同时展开分页面, 让用户看到全貌
+      this.openEditModal('open', open);
+    } catch (e) { alert('加载失败: ' + e); }
+  },
+
+  async deleteUnderlying(underlying){
+    if (!confirm('确认删除 ' + underlying + ' 的全部交易记录? 此操作不可恢复')) return;
+    try {
+      const r = await fetchT('/api/trades/detail?underlying=' + encodeURIComponent(underlying));
+      const d = await r.json();
+      if (!d.ok){ alert('加载失败'); return; }
+      for (const op of d.operations){
+        await fetchT('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+      }
+      this.closeDetail();
+      await this.refresh();
+    } catch (e) { alert('删除失败: ' + e); }
+  },
+
+  /* ---------- 监控池弹框 ---------- */
+  openPoolModal(preset){
+    preset = preset || {};
+    const cur = preset.contracts ? preset.contracts.join('、') : '';
+    const input = prompt('监控品种(逗号或顿号分隔, 如 si、lc、fu、ao、br):', cur);
+    if (input === null) return;
+    const contracts = input.split(/[,、， \t\n]+/).map(s => s.trim()).filter(Boolean);
+    if (!contracts.length) { alert('至少输入一个品种'); return; }
+    const date = preset.snapshot_date || new Date().toISOString().slice(0,10);
+    const payload = { id: preset.id || null, snapshot_date: date, contracts, note: '' };
+    fetchT('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})
+      .then(r => r.json()).then(d => {
+        if (!d.ok) { alert('保存失败: ' + d.error); return; }
+        this.refresh();
+      }).catch(e => alert('保存失败: ' + fmtNetError(e)));
+  },
+
+  async deletePool(id){
+    if (!confirm('确认删除这个监控池快照?')) return;
+    try {
+      const r = await fetchT('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})});
+      const d = await r.json();
+      if (!d.ok) { alert('删除失败: ' + d.error); return; }
+      await this.refresh();
+    } catch (e) { alert('删除失败: ' + e); }
+  },
+};
