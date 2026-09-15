@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5036            # 与 README 版本号 v50.35 对齐(数值比较用于单实例接管)
+APP_VERSION = 5037            # 与 README 版本号 v50.35 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -2435,7 +2435,7 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货开仓计算器</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.36">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.37">
 <script src="/chart.min.js"></script>
 <style>
 :root{
@@ -2770,6 +2770,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-side{animation:fadeSlide .25s ease}
 .trades-tbl th,.trades-tbl td{white-space:nowrap}
 .tblwrap{overflow-x:auto}
+.tblwrap.capped{overflow-y:auto}   /* 展开态: 高度锁定, 容器内滚动(表头 .tbl th 已 sticky 会自动吸顶) */
 /* 表头帮助问号 tooltip(仅算未平仓部分说明等) */
 .help-tip{position:relative;cursor:help;border-bottom:1px dashed var(--sub)}
 .help-tip:hover::after{
@@ -4600,6 +4601,9 @@ const TradeUI = {
     const btnAll = $('btnShowAllTrades');
     btnAll.hidden = total <= this.MAX;
     btnAll.textContent = this.showAll ? '收起' : ('显示全部 ' + (total - this.MAX) + ' 条');
+    // 限高容器: 只要不是「展开且确实超长」, 就恢复自然高度
+    const tw = $('tradesTable').closest('.tblwrap');
+    if (tw && !(this.showAll && total > this.MAX)) { tw.style.maxHeight = ''; tw.classList.remove('capped'); }
     if (!show.length){
       const msg = q ? ('没有匹配「' + q + '」的记录') : '暂无记录，点上面「新建开仓」添加';
       tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--sub)">'
@@ -4625,6 +4629,18 @@ const TradeUI = {
         </td>
       </tr>`;
     }).join('');
+    // 展开态: 把高度锁成折叠态(表头 + MAX 行)的高度, 多出的行在容器内滚动 —— 页面高度与上方布局都不动
+    if (tw && this.showAll && total > this.MAX) {
+      const th = $('tradesTable').querySelector('thead');
+      const tr0 = tb.querySelector('tr');
+      const hHead = th ? th.getBoundingClientRect().height : 0;
+      const hRow = tr0 ? tr0.getBoundingClientRect().height : 0;
+      if (hHead && hRow) {
+        // +2 补表格自身边框/下沿, 与折叠态自然高度对齐(实测差 2px)
+        tw.style.maxHeight = (Math.ceil(hHead + hRow * this.MAX) + 2) + 'px';
+        tw.classList.add('capped');
+      }
+    }
     // 行点击打开详情(操作列按钮不触发)
     tb.querySelectorAll('tr.clickable').forEach(tr => {
       tr.addEventListener('click', e => {

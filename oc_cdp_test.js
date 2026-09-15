@@ -982,13 +982,16 @@ async function main() {
     await new Promise(r => setTimeout(r, 900));
     const btn = document.getElementById('btnShowAllTrades');
     const rows = () => [...document.querySelectorAll('#tradesTable tbody tr.clickable')];
-    const collapsed = {n: rows().length, hidden: btn.hidden, label: btn.textContent.trim()};
+    const wrap = document.getElementById('tradesTable').closest('.tblwrap');
+    const geo = () => ({h: Math.round(wrap.getBoundingClientRect().height), ch: wrap.clientHeight,
+                        sh: wrap.scrollHeight, page: document.documentElement.scrollHeight, maxH: wrap.style.maxHeight});
+    const collapsed = {n: rows().length, hidden: btn.hidden, label: btn.textContent.trim(), g: geo()};
     btn.click();
     await new Promise(r => setTimeout(r, 500));
-    const expanded = {n: rows().length, hidden: btn.hidden, label: btn.textContent.trim()};
+    const expanded = {n: rows().length, hidden: btn.hidden, label: btn.textContent.trim(), g: geo()};
     btn.click();
     await new Promise(r => setTimeout(r, 500));
-    const back = {n: rows().length, label: btn.textContent.trim()};
+    const back = {n: rows().length, label: btn.textContent.trim(), g: geo()};
     // 资金曲线按钮: 可见性应只由资金曲线月度数决定(不交易日记录影响)
     const fBtn = document.getElementById('btnShowAllFunds');
     document.querySelector('#mainTabs .maintab[data-tab="funds"]').click();
@@ -1015,6 +1018,16 @@ async function main() {
   check('显示全部: 按钮文案带剩余条数', /显示全部\s*\d+\s*条/.test(tr.collapsed.label), tRun);
   check('显示全部: 点击后展开全部行', tr.expanded.n > 10 && tr.expanded.label === '收起', tRun);
   check('显示全部: 再点一次收起回 10 条', tr.back.n === 10, tRun);
+  // 展开后容器高度锁定为折叠态, 超出的行在容器内滚动(页面布局不跳)
+  check('显示全部: 展开后容器高度不变', Math.abs(tr.expanded.g.h - tr.collapsed.g.h) <= 2,
+        'collapsed=' + tr.collapsed.g.h + ' expanded=' + tr.expanded.g.h);
+  check('显示全部: 展开后超出的行在容器内滚动',
+        tr.expanded.g.sh > tr.expanded.g.ch && tr.expanded.g.ch === tr.expanded.g.h,
+        'scroll=' + tr.expanded.g.sh + ' client=' + tr.expanded.g.ch);
+  check('显示全部: 展开后页面总高度不变', tr.expanded.g.page === tr.collapsed.g.page,
+        'collapsed=' + tr.collapsed.g.page + ' expanded=' + tr.expanded.g.page);
+  check('显示全部: 收起后解除限高', tr.back.g.maxH === '' && tr.back.g.sh === tr.back.g.ch,
+        'maxH="' + tr.back.g.maxH + '"');
   check('显示全部: 资金曲线按钮归属资金曲线(可见性由月度数决定)',
         tr.fExists && tr.fShouldHidden === tr.fNowHidden, tRun);
 
