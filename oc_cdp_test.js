@@ -1171,13 +1171,65 @@ async function main() {
     await w(250);
     const rvNowDefault = q('rvAt').value;
     TradeUI.closeReviewModal();
+    // (v50.40) 分页面「新建开仓」「新建平仓」都不该出现 初次止损/止盈
+    q('tdNewOpen').click();
+    await w(400);
+    const detOpenInit = vis('tmInitStop') || vis('tmInitTarget');
+    q('tmCancel').click();
+    await w(250);
+    q('tdNewClose').click();
+    await w(400);
+    const detCloseInit = vis('tmInitStop') || vis('tmInitTarget');
+    const closeDirOpts = [...q('tmDirection').options].map(o => o.textContent);
+    q('tmCancel').click();
+    await w(250);
+    // (v50.40) 两张明细表: 表头可见列数必须等于数据行可见列数(期货模式曾经整体错位)
+    const vN = el => [...el.children].filter(c => c.offsetParent !== null).length;
+    const vHead = t => [...t.tHead.rows[0].children].filter(c => c.offsetParent !== null)
+                        .map(c => c.textContent.trim());
+    const colN = [...document.querySelectorAll('#tradeDetailPanel table.tbl')].map(t => {
+      const r = t.tBodies[0].rows[0];
+      // 空态行是单个 colspan 单元格: 直接拿 colspan 值当「数据列数」
+      const span = (r && r.children.length === 1 && r.children[0].colSpan > 1)
+        ? +r.children[0].colSpan : 0;
+      return {head: vN(t.tHead.rows[0]), span, body: r ? vN(r) : -1, names: vHead(t)};
+    });
+    // (v50.40) 阶梯止盈: 详情卡里应是和计算器一样的 rung 方块, 不再是单行文本
+    const dt0 = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efut01')).json();
+    const op0 = (dt0.operations || []).find(o => o.op_type === 'open');
+    const snap0 = {code: 'e2efut01', name: '测试期货', dir: 'short', entry: 3500, stop: 3450, target: 3650,
+      riskPct: 1.5, budget: 1350, lots: 3, pl_ratio: 2.96, per_lot_risk: 1330, risk_used: 3990,
+      margin_used: 1680, ladder: [{r:2,price:3400},{r:3,price:3350},{r:4,price:3300},{r:5,price:3250}]};
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(Object.assign({}, op0, {calc_json: JSON.stringify(snap0)}))});
+    await TradeUI.loadDetail('e2efut01');
+    await w(700);
+    const ladBlk = q('tdCalcCard').querySelector('.ladder-block');
+    const ladHtml = ladBlk ? ladBlk.innerHTML : '';
+    const ladTxt = ladBlk ? ladBlk.textContent.replace(/\s+/g, ' ').trim() : '';
+    const rungN = q('tdCalcCard').querySelectorAll('.rung').length;
+    const rqShort = q('tdCalcCard').querySelectorAll('.rung .rq.short').length;
+    // (v50.40) 复盘「修改」: 回填 -> 保存 -> 内容变、条数不变
+    const edBtn = document.querySelector('#reviewList [data-rvedit]');
+    edBtn.click();
+    await w(350);
+    const rvEditTitle = q('rvTitle').textContent;
+    const rvEditBack = q('rvContent').value;
+    const rvEditAt = q('rvAt').value;
+    q('rvContent').value = '第二条复盘(已改)';
+    await TradeUI.submitReview();
+    await w(700);
+    const rvAfter = [...document.querySelectorAll('#reviewList .review-item .rv-c')].map(x => x.textContent);
     // 清理
     await cleanUp('e2efut');
     await fetch('/api/trades/review/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: (await (await fetch('/api/trades/reviews?mode=futures')).json()).reviews[0].id})});
     const rvLeft = (await (await fetch('/api/trades/reviews?mode=futures')).json()).reviews.length;
     return JSON.stringify({tabOk, poolTitle, mainTitle, layTm, modal, saveOk: !!saveR, inFut, inOpt,
                            detailMeta, holdDirTxt, calcBox, rvAtDefault, rvItems, rvTimes,
-                           rvOptLen: (rvOpt.reviews || []).length, rvNowDefault, rvLeft});
+                           rvOptLen: (rvOpt.reviews || []).length, rvNowDefault, rvLeft,
+                           detOpenInit, detCloseInit, closeDirOpts, colN,
+                           ladBlk: !!ladBlk, ladHtml, ladTxt, rungN, rqShort,
+                           rvEditTitle, rvEditBack, rvEditAt, rvAfter});
   })()`);
   const fu = JSON.parse(futRun);
   check('期货模式: tab 切换后 TradeUI.mode = futures', fu.tabOk, futRun);
@@ -1201,6 +1253,37 @@ async function main() {
         JSON.stringify(fu.rvItems));
   check('复盘: 与期权模式隔离', fu.rvOptLen === 0, '期权复盘数=' + fu.rvOptLen);
   check('复盘: 删除生效', fu.rvLeft === 1, '剩余=' + fu.rvLeft);
+
+  // ---- v50.40: 分页面明细表列对齐 / 阶梯方块 / 复盘修改 / 初次止损止盈字段收敛 ----
+  // 表头可见列数 == 数据行可见列数; 空态行(单 colspan 单元格)则比 colspan 值
+  const alignOk = c => c.head > 0 && (c.body === c.head || (c.span > 0 && c.span === c.head));
+  check('列对齐: 持仓表 表头可见列数 = 数据行列数',
+        alignOk(fu.colN[0]), JSON.stringify(fu.colN[0]));
+  check('列对齐: 操作表 表头可见列数 = 数据行列数',
+        alignOk(fu.colN[1]), JSON.stringify(fu.colN[1]));
+  check('列对齐: 持仓表 无「看涨看跌」列、末列是保证金',
+        fu.colN[0].names.indexOf('看涨看跌') < 0 && fu.colN[0].names.indexOf('保证金') >= 0,
+        JSON.stringify(fu.colN[0].names));
+  check('列对齐: 操作表 无「合约」列且无 delta/目标列',
+        fu.colN[1].names.indexOf('合约') < 0 && fu.colN[1].names.indexOf('delta') < 0
+        && fu.colN[1].names.indexOf('目标') < 0, JSON.stringify(fu.colN[1].names));
+  check('期货模式: 分页面「新建开仓」不显示 初次止损/止盈', !fu.detOpenInit, 'detOpenInit=' + fu.detOpenInit);
+  check('期货模式: 「新建平仓」不显示 初次止损/止盈', !fu.detCloseInit, 'detCloseInit=' + fu.detCloseInit);
+  check('期货模式: 新建平仓方向选项 = 卖出平多头/买入平空头',
+        JSON.stringify(fu.closeDirOpts) === JSON.stringify(['卖出平多头', '买入平空头']),
+        JSON.stringify(fu.closeDirOpts));
+  check('阶梯止盈: 详情卡渲染为与计算器一致的方块', fu.ladBlk, fu.ladTxt.slice(0, 120));
+  check('阶梯止盈: 4 档 rung(2R~5R) 且按做空取色',
+        fu.rungN === 4 && fu.rqShort === 4, 'rung=' + fu.rungN + ' short=' + fu.rqShort);
+  check('阶梯止盈: 含「每手浮盈」与「1R = 止损价差」',
+        /每手浮盈/.test(fu.ladHtml) && fu.ladTxt.indexOf('1R = 止损价差') >= 0,
+        fu.ladTxt.slice(0, 160));
+  check('复盘: 点「修改」回填原时间与原内容',
+        fu.rvEditTitle === '修改复盘' && fu.rvEditBack === '第二条复盘(新)'
+        && fu.rvEditAt === '2026-09-16T09:00',
+        JSON.stringify([fu.rvEditTitle, fu.rvEditBack, fu.rvEditAt]));
+  check('复盘: 修改后内容更新且条数不变',
+        fu.rvAfter.length === 2 && fu.rvAfter[0] === '第二条复盘(已改)', JSON.stringify(fu.rvAfter));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5039            # 与 README 版本号 v50.39 对齐(数值比较用于单实例接管)
+APP_VERSION = 5040            # 与 README 版本号 v50.40 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -2588,7 +2588,7 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货开仓计算器</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.39">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.40">
 <script src="/chart.min.js"></script>
 <style>
 :root{
@@ -2915,7 +2915,10 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .review-item{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:8px}
 .review-item .rv-t{font-size:11.5px;color:var(--sub);display:flex;align-items:center;gap:8px;margin-bottom:4px}
 .review-item .rv-c{font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.6}
-.review-item .rv-del{margin-left:auto;flex:none}
+.review-item .rv-acts{margin-left:auto;flex:none;display:flex;gap:6px;align-items:center}
+.review-item .rv-acts .btn{padding:2px 8px;font-size:11.5px;line-height:1.5}
+/* 测算卡里的阶梯止盈: 面板窄时自动换行, 不硬挤 4 列 */
+#tdCalcCard .ladder-grid{grid-template-columns:repeat(auto-fit,minmax(118px,1fr))}
 .trades-layout.has-detail .trades-main{width:100%;min-width:0}
 .trades-layout.has-detail .trades-side{
   position:fixed;top:60px;right:0;width:min(1240px,86vw);height:calc(100vh - 60px);
@@ -3609,7 +3612,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             </div>
                         <div class="op-filter-row">
               <h3 style="font-size:13px;margin:6px 0 8px;color:var(--accent2)">操作记录(按时间升序, 最近在最下方)</h3>
-              <label class="op-filter">筛选合约
+              <label class="op-filter opt-only">筛选合约
                 <select id="tdContractFilter">
                   <option value="">全部合约</option>
                 </select>
@@ -3618,7 +3621,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="tblwrap">
               <table class="tbl trades-tbl">
                 <thead><tr>
-                  <th>合约</th><th>日期</th><th>操作</th>
+                  <th class="opt-only">合约</th><th>日期</th><th>操作</th>
                   <th class="opt-only">delta</th><th class="opt-only">目标</th><th class="opt-only">看涨看跌</th>
                   <th>方向</th><th>数量</th><th>价格</th><th class="th-prem">权利金</th>
                   <th>平仓盈亏</th><th>状态</th><th>备注</th><th>操作</th>
@@ -3795,10 +3798,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <label class="opt-only">目标 delta
           <input id="tmTargetDelta" type="number" step="0.01" min="0" max="1" placeholder="0.45">
         </label>
-        <label class="fut-only">初次止损价
+        <label class="fut-only" id="tmInitStopWrap">初次止损价
           <input id="tmInitStop" type="number" step="0.0001" min="0" placeholder="3450">
         </label>
-        <label class="fut-only">初次止盈价
+        <label class="fut-only" id="tmInitTargetWrap">初次止盈价
           <input id="tmInitTarget" type="number" step="0.0001" min="0" placeholder="3650">
         </label>
 
@@ -4919,7 +4922,7 @@ const TradeUI = {
     const _at = $('rvAt');
     if (_at) _at.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); this.submitReview(); } });
     $('tdClose').addEventListener('click', () => this.closeDetail());
-    $('tdNewOpen').addEventListener('click', () => this.openEditModal('open', { underlying: this.detail ? this.detail.underlying : '' }));
+    $('tdNewOpen').addEventListener('click', () => this.openEditModal('open', { underlying: this.detail ? this.detail.underlying : '', fromDetail: true }));
     // 操作记录合约筛选
     $('tdContractFilter').addEventListener('change', e => {
       this.contractFilter = e.target.value;
@@ -5071,7 +5074,8 @@ const TradeUI = {
   futMetaExtra(d){
     const opens = (d.operations || []).filter(o => o.op_type === 'open')
       .sort((a, b) => String(a.open_date || '').localeCompare(String(b.open_date || '')));
-    const first = opens.find(o => o.init_stop != null || o.init_target != null) || opens[0] || {};
+    const first = opens.find(o => o.init_stop != null || o.init_target != null) || null;
+    if (!first) return '';   // 都没填就不显示这行, 免得留两个「—」
     const s1 = first.init_stop != null ? first.init_stop.toLocaleString('en-US',{maximumFractionDigits:4}) : '—';
     const t1 = first.init_target != null ? first.init_target.toLocaleString('en-US',{maximumFractionDigits:4}) : '—';
     return `<br>初次止损价 <b>${s1}</b>&nbsp;&nbsp;初次止盈价 <b>${t1}</b>`;
@@ -5092,8 +5096,7 @@ const TradeUI = {
       return;
     }
     const money = v => v == null ? '—' : ('¥ ' + Number(v).toLocaleString('en-US',{maximumFractionDigits:2}));
-    const num = v => v == null ? '—' : Number(v).toLocaleString('en-US',{maximumFractionDigits:4});
-    const lad = (c.ladder || []).map(x => x.r + 'R ' + num(x.price)).join('  ·  ');
+    /* 阶梯止盈改成与开仓计算器一致的独立方块, 见 ladderBlockHtml() */
     box.innerHTML =
       '<div class="ratio-strip" style="margin-bottom:8px"><span class="l">开仓测算结果'
       + '<span class="dim" style="font-size:11px">（开仓计算器 · ' + escHtml(c.name || c.code || '')
@@ -5105,7 +5108,34 @@ const TradeUI = {
       + '<div class="drow"><span class="k">初次开仓盈亏比</span><span class="v">' + (c.pl_ratio != null ? Number(c.pl_ratio).toFixed(2) : '—') + '</span></div>'
       + '<div class="drow"><span class="k">每手风险金额</span><span class="v money good">' + money(c.per_lot_risk) + '</span></div>'
       + '<div class="drow"><span class="k">实际最大风险金额（每手风险 × 手数）</span><span class="v money good">' + money(c.risk_used) + '</span></div>'
-      + '<div class="drow"><span class="k">阶梯止盈参考价位</span><span class="v money gold">' + (lad || '—') + '</span></div>'
+      + '</div>'
+      + this.ladderBlockHtml(c);
+  },
+
+  /* 阶梯止盈方块: 与「开仓计算器 · 期货模式」同一套 markup + CSS, 两处长相完全一致 */
+  ladderBlockHtml(c){
+    const dirLong = c.dir !== 'short';
+    const grid = (c.ladder && c.ladder.length)
+      ? c.ladder.map(s => {
+          const cls = dirLong ? 'long' : 'short';
+          const arrow = dirLong ? '↗' : '↘';
+          const profit = s.per_lot_profit != null
+            ? Number(s.per_lot_profit) : Number(c.per_lot_risk || 0) * Number(s.r);
+          return '<div class="rung" title="分批止盈：每达一档平一部分，剩余仓位目标移到下一档">'
+            + '<div class="rt"><b>' + s.r + 'R</b><span class="ad">' + arrow + '</span></div>'
+            + '<div class="rq ' + cls + '">' + fmtTrim(s.price) + '</div>'
+            + '<div class="rp">每手浮盈 <b>' + fmtMoney(profit) + '</b></div>'
+            + '</div>';
+        }).join('')
+      : '<div class="plans-empty">暂无阶梯止盈数据</div>';
+    return '<div class="ladder-block" style="margin-top:12px">'
+      + '<div class="ladder-hd">'
+      + '<span class="lb">🪜 阶梯止盈参考<span class="ladder-sub">'
+      + (dirLong ? '（多头 · 逐级上移）' : '（空头 · 逐级下移）') + '</span></span>'
+      + '<span class="ladder-note">1R = 止损价差'
+      + (c.entry != null ? ' · 开仓 ' + fmtTrim(c.entry) : '') + '</span>'
+      + '</div>'
+      + '<div class="ladder-grid">' + grid + '</div>'
       + '</div>';
   },
 
@@ -5136,18 +5166,32 @@ const TradeUI = {
     box.innerHTML = list.map(x =>
       '<div class="review-item"><div class="rv-t"><span>🕘 '
       + escHtml(String(x.review_at || '').replace('T', ' ').slice(0, 16)) + '</span>'
-      + '<button class="btn xs ghost rv-del" data-rvdel="' + x.id + '">删除</button></div>'
+      + '<span class="rv-acts">'
+      + '<button class="btn xs ghost" data-rvedit="' + x.id + '" title="修改这条复盘">✎ 修改</button>'
+      + '<button class="btn xs ghost rv-del" data-rvdel="' + x.id + '">删除</button>'
+      + '</span></div>'
       + '<div class="rv-c">' + escHtml(x.content) + '</div></div>').join('');
     box.querySelectorAll('[data-rvdel]').forEach(b =>
       b.addEventListener('click', () => this.deleteReview(+b.dataset.rvdel)));
+    box.querySelectorAll('[data-rvedit]').forEach(b =>
+      b.addEventListener('click', () => {
+        const rec = (this.reviews || []).find(x => String(x.id) === String(b.dataset.rvedit));
+        if (rec) this.openReviewModal(rec);
+      }));
   },
-  openReviewModal(){
+  openReviewModal(rec){
     const bg = $('reviewModalBg'); if (!bg) return;
+    const isEdit = !!(rec && rec.id);
     const n = new Date();
     const p = v => String(v).padStart(2, '0');
-    $('rvAt').value = n.getFullYear() + '-' + p(n.getMonth() + 1) + '-' + p(n.getDate())
-      + 'T' + p(n.getHours()) + ':' + p(n.getMinutes());   // 默认当前时间
-    $('rvContent').value = '';
+    const nowLocal = n.getFullYear() + '-' + p(n.getMonth() + 1) + '-' + p(n.getDate())
+      + 'T' + p(n.getHours()) + ':' + p(n.getMinutes());
+    bg.dataset.editing = isEdit ? String(rec.id) : '';
+    $('rvTitle').textContent = isEdit ? '修改复盘' : '新建复盘';
+    // 新建: 默认当前时间; 修改: 回填原时间与原内容
+    $('rvAt').value = isEdit ? String(rec.review_at || '').replace(' ', 'T').slice(0, 16) : nowLocal;
+    if (!$('rvAt').value) $('rvAt').value = nowLocal;
+    $('rvContent').value = isEdit ? (rec.content || '') : '';
     $('rvError').textContent = '';
     bg.classList.remove('hidden');
     setTimeout(() => $('rvContent').focus(), 30);
@@ -5157,12 +5201,14 @@ const TradeUI = {
     const errBox = $('rvError');
     const content = $('rvContent').value.trim();
     if (!content){ errBox.textContent = '复盘内容不能为空'; return; }
+    const editing = $('reviewModalBg').dataset.editing;
     const payload = {
       mode: 'futures',
       underlying: (this.detail && this.detail.underlying) || '',
-      review_at: $('rvAt').value ? $('rvAt').value.replace('T', 'T') : '',
+      review_at: $('rvAt').value || '',
       content: content,
     };
+    if (editing) payload.id = +editing;   // 带 id = 修改已有那条
     try {
       const r = await fetchT('/api/trades/review/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(payload)});
@@ -5203,11 +5249,11 @@ const TradeUI = {
     // 持仓汇总
     const hb = $('tdHoldings');
     if (!d.holdings.length){
-      hb.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
+      hb.innerHTML = '<tr><td colspan="' + (this.isFut() ? 5 : 6) + '" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
     } else {
       hb.innerHTML = d.holdings.map(h => `<tr>
         <td><b>${escHtml(h.contract)}</b></td>
-        <td><span class="tag ${h.call_put==='P'?'short':(h.call_put==='C'?'long':'')}">${h.call_put==='P'?'看跌':(h.call_put==='C'?'看涨':'—')}</span></td>
+        <td class="opt-only"><span class="tag ${h.call_put==='P'?'short':(h.call_put==='C'?'long':'')}">${h.call_put==='P'?'看跌':(h.call_put==='C'?'看涨':'—')}</span></td>
         <td><span class="tag ${h.direction==='buy'?'buy':'sell'}">${this.dirTxt(h.direction)}</span></td>
         <td>${h.open_price.toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${h.qty}</td>
@@ -5242,7 +5288,7 @@ const TradeUI = {
       ? d.operations.filter(o => this.normalizeContract(o.contract).toUpperCase() === _f)
       : d.operations;
     if (!ops.length){
-      ob.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:14px;color:var(--sub)">' +
+      ob.innerHTML = '<tr><td colspan="' + (this.isFut() ? 10 : 14) + '" style="text-align:center;padding:14px;color:var(--sub)">' +
         (d.operations.length ? '该合约无操作记录' : '暂无操作记录') + '</td></tr>';
       return;
     }
@@ -5259,12 +5305,12 @@ const TradeUI = {
       const premiumTxt = isOpen ? o.premium.toLocaleString('en-US',{maximumFractionDigits:2}) : '/';
       const qtyTxt = isOpen ? o.qty : (o.close_qty != null ? o.close_qty : o.qty);
       return `<tr class="row-${opTag}">
-        <td><b>${escHtml(o.contract)}</b></td>
+        <td class="opt-only"><b>${escHtml(o.contract)}</b></td>
         <td>${this.fmtDate(dt)}</td>
         <td><span class="tag ${opTag}">${opTxt}</span></td>
-        <td>${o.open_delta!=null ? o.open_delta : '—'}</td>
-        <td>${o.target_delta!=null ? o.target_delta : '—'}</td>
-        <td><span class="tag ${o.call_put==='P'?'short':(o.call_put==='C'?'long':'')}">${o.call_put==='P'?'看跌':(o.call_put==='C'?'看涨':'—')}</span></td>
+        <td class="opt-only">${o.open_delta!=null ? o.open_delta : '—'}</td>
+        <td class="opt-only">${o.target_delta!=null ? o.target_delta : '—'}</td>
+        <td class="opt-only"><span class="tag ${o.call_put==='P'?'short':(o.call_put==='C'?'long':'')}">${o.call_put==='P'?'看跌':(o.call_put==='C'?'看涨':'—')}</span></td>
         <td><span class="tag ${o.direction==='buy'?'buy':'sell'}">${this.dirTxt(o.direction)}</span></td>
         <td>${qtyTxt}</td>
         <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
@@ -5401,6 +5447,8 @@ const TradeUI = {
     $('tmDirection').value = preset.direction || 'buy';
     $('tmOpType').value = type;
     $('tmError').textContent = '';
+    // 标记「从详情页发起」: 详情页的新建开仓不显示初次止损/止盈(v50.40)
+    bg.dataset.fromDetail = preset.fromDetail ? '1' : '';
     const isOpen = type === 'open';
     const isEdit = !!preset.id;
     $('tmTitle').textContent = isEdit ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
@@ -5580,6 +5628,12 @@ const TradeUI = {
                  : '<option value="buy">买入</option><option value="sell">卖出</option>');
     }
     const cw = $('tmContractWrap'); if (cw) cw.hidden = isFut;   // 期货无需合约代码(用标的)
+    // 初次止损/止盈: 只有「期货模式 + 主页面新建开仓」需要 —— 分页面新建开仓、新建平仓都不需要(v50.40)
+    const bgEl = $('tradeModalBg');
+    const showInit = isFut && isOpen && !(bgEl && bgEl.dataset.fromDetail === '1');
+    ['tmInitStopWrap', 'tmInitTargetWrap'].forEach(id => {
+      const el = $(id); if (el) el.style.display = showInit ? '' : 'none';
+    });
     const md = $('tradeModalBg') && $('tradeModalBg').querySelector('.modal');
     if (md) md.dataset.tm = this.mode;
   },
