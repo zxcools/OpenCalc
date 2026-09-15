@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5035            # 与 README 版本号 v50.35 对齐(数值比较用于单实例接管)
+APP_VERSION = 5036            # 与 README 版本号 v50.35 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -2435,7 +2435,7 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>期货开仓计算器</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.35">
+<link rel="icon" type="image/x-icon" href="/favicon.ico?v=50.36">
 <script src="/chart.min.js"></script>
 <style>
 :root{
@@ -3309,7 +3309,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <!-- 月度明细表 -->
     <div class="card" style="margin-bottom:18px">
       <h2 style="display:flex;align-items:center;gap:10px"><span class="dot"></span><span id="monthlyTitle">abe · 月度明细</span>
-        <button class="btn sm" id="btnShowAll" style="margin-left:auto" title="记录较多时默认只显示最近 5 条">显示全部</button>
+        <button class="btn sm" id="btnShowAllFunds" style="margin-left:auto" title="记录较多时默认只显示最近 5 条">显示全部</button>
       </h2>
       <div class="tbl-scroll">
         <table class="tbl" id="tblMonthly">
@@ -3381,7 +3381,6 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <header class="trades-header">
         <div class="trades-toolbar">
           <label class="chk"><input type="checkbox" id="tradesOnlyOpen"> 只展示未平仓</label>
-          <button class="btn xs ghost" id="btnShowAll" hidden>📜 显示全部</button>
           <span class="spacer"></span>
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
         </div>
@@ -3390,8 +3389,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="trades-main">
           <div class="card results">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-              <h2 style="margin:0;flex:1;min-width:0"><span class="dot"></span>期权交易(按开仓时间倒序, 最近在最上, 最多 10 条)</h2>
+              <h2 style="margin:0;flex:1;min-width:0"><span class="dot"></span>期权交易(按开仓时间倒序, 最近在最上, 默认 10 条)</h2>
               <span id="tradesSearchHint" class="dim" style="font-size:12px;flex:none"></span>
+              <button class="btn xs ghost" id="btnShowAllTrades" hidden style="flex:none" title="默认只显示最近 10 条, 点此展开全部">显示全部</button>
               <input id="tradesSearch" type="text" autocomplete="off" spellcheck="false"
                      placeholder="搜索 标的 / 合约 / 状态 / 日期" style="width:240px;flex:none">
               <button class="btn xs ghost" id="tradesSearchClear" hidden style="flex:none">清除</button>
@@ -4529,7 +4529,7 @@ const TradeUI = {
     $('tradesSearch').addEventListener('keydown', e => {
       if (e.key === 'Escape') $('tradesSearchClear').click();
     });
-    $('btnShowAll').addEventListener('click', () => { this.showAll = true; this.renderMain(); });
+    $('btnShowAllTrades').addEventListener('click', () => { this.showAll = !this.showAll; this.renderMain(); });
     $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
     $('btnNewPool').addEventListener('click', () => this.openPoolModal());
     $('btnPoolHistory').addEventListener('click', () => this.togglePoolHistory());
@@ -4597,7 +4597,9 @@ const TradeUI = {
     if (hint) hint.textContent = q ? ('筛选出 ' + total + ' 条') : '';
     const limit = this.showAll ? total : this.MAX;
     const show = rows.slice(0, limit);
-    $('btnShowAll').hidden = !this.showAll && total > this.MAX;
+    const btnAll = $('btnShowAllTrades');
+    btnAll.hidden = total <= this.MAX;
+    btnAll.textContent = this.showAll ? '收起' : ('显示全部 ' + (total - this.MAX) + ' 条');
     if (!show.length){
       const msg = q ? ('没有匹配「' + q + '」的记录') : '暂无记录，点上面「新建开仓」添加';
       tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--sub)">'
@@ -5637,7 +5639,7 @@ const FundUI = {
     });
     $('pickPath').addEventListener('keydown', e=>{ if (e.key === 'Enter') this.pickLoad($('pickPath').value); });
     // 月度明细「显示全部 / 收起」
-    $('btnShowAll').addEventListener('click', ()=>{
+    $('btnShowAllFunds').addEventListener('click', ()=>{
       this.showAllRows = !this.showAllRows;
       this.renderTables();
     });
@@ -5797,8 +5799,8 @@ const FundUI = {
     $('monthlyTitle').textContent = titleStr + ' · 月度明细';
     $('monthlyEmpty').classList.toggle('hidden', sorted.length > 0);
     // 「显示全部 / 收起」按钮
-    $('btnShowAll').classList.toggle('hidden', !hasMore);
-    $('btnShowAll').textContent = this.showAllRows ? '收起' : ('显示全部 ' + (sorted.length - MAX_SHOW) + ' 条');
+    $('btnShowAllFunds').classList.toggle('hidden', !hasMore);
+    $('btnShowAllFunds').textContent = this.showAllRows ? '收起' : ('显示全部 ' + (sorted.length - MAX_SHOW) + ' 条');
     if (!isCombined) {
       tb.querySelectorAll('button[data-edit]').forEach(b=>{
         b.addEventListener('click', ()=>{

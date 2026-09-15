@@ -402,9 +402,9 @@ async function main() {
   await evalJs(ws, `document.querySelector('#tdClose')?.click()`);
   await sleep(400);
   // 1. 主页面 toolbar 只保留「新建开仓」(无「新建平仓」)
-  const mainToolbar = await evalJs(ws, `JSON.stringify({newOpen: !!document.getElementById('btnNewOpen'), newClose: !!document.getElementById('btnNewClose'), onlyOpen: !!document.getElementById('tradesOnlyOpen'), showAll: !!document.getElementById('btnShowAll')})`);
+  const mainToolbar = await evalJs(ws, `JSON.stringify({newOpen: !!document.getElementById('btnNewOpen'), newClose: !!document.getElementById('btnNewClose'), onlyOpen: !!document.getElementById('tradesOnlyOpen'), showAll: !!document.getElementById('btnShowAllTrades')})`);
   const mt = JSON.parse(mainToolbar);
-  check('主页面 toolbar 含「只展示未平仓」+「新建开仓」+「显示全部」', mt.onlyOpen && mt.newOpen && mt.showAll, mainToolbar);
+  check('交易记录页含「只展示未平仓」+「新建开仓」+「显示全部」', mt.onlyOpen && mt.newOpen && mt.showAll, mainToolbar);
   check('主页面 toolbar 移除「新建平仓」按钮', mt.newClose === false, mainToolbar);
   // 2. 详情面板 tdNewOpen + tdNewClose 都存在
   const sideBtns2 = await evalJs(ws, `JSON.stringify({tdNewOpen: !!document.getElementById('tdNewOpen'), tdNewClose: !!document.getElementById('tdNewClose')})`);
@@ -774,18 +774,24 @@ async function main() {
   check('弹窗显示自动备份位置与份数', dg.bkDir.length > 0 && /^\d+$/.test(dg.bkCnt), dlg);
   check('弹窗显示当前数据目录', dg.curDir.includes('e2e-data') || dg.curDir.length > 0, dlg);
 
-  // 立即备份: 备份份数应 +1(或至少返回成功)
+  // 立即备份: 备份目录满 10 份时会淘汰最旧的 → 份数不一定 +1, 改判「是否写入了新的快照」
   const bkBefore = await evalJs(ws, `(async () => {
+    const l = await (await fetch('/api/funds/backups')).json();
     const d = await (await fetch('/api/funds/data-info')).json();
-    return d.backup_count || 0;
+    const arr = l.backups || [];
+    return JSON.stringify({count: d.backup_count || 0, newest: arr.length ? arr[0].name : ''});
   })()`);
+  const bb = JSON.parse(bkBefore);
   const bkNow = await evalJs(ws, `(async () => {
     const r = await (await fetch('/api/funds/backup', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})).json();
+    const l = await (await fetch('/api/funds/backups')).json();
     const d = await (await fetch('/api/funds/data-info')).json();
-    return JSON.stringify({ok: r.ok, path: r.path||'', count: d.backup_count||0});
+    const arr = l.backups || [];
+    return JSON.stringify({ok: r.ok, path: r.path||'', count: d.backup_count||0, newest: arr.length ? arr[0].name : ''});
   })()`);
   const bn = JSON.parse(bkNow);
-  check('立即备份: 返回成功且份数增加', bn.ok && bn.count > bkBefore, 'before=' + bkBefore + ' ' + bkNow);
+  check('立即备份: 返回成功且写入了新快照', bn.ok && bn.newest !== '' && bn.newest !== bb.newest,
+        'before=' + bb.newest + ' after=' + bn.newest);
   check('备份文件落在数据目录的 backup 子目录', /backup/.test(bn.path), bkNow);
   // 备份列表接口可用
   const bkList = await evalJs(ws, `(async () => { const d = await (await fetch('/api/funds/backups')).json(); return JSON.stringify({ok:d.ok, n:(d.backups||[]).length}); })()`);
@@ -950,6 +956,67 @@ async function main() {
   } else {
     check('搜索: 支持按合约号命中', sc.hit, sCon);
   }
+
+  // ---- 场景T (v50.36): 「显示全部」按钮 — 交易记录卡片右上角 + 资金曲线 ----
+  // 历史 bug: 两处按钮共用 id="btnShowAll" → getElementById 永远取到资金曲线那个,
+  //           交易记录按钮永远 hidden, 资金曲线按钮又被交易记录的渲染逻辑覆盖
+  const tBtn = await evalJs(ws, `JSON.stringify((() => {
+    const a = document.getElementById('btnShowAllTrades');
+    const b = document.getElementById('btnShowAllFunds');
+    return {hasT: !!a, hasF: !!b, distinct: !!(a && b && a !== b),
+            tInCard: !!(a && a.closest('.card') && a.closest('.card').contains(document.getElementById('tradesTable')))};
+  })())`);
+  const tb2 = JSON.parse(tBtn);
+  check('显示全部按钮: 两个 id 各自独立(不再冲突)', tb2.hasT && tb2.hasF && tb2.distinct, tBtn);
+  check('显示全部按钮: 交易记录的在表格卡片右上角', tb2.tInCard, tBtn);
+
+  const tRun = await evalJs(ws, `(async () => {
+    const post = (p) => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)}).then(r=>r.json());
+    // 造 12 个标的, 保证超过主表上限 10
+    for (let i = 1; i <= 12; i++) {
+      await post({underlying: 'e2eall' + String(i).padStart(2,'0'), contract: 'e2eall' + i + 'C1000',
+                  op_type: 'open', direction: 'buy', open_date: '2026-08-' + String(i).padStart(2,'0'),
+                  call_put: 'C', open_price: 100, qty: 1, premium: 100});
+    }
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+    await new Promise(r => setTimeout(r, 900));
+    const btn = document.getElementById('btnShowAllTrades');
+    const rows = () => [...document.querySelectorAll('#tradesTable tbody tr.clickable')];
+    const collapsed = {n: rows().length, hidden: btn.hidden, label: btn.textContent.trim()};
+    btn.click();
+    await new Promise(r => setTimeout(r, 500));
+    const expanded = {n: rows().length, hidden: btn.hidden, label: btn.textContent.trim()};
+    btn.click();
+    await new Promise(r => setTimeout(r, 500));
+    const back = {n: rows().length, label: btn.textContent.trim()};
+    // 资金曲线按钮: 可见性应只由资金曲线月度数决定(不交易日记录影响)
+    const fBtn = document.getElementById('btnShowAllFunds');
+    document.querySelector('#mainTabs .maintab[data-tab="funds"]').click();
+    await new Promise(r => setTimeout(r, 700));
+    const fNowHidden = fBtn.classList.contains('hidden');
+    const monthRows = document.querySelectorAll('#tblMonthly tbody tr').length;
+    const fShouldHidden = monthRows <= 5;
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+    await new Promise(r => setTimeout(r, 500));
+    // 清理造的数据
+    const g = await (await fetch('/api/trades/groups')).json();
+    for (const it of (g.groups || [])) {
+      if (String(it.underlying).startsWith('e2eall')) {
+        const d = await (await fetch('/api/trades/detail?underlying=' + it.underlying)).json();
+        for (const op of (d.operations || [])) {
+          await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+        }
+      }
+    }
+    return JSON.stringify({collapsed, expanded, back, fExists: !!fBtn, fNowHidden, fShouldHidden, monthRows});
+  })()`);
+  const tr = JSON.parse(tRun);
+  check('显示全部: 默认只显示最近 10 条', tr.collapsed.n === 10 && tr.collapsed.hidden === false, tRun);
+  check('显示全部: 按钮文案带剩余条数', /显示全部\s*\d+\s*条/.test(tr.collapsed.label), tRun);
+  check('显示全部: 点击后展开全部行', tr.expanded.n > 10 && tr.expanded.label === '收起', tRun);
+  check('显示全部: 再点一次收起回 10 条', tr.back.n === 10, tRun);
+  check('显示全部: 资金曲线按钮归属资金曲线(可见性由月度数决定)',
+        tr.fExists && tr.fShouldHidden === tr.fNowHidden, tRun);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
