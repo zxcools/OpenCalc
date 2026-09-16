@@ -3,11 +3,14 @@
 //   1. 软件服务运行在 8765, ⚠⚠ 必须用测试数据目录启动, 否则会往真实记录里写测试数据:
 //        OC_DATA_DIR=<临时目录> python main.py      (或 OC_DATA_DIR=<临时目录> dist/OpenCalc.exe)
 //      脚本会自动检查: 服务未用 OC_DATA_DIR 锁定时拒绝运行(除非设 OC_E2E_FORCE=1)
-//   2. Chrome headless 调试端口 9222:
+//   2. Chrome headless 调试端口 9222(可用 OC_CDP_PORT 改):
 //      "C:\...\chrome.exe" --headless=new --disable-gpu --no-first-run \
 //        --remote-debugging-port=9222 --user-data-dir=<临时目录> about:blank
+//      ⚠ 上一轮被强杀会留下卡死的会话 → 换一个新端口 + 新 profile 目录重起最快
 //   3. node oc_cdp_test.js   (退出码 0=全过; 1=有断言失败; 2=脚本错误)
 const BASE = process.env.OC_E2E_BASE || 'http://127.0.0.1:8765';   // 测试时可指向别的端口
+// CDP 端口也可改(OC_CDP_PORT): 上一轮 E2E 被强杀会把旧会话卡死, 换个端口起新 Chrome 最省事
+const CDP_PORT = process.env.OC_CDP_PORT || '9222';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ⚠ 数据安全闸门: E2E 会写入/删除交易记录, 绝不能跑在真实数据上.
@@ -43,7 +46,7 @@ async function guardRealData() {
 async function getWsUrl() {
   for (let i = 0; i < 30; i++) {
     try {
-      const list = await (await fetch('http://127.0.0.1:9222/json/list')).json();
+      const list = await (await fetch('http://127.0.0.1:' + CDP_PORT + '/json/list')).json();
       const page = list.find(t => t.type === 'page');
       if (page) return page.webSocketDebuggerUrl;
     } catch (e) {}
@@ -1161,15 +1164,18 @@ async function main() {
     await w(400);
     const vis = id => { const el = q(id); if (!el) return false; const box = el.closest('label'); return !!(box && box.offsetParent !== null); };
     const modal = {
+      // v50.44: 期货也要填具体合约号了(原来「标的即合约」被隐藏)
       contractHidden: !vis('tmContract'),
+      contractLabel: (q('tmContractLabel') || {}).textContent || '',
       callPutHidden: !vis('tmCallPut'),
       deltaHidden: !vis('tmOpenDelta') && !vis('tmTargetDelta'),
       initStopShown: vis('tmInitStop'),
       initTargetShown: vis('tmInitTarget'),
       dirOpts: [...q('tmDirection').options].map(o => o.textContent),
     };
-    // 填一条期货开仓并保存
+    // 填一条期货开仓并保存(v50.44 起合约必填)
     q('tmUnderlying').value = 'e2efut01';
+    q('tmContract').value = 'e2efut2609';
     q('tmOpenPrice').value = '3500';
     q('tmQty').value = '3';
     q('tmPremium').value = '1680';
@@ -1223,6 +1229,44 @@ async function main() {
     await w(400);
     const detCloseInit = vis('tmInitStop') || vis('tmInitTarget');
     const closeDirOpts = [...q('tmDirection').options].map(o => o.textContent);
+    // (v50.44) 期货平仓: 合约改成下拉(带余量), 平仓数量超额要被前端直接拦下
+    const csel = q('tmContract');
+    const closeIsSel = !!(csel && csel.tagName === 'SELECT');
+    const closeOpt = closeIsSel ? (csel.options[csel.selectedIndex] || {}) : {};
+    const closeRemaining = closeIsSel ? +((closeOpt.dataset || {}).remaining || 0) : -1;
+    let closeSelTxt = closeIsSel ? (closeOpt.textContent || '') : '';
+    let overErr = '';
+    if (closeIsSel && closeRemaining > 0){
+      const oldQty = q('tmCloseQty').value;
+      q('tmCloseQty').value = String(closeRemaining + 5);
+      const okOver = await TradeUI.submitModal();
+      overErr = q('tmError').textContent || '';
+      q('tmCloseQty').value = oldQty;
+    }
+    // (v50.44) 操作记录右上角「筛选合约」: 期货模式也要能看见
+    const cfVis = (() => { const el = q('tdContractFilter'); return !!(el && el.offsetParent !== null); })();
+    // (v50.44) 合约筛选行为: 选定某个合约后操作表只剩该合约的行, 清空后恢复
+    const cfp = await (async () => {
+      const f = q('tdContractFilter');
+      if (!f || !f.options || f.options.length < 2) return { skip: 1 };
+      const target = f.options[1].value;
+      const grab = () => {
+        const tb = [...document.querySelectorAll('#tradeDetailPanel table.tbl')].pop();
+        return [...tb.querySelectorAll('tbody tr')].map(r => ((r.querySelector('td') || {}).innerText || '').trim());
+      };
+      f.value = target;
+      f.dispatchEvent(new Event('change', { bubbles: true }));
+      await w(200);
+      const r1 = grab();
+      f.value = '';
+      f.dispatchEvent(new Event('change', { bubbles: true }));
+      await w(200);
+      const r2 = grab();
+      return { target, n1: r1.length, all1: r1.every(c => c === target), n2: r2.length };
+    })();
+    // (v50.44) 标的中文化: 真实品种代码 a → 豆一; 认不出的原样返回
+    const nameA = TradeUI.underlyingText('a');
+    const nameUnknown = TradeUI.underlyingText('e2efut01');
     q('tmCancel').click();
     await w(250);
     // (v50.40) 两张明细表: 表头可见列数必须等于数据行可见列数(期货模式曾经整体错位)
@@ -1280,6 +1324,7 @@ async function main() {
                            detOpenInit, detCloseInit, closeDirOpts, colN,
                            ladBlk: !!ladBlk, ladHtml, ladTxt, rungN, rqShort,
                            ccGrid: !!ccGrid, ccCells, ccDrow, ccStack,
+                           closeIsSel, closeRemaining, closeSelTxt, overErr, cfVis, cfp, nameA, nameUnknown,
                            rvEditTitle, rvEditBack, rvEditAt, rvAfter});
   })()`);
   const fu = JSON.parse(futRun);
@@ -1287,8 +1332,9 @@ async function main() {
   check('期货模式: 监控池改名「期货模式监控池」', fu.poolTitle === '期货模式监控池', fu.poolTitle);
   check('期货模式: 主表标题变「期货交易」', fu.mainTitle === '期货交易', fu.mainTitle);
   check('期货模式: 布局 data-tm=futures', fu.layTm === 'futures', fu.layTm);
-  check('期货模式新建开仓: 隐藏 合约代码/看涨看跌/delta',
-        fu.modal.contractHidden && fu.modal.callPutHidden && fu.modal.deltaHidden, JSON.stringify(fu.modal));
+  check('期货模式新建开仓: 显示「开仓合约」输入框 / 隐藏 看涨看跌/delta',
+        !fu.modal.contractHidden && fu.modal.callPutHidden && fu.modal.deltaHidden
+        && fu.modal.contractLabel === '开仓合约', JSON.stringify(fu.modal));
   check('期货模式新建开仓: 出现 初次止损价/初次止盈价',
         fu.modal.initStopShown && fu.modal.initTargetShown, JSON.stringify(fu.modal));
   check('期货模式新建开仓: 方向选项 = 多头/空头',
@@ -1315,8 +1361,9 @@ async function main() {
   check('列对齐: 持仓表 无「看涨看跌」列、末列是保证金',
         fu.colN[0].names.indexOf('看涨看跌') < 0 && fu.colN[0].names.indexOf('保证金') >= 0,
         JSON.stringify(fu.colN[0].names));
-  check('列对齐: 操作表 无「合约」列且无 delta/目标列',
-        fu.colN[1].names.indexOf('合约') < 0 && fu.colN[1].names.indexOf('delta') < 0
+  // v50.44: 期货也有了具体合约号 → 操作表要能看到「合约」列(之前只期权显示)
+  check('列对齐: 操作表 有「合约」列且无 delta/目标列',
+        fu.colN[1].names.indexOf('合约') >= 0 && fu.colN[1].names.indexOf('delta') < 0
         && fu.colN[1].names.indexOf('目标') < 0, JSON.stringify(fu.colN[1].names));
   check('期货模式: 分页面「新建开仓」不显示 初次止损/止盈', !fu.detOpenInit, 'detOpenInit=' + fu.detOpenInit);
   check('期货模式: 「新建平仓」不显示 初次止损/止盈', !fu.detCloseInit, 'detCloseInit=' + fu.detCloseInit);
@@ -1333,6 +1380,20 @@ async function main() {
         fu.ccGrid && fu.ccCells === 6 && fu.ccDrow === 0,
         'grid=' + fu.ccGrid + ' cells=' + fu.ccCells + ' drow=' + fu.ccDrow);
   check('测算明细: 每格「标签在上 · 数值在下」', fu.ccStack);
+  check('平仓(v50.44): 合约是下拉且带剩余手数',
+        fu.closeIsSel && fu.closeRemaining === 3, JSON.stringify([fu.closeIsSel, fu.closeRemaining]));
+  check('平仓(v50.44): 下拉文案含合约号与「余N手」(无看涨看跌)',
+        /e2efut2609/.test(fu.closeSelTxt) && /余3手/.test(fu.closeSelTxt)
+        && fu.closeSelTxt.indexOf('看') < 0, fu.closeSelTxt);
+  check('平仓(v50.44): 数量超额被前端拦下(不写库)',
+        /超过该合约剩余可平/.test(fu.overErr), fu.overErr);
+  check('筛选合约(v50.44): 期货模式操作记录右上角可见', fu.cfVis);
+  check('筛选合约(v50.44): 选定合约后只剩该合约的行, 清空后恢复',
+        !fu.cfp.skip && fu.cfp.all1 && fu.cfp.n1 > 0 && fu.cfp.n2 >= fu.cfp.n1,
+        JSON.stringify(fu.cfp));
+  check('标的中文化(v50.44): a → 豆一, 认不出的原样返回',
+        fu.nameA === '豆一 (a)' && fu.nameUnknown === 'e2efut01',
+        JSON.stringify([fu.nameA, fu.nameUnknown]));
   check('复盘: 点「修改」回填原时间与原内容',
         fu.rvEditTitle === '修改复盘' && fu.rvEditBack === '第二条复盘(新)'
         && fu.rvEditAt === '2026-09-16T09:00',

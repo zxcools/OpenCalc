@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5043            # 与 README 版本号 v50.43 对齐(数值比较用于单实例接管)
+APP_VERSION = 5044            # 与 README 版本号 v50.44 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3910,7 +3910,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             </div>
                         <div class="op-filter-row">
               <h3 style="font-size:13px;margin:6px 0 8px;color:var(--accent2)">操作记录(按时间升序, 最近在最下方)</h3>
-              <label class="op-filter opt-only">筛选合约
+              <label class="op-filter">筛选合约
                 <select id="tdContractFilter">
                   <option value="">全部合约</option>
                 </select>
@@ -3919,7 +3919,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="tblwrap">
               <table class="tbl trades-tbl">
                 <thead><tr>
-                  <th class="opt-only">合约</th><th>日期</th><th>操作</th>
+                  <th>合约</th><th>日期</th><th>操作</th>
                   <th class="opt-only">delta</th><th class="opt-only">目标</th><th class="opt-only">看涨看跌</th>
                   <th>方向</th><th>数量</th><th>价格</th><th class="th-prem">权利金</th>
                   <th>平仓盈亏</th><th>状态</th><th>备注</th><th>操作</th>
@@ -4058,7 +4058,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <label><span class="req">开仓标的 <i>*</i></span>
           <input id="tmUnderlying" type="text" placeholder="如 ao611">
         </label>
-        <label id="tmContractWrap" class="opt-only"><span class="req">合约代码 <i>*</i></span>
+        <!-- 合约: 期权/期货都填(期货之前隐含「标的即合约」, v50.44 起由用户手填具体合约号) -->
+        <label id="tmContractWrap"><span class="req"><span id="tmContractLabel">合约代码</span> <i>*</i></span>
           <input id="tmContract" type="text" placeholder="如 ao611P2500">
         </label>
         <label id="tmOpTypeWrap" style="display:none">
@@ -5190,6 +5191,21 @@ const TradeUI = {
     if (this.mode === 'futures') return d === 'buy' ? '多头' : (d === 'sell' ? '空头' : '—');
     return d === 'buy' ? '买入' : (d === 'sell' ? '卖出' : '—');
   },
+  /* 标的显示文案(v50.44): 期货模式显示品种中文名(如 cu → 沪铜), 查不到就原样显示代码
+     ⚠ 只对显示层生效, 分组/筛选/存库仍用原始 underlying, 老数据不受影响 */
+  underlyingText(u){
+    const s = String(u || '');
+    if (!s || !this.isFut()) return s;
+    if (typeof CONTRACTS === 'undefined' || !CONTRACTS.length) return s;
+    const low = s.toLowerCase();
+    let c = CONTRACTS.find(x => String(x.code).toLowerCase() === low);
+    if (!c){
+      // 兼容把合约号填进标的的情况(如 a2609 → 取字母前缀 a → 豆一)
+      const m = low.match(/^([a-z]+)/);
+      if (m) c = CONTRACTS.find(x => String(x.code).toLowerCase() === m[1]);
+    }
+    return c ? (c.name + ' (' + s + ')') : s;
+  },
   /* 资金占用字段名: 期权 权利金 / 期货 保证金 */
   premLabel(){ return this.mode === 'futures' ? '保证金' : '权利金'; },
   /* 接口带 mode 参数 */
@@ -5318,7 +5334,7 @@ const TradeUI = {
       const pnl = g.total_pnl;
       const pnlCls = pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '');
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}">
-        <td><b>${escHtml(g.underlying)}</b></td>
+        <td><b>${escHtml(this.underlyingText(g.underlying))}</b></td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
         <td>${this.fmtDate(g.open_date)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>
@@ -5364,6 +5380,7 @@ const TradeUI = {
     const pnl = g.total_pnl;
     const hay = [
       g.underlying || '',
+      this.underlyingText(g.underlying),   // 显示的是中文名 → 搜「豆一」也要能搜到(v50.44)
       (g.contracts || []).join(' '),
       dirTxt, g.direction || '',
       g.close_status || '',
@@ -5547,7 +5564,7 @@ const TradeUI = {
     if (!d) return;
     document.querySelector('.trades-layout').classList.add('has-detail');
     $('tradeDetailPanel').classList.remove('hidden');
-    $('tdTitle').textContent = d.underlying + ' 详情';
+    $('tdTitle').textContent = this.underlyingText(d.underlying) + ' 详情';
     // 顶部 meta: 方向/开仓时间/是否平仓/平仓盈亏/平仓时间
     const g = this.groups.find(x => x.underlying === d.underlying) || {};
     const dirTxt = this.dirTxt(g.direction);
@@ -5620,7 +5637,7 @@ const TradeUI = {
       const premiumTxt = isOpen ? o.premium.toLocaleString('en-US',{maximumFractionDigits:2}) : '/';
       const qtyTxt = isOpen ? o.qty : (o.close_qty != null ? o.close_qty : o.qty);
       return `<tr class="row-${opTag}">
-        <td class="opt-only"><b>${escHtml(o.contract)}</b></td>
+        <td><b>${escHtml(o.contract)}</b></td>
         <td>${this.fmtDate(dt)}</td>
         <td><span class="tag ${opTag}">${opTxt}</span></td>
         <td class="opt-only">${o.open_delta!=null ? o.open_delta : '—'}</td>
@@ -5772,24 +5789,14 @@ const TradeUI = {
 
     // 平仓模式下: 锁定 underlying, contract 改成下拉选择(从 holdings 取); 方向自动取反且隐藏
     const contractInput = $('tmContract');
-    if (this.isFut()){
-      // 期货: 标的即合约, 不需要填合约代码/看涨看跌/delta; 平仓方向按持仓方向给出「卖出平多头/买入平空头」
-      const inp = document.createElement('input');
-      inp.id = 'tmContract'; inp.type = 'text'; inp.readOnly = true;
-      contractInput.replaceWith(inp);
+    const isFut = this.isFut();
+    if (isFut){
+      // 期货(v50.44): 标的就是标的(只读回填), 具体合约由下面通用分支处理 —— 开仓手填、平仓下拉选持仓
       const u = (this.detail && this.detail.underlying) || preset.underlying || '';
       $('tmUnderlying').value = u;
       $('tmUnderlying').readOnly = !!u;
-      inp.value = this.normalizeContract(u);
-      if (!isOpen){
-        const h = (this.detail && this.detail.holdings && this.detail.holdings[0]) || null;
-        const openDir = h ? h.direction : 'buy';
-        $('tmDirection').value = (openDir === 'buy') ? 'sell' : 'buy';
-        $('tmCloseQtyHint').textContent = h && h.qty ? ('已开仓剩余 ' + h.qty + ' 手, 最多可平 ' + h.qty) : '';
-      } else {
-        $('tmCloseQtyHint').textContent = '';
-      }
-    } else if (!isOpen && isEdit){
+    }
+    if (!isOpen && isEdit){
       // 修改已有平仓记录: 直接用 preset 数据填充, 不依赖 holdings(全部平完时 holdings 为空也能编辑)
       const inp = document.createElement('input');
       inp.id = 'tmContract';
@@ -5813,7 +5820,10 @@ const TradeUI = {
         o.dataset.remaining = h.qty;
         o.dataset.opendir = h.direction;
         o.dataset.callput = h.call_put || '';
-        o.textContent = `${h.contract} 看${h.call_put==='P'?'跌':'涨'} ${h.direction==='buy'?'买入':'卖出'} 余${h.qty}手 @均价${h.open_price}`;
+        // 期货没有看涨看跌, 文案只留 合约 + 方向 + 余量 + 均价
+        o.textContent = isFut
+          ? `${h.contract} ${h.direction==='buy'?'多头':'空头'} 余${h.qty}手 @均价${h.open_price}`
+          : `${h.contract} 看${h.call_put==='P'?'跌':'涨'} ${h.direction==='buy'?'买入':'卖出'} 余${h.qty}手 @均价${h.open_price}`;
         if (i === 0) o.selected = true;
         sel.appendChild(o);
       });
@@ -5847,7 +5857,7 @@ const TradeUI = {
       const inp = document.createElement('input');
       inp.id = 'tmContract';
       inp.type = 'text';
-      inp.placeholder = '如 lc2611-C-144000 或 ao611P2500';
+      inp.placeholder = isFut ? '如 a2609' : '如 lc2611-C-144000 或 ao611P2500';
       contractInput.replaceWith(inp);
       $('tmUnderlying').value = preset.underlying || '';
       $('tmUnderlying').readOnly = !!preset.underlying;
@@ -5909,8 +5919,8 @@ const TradeUI = {
       const today = new Date().toISOString().slice(0,10);
       if (isOpen) $('tmOpenDate').value = today;
       else $('tmCloseDate').value = today;
-      // 开仓默认 contract = underlying (用户可改)
-      if (isOpen && preset.underlying) $('tmContract').value = preset.underlying;
+      // 开仓默认 contract = underlying (用户可改); 期货不预填 —— 标的≠合约, 预填会让人以为填好了(v50.44)
+      if (isOpen && preset.underlying && !this.isFut()) $('tmContract').value = preset.underlying;
       // 行内+开仓默认 delta 0.3, 目标 0.45
       if (isOpen && preset.underlying){
         $('tmOpenDelta').value = '0.3';
@@ -5920,6 +5930,29 @@ const TradeUI = {
     $('tmUnderlying').readOnly = preset.id ? true : (preset.underlying ? true : false);
     bg.classList.remove('hidden');
     bg.dataset.editing = preset.id || '';
+  },
+
+  /* 当前弹窗所选合约的「剩余可平手数」; 取不到返回 null(交给后端兜底校验, 不误拦) */
+  _closeQtyLeft(f){
+    let base = null;
+    const sel = $('tmContract');
+    if (sel && sel.tagName === 'SELECT'){
+      const opt = sel.options[sel.selectedIndex];
+      base = (opt && opt.dataset.remaining != null) ? +opt.dataset.remaining : null;
+    } else if (this.detail && this.detail.holdings && this.detail.holdings.length){
+      // 文本框场景(编辑已平记录/holdings 为空时): 按合约号在持仓里找
+      const key = this.normalizeContract(f.contract).toUpperCase();
+      const h = this.detail.holdings.find(x => this.normalizeContract(x.contract).toUpperCase() === key);
+      if (h) base = +h.qty || 0;
+    }
+    if (base == null) return null;
+    // 编辑已有平仓记录: 这条自己占掉的额度要还回去(后端是按「排除本条」算剩余)
+    const editing = $('tradeModalBg').dataset.editing || '';
+    if (editing){
+      const op = ((this.detail && this.detail.operations) || []).find(o => String(o.id) === String(editing));
+      if (op && op.close_qty) base += (+op.close_qty || 0);
+    }
+    return base;
   },
 
   _refreshCloseQtyHint(){
@@ -5942,7 +5975,11 @@ const TradeUI = {
         : (isFut ? '<option value="sell">卖出平多头</option><option value="buy">买入平空头</option>'
                  : '<option value="buy">买入</option><option value="sell">卖出</option>');
     }
-    const cw = $('tmContractWrap'); if (cw) cw.hidden = isFut;   // 期货无需合约代码(用标的)
+    // 合约: 两种模式都要填(v50.44 起期货也手填具体合约号, 不再「标的即合约」)
+    const cw = $('tmContractWrap'); if (cw) cw.hidden = false;
+    const cl = $('tmContractLabel'); if (cl) cl.textContent = isFut ? '开仓合约' : '合约代码';
+    const ci = $('tmContract');
+    if (ci && ci.tagName === 'INPUT') ci.placeholder = isFut ? '如 a2609' : '如 ao611P2500';
     // 初次止损/止盈: 只有「期货模式 + 主页面新建开仓」需要 —— 分页面新建开仓、新建平仓都不需要(v50.40)
     const bgEl = $('tradeModalBg');
     const showInit = isFut && isOpen && !(bgEl && bgEl.dataset.fromDetail === '1');
@@ -5977,9 +6014,8 @@ const TradeUI = {
       note: $('tmNote').value,
       mode: this.mode,
     };
-    // 期货: 无合约代码/看涨看跌/delta; 合约 = 标的; 补初次止损止盈
+    // 期货: 无看涨看跌/delta; 合约就是用户填的具体合约号(v50.44 起不再「标的即合约」); 补初次止损止盈
     if (this.isFut()){
-      fields.contract = TradeUI.normalizeContract(fields.underlying);
       fields.call_put = '';
       fields.open_delta = null;
       fields.target_delta = null;
@@ -6001,6 +6037,11 @@ const TradeUI = {
     } else {
       if (!f.close_date) return errBox.textContent = '请填写平仓日期', false;
       if (!(f.close_qty > 0)) return errBox.textContent = '请填写平仓数量(>0)', false;
+      // ⚠ 平仓数量不能大于该合约剩余可平(后端也拦, 这里提前挡掉省得填完一堆字段才报错)
+      const left = this._closeQtyLeft(f);
+      if (left != null && f.close_qty > left){
+        return errBox.textContent = '平仓数量 ' + f.close_qty + ' 超过该合约剩余可平 ' + left + ' 手', false;
+      }
     }
     errBox.textContent = '';
     try {
