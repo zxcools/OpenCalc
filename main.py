@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5044            # 与 README 版本号 v50.44 对齐(数值比较用于单实例接管)
+APP_VERSION = 5045            # 与 README 版本号 v50.45 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1952,6 +1952,16 @@ def trade_upsert(payload):
             payload["open_price"] = 0.0
         if payload.get("open_date") is None:
             payload["open_date"] = ""
+    # ⚠ 编辑时若调用方没带 calc_json, 保留原有测算快照(v50.45):
+    #   从「开仓计算器 → 📥 加入记录」产生的开仓记录带测算快照, 但前端改合约号/手数时
+    #   不会传这个字段 → 直接 UPDATE 会把它覆盖成空, 详情顶部整块「开仓测算结果」消失。
+    #   快照属于原始测算事实, 不该被一次普通编辑抹掉
+    #   ⚠ 只有「没传 / 传 null」才兜底; 显式传空串 '' 表示主动清空
+    #   ⚠ 必须放在 vals 计算之前, 否则取到的还是 None
+    if rec_id and payload.get("calc_json") is None:
+        _old = db.execute("SELECT calc_json FROM trade_records WHERE id=?", (rec_id,)).fetchone()
+        if _old is not None and _old["calc_json"]:
+            payload["calc_json"] = _old["calc_json"]
     vals = [payload.get(f) for f in fields]
     if rec_id:
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
@@ -2139,6 +2149,7 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
             continue
         avg = round(g["cost_left"] / g["left"], 4) if g["left"] > 0 else 0
         holdings.append({
+            "underlying": underlying,    # v50.45: 持仓表要显示中文标的, 前端拿不到就退回 d.underlying
             "contract": g["orig_contract"],
             "call_put": g["call_put"],
             "direction": g["direction"],
@@ -3902,7 +3913,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="tblwrap">
               <table class="tbl trades-tbl">
                 <thead><tr>
-                  <th>合约代码</th><th class="opt-only">看涨看跌</th><th>方向</th>
+                  <th>标的</th><th>合约代码</th><th class="opt-only">看涨看跌</th><th>方向</th>
                   <th><span class="help-tip" data-tip="仅算未平仓部分(扣减已平仓后剩余的开仓手数)的加权均价, 不会受已平仓的开仓成本影响">开仓均价 ?</span></th><th>数量</th><th class="th-prem">权利金</th>
                 </tr></thead>
                 <tbody id="tdHoldings"></tbody>
@@ -5581,9 +5592,10 @@ const TradeUI = {
     // 持仓汇总
     const hb = $('tdHoldings');
     if (!d.holdings.length){
-      hb.innerHTML = '<tr><td colspan="' + (this.isFut() ? 5 : 6) + '" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
+      hb.innerHTML = '<tr><td colspan="' + (this.isFut() ? 6 : 7) + '" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
     } else {
       hb.innerHTML = d.holdings.map(h => `<tr>
+        <td>${escHtml(this.underlyingText(h.underlying || d.underlying))}</td>
         <td><b>${escHtml(h.contract)}</b></td>
         <td class="opt-only"><span class="tag ${h.call_put==='P'?'short':(h.call_put==='C'?'long':'')}">${h.call_put==='P'?'看跌':(h.call_put==='C'?'看涨':'—')}</span></td>
         <td><span class="tag ${h.direction==='buy'?'buy':'sell'}">${this.dirTxt(h.direction)}</span></td>

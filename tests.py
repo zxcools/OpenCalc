@@ -544,6 +544,37 @@ _vd = trade_detail('vz')
 check("正常开仓可查到持仓 3 手", _vd['holdings'] and _vd['holdings'][0]['qty'] == 3, str(_vd['holdings']))
 trade_delete(_zid)
 
+# 9b. v50.45: 编辑开仓记录不能把测算快照弄丢 + 持仓带 underlying
+print("\n== 测算快照保留 (v50.45) ==")
+import json as _json
+_snap = _json.dumps({'code':'cu','name':'沪铜','dir':'long','budget':1350,'lots':3,'pl_ratio':2.96})
+_sid = trade_upsert({'underlying':'snapu','contract':'cu2610','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':78000,'qty':3,'premium':0,
+                     'mode':'futures','calc_json':_snap})
+_sd = trade_detail('snapu', mode='futures')
+check("开仓记录带回测算快照", bool(_sd['operations'][0].get('calc_json')))
+# ⚠ 前端「修改开仓」不会传 calc_json: 以前会把它 UPDATE 成空 → 详情顶部测算卡整块消失
+trade_upsert({'id':_sid,'underlying':'snapu','contract':'cu2612','op_type':'open','direction':'buy',
+              'open_date':'2026-09-01','open_price':78000,'qty':3,'premium':0,'mode':'futures'})
+_sd2 = trade_detail('snapu', mode='futures')
+_op2 = [o for o in _sd2['operations'] if o['id'] == _sid][0]
+check("改合约号后测算快照仍在", _op2.get('calc_json') == _snap, str(_op2.get('calc_json'))[:60])
+check("改合约号确实生效", _op2['contract'] == 'cu2612', _op2['contract'])
+# 显式传空串才允许清空
+trade_upsert({'id':_sid,'underlying':'snapu','contract':'cu2612','op_type':'open','direction':'buy',
+              'open_date':'2026-09-01','open_price':78000,'qty':3,'premium':0,'mode':'futures',
+              'calc_json':''})
+_sd3 = trade_detail('snapu', mode='futures')
+check("显式传空可清空快照", not [o for o in _sd3['operations'] if o['id'] == _sid][0].get('calc_json'))
+trade_delete(_sid)
+# 持仓带 underlying(v50.45): 前端要在持仓表里显示中文标的
+_hid = trade_upsert({'underlying':'snapu','contract':'cu2610','op_type':'open','direction':'buy',
+                     'open_date':'2026-09-01','open_price':78000,'qty':2,'premium':0,'mode':'futures'})
+_hd = trade_detail('snapu', mode='futures')
+check("持仓项带 underlying 字段", bool(_hd['holdings']) and _hd['holdings'][0].get('underlying') == 'snapu',
+      str(_hd['holdings'][:1]))
+trade_delete(_hid)
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings

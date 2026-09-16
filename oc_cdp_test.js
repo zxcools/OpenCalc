@@ -1196,6 +1196,13 @@ async function main() {
     const detailMeta = q('tdMeta').textContent;
     const holdDirTxt = [...document.querySelectorAll('#tdHoldings tr td')].map(t => t.textContent).join('|');
     const calcBox = q('tdCalcCard') ? q('tdCalcCard').textContent.trim() : '';
+    // (v50.45) 持仓表新增「标的」列: 表头要有, 首行要显示中文(认不出时退回代码 e2efut01)
+    const holdHead = [...document.querySelectorAll('#tradeDetailPanel table.tbl')][0];
+    const hhFirst = holdHead.tHead.rows[0].children[0].textContent.trim();
+    const holdCell0 = (() => {
+      const r = holdHead.tBodies[0].rows[0];
+      return r ? r.children[0].textContent.trim() : '';
+    })();
     // 复盘: 新建 → 出现在最上
     q('btnNewReview').click();
     await w(300);
@@ -1303,6 +1310,24 @@ async function main() {
       .every(c => { const k = c.querySelector('.k'), v = c.querySelector('.v');
         return k && v && k.textContent.trim() && v.textContent.trim()
           && k.getBoundingClientRect().top <= v.getBoundingClientRect().top; }) : false;
+    // (v50.45) 改开仓合约号后, 测算结果不能消失: 模拟前端「修改开仓」(不传 calc_json)
+    const dtB = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efut01')).json();
+    const opB = (dtB.operations || []).find(o => o.op_type === 'open');
+    const patchB = Object.assign({}, opB);
+    delete patchB.calc_json;                       // 前端 collectFromModal 不带这个字段
+    patchB.contract = 'e2efut2609v2';
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(patchB)});
+    await TradeUI.loadDetail('e2efut01');
+    await w(700);
+    const calcAfterEdit = q('tdCalcCard').textContent.indexOf('暂无测算结果') < 0;
+    const calcEditName = (q('tdCalcCard').querySelector('.ratio-strip .dim') || {}).textContent || '';
+    // 还原合约号, 免得影响后面的断言
+    patchB.contract = opB.contract;
+    await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(patchB)});
+    await TradeUI.loadDetail('e2efut01');
+    await w(500);
     // (v50.40) 复盘「修改」: 回填 -> 保存 -> 内容变、条数不变
     const edBtn = document.querySelector('#reviewList [data-rvedit]');
     edBtn.click();
@@ -1324,6 +1349,7 @@ async function main() {
                            detOpenInit, detCloseInit, closeDirOpts, colN,
                            ladBlk: !!ladBlk, ladHtml, ladTxt, rungN, rqShort,
                            ccGrid: !!ccGrid, ccCells, ccDrow, ccStack,
+                           calcAfterEdit, calcEditName, hhFirst, holdCell0,
                            closeIsSel, closeRemaining, closeSelTxt, overErr, cfVis, cfp, nameA, nameUnknown,
                            rvEditTitle, rvEditBack, rvEditAt, rvAfter});
   })()`);
@@ -1380,6 +1406,12 @@ async function main() {
         fu.ccGrid && fu.ccCells === 6 && fu.ccDrow === 0,
         'grid=' + fu.ccGrid + ' cells=' + fu.ccCells + ' drow=' + fu.ccDrow);
   check('测算明细: 每格「标签在上 · 数值在下」', fu.ccStack);
+  check('测算结果(v50.45): 改开仓合约号后快照不丢(仍显示测算明细, 不是「暂无测算结果」)',
+        fu.calcAfterEdit && /测试期货/.test(fu.calcEditName),
+        'keep=' + fu.calcAfterEdit + ' name=' + fu.calcEditName);
+  check('持仓表(v50.45): 首列是「标的」, 认不出代码时原样显示',
+        fu.hhFirst === '标的' && fu.holdCell0 === 'e2efut01',
+        JSON.stringify([fu.hhFirst, fu.holdCell0]));
   check('平仓(v50.44): 合约是下拉且带剩余手数',
         fu.closeIsSel && fu.closeRemaining === 3, JSON.stringify([fu.closeIsSel, fu.closeRemaining]));
   check('平仓(v50.44): 下拉文案含合约号与「余N手」(无看涨看跌)',
@@ -1548,7 +1580,11 @@ async function main() {
         updBk.status === 200 && updBk.ok && updBk.isArr
         && /^v\d+\.\d+$/.test(updBk.vname || '') && updBk.vname === 'v' + String(updBk.ver).slice(0, -2) + '.' + String(updBk.ver).slice(-2),
         JSON.stringify(updBk));
-  check('接口: 开发模式 frozen=false (不谎报可替换 exe)', updBk.frozen === false, String(updBk.frozen));
+  // ⚠ 这条别写死 false: 跑源码服务时 frozen=false, 跑打包 exe 时必须是 true(本身就是 exe)。
+  //   对 exe 实例跑同一套 E2E 时用 OC_E2E_FROZEN=1 声明期望值。
+  const expectFrozen = process.env.OC_E2E_FROZEN === '1';
+  check('接口: frozen 与运行形态一致 (不谎报可替换 exe)',
+        updBk.frozen === expectFrozen, 'got=' + updBk.frozen + ' expect=' + expectFrozen);
 
   const updProg = await evalJs(ws, `(async () => {
     const r = await fetch('/api/update/progress');
