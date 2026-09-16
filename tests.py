@@ -939,6 +939,38 @@ check("sha256 失败不覆盖旧的成功文件", os.path.isfile(_failed_target)
 # 12) 备份列表: 空目录安全返回
 check("update_backup_list 空目录返回 []", isinstance(M.update_backup_list(), list))
 
+# 12.1) 下载超时放宽到 20 分钟: raw.githubusercontent 限速时 10MB 可能要几分钟
+#       (实测 20 分钟只下到 3MB) → 超时给太短会让用户在限速网络下永远下不完
+check("下载超时 ≥ 1200 秒(容忍限速网络)", M.UPDATE_DL_TIMEOUT >= 1200, str(M.UPDATE_DL_TIMEOUT))
+check("清单超时保持短(8 秒内, 不卡界面)", M.UPDATE_TIMEOUT <= 15, str(M.UPDATE_TIMEOUT))
+
+# 12.2) 下载进度: 可轮询, 下载中 running=True 且字节数递增
+_prog0 = dict(M._update_progress)
+_payload2 = b'Y' * (1024 * 1024 + 64)
+M._read_url_bytes = lambda url, timeout=None: (
+    '{"version": 9999, "version_name": "v99.98", "url": "https://x.invalid/b.exe"}').encode('utf-8')
+_import_urllib.urlopen = lambda req, timeout=None: _FakeResp(_payload2)
+_d2 = M.update_download()
+check("下载完成后 running=False", M._update_progress["running"] is False, str(M._update_progress.get("running")))
+check("下载完成后进度字节数 = 文件大小",
+      M._update_progress["downloaded"] == len(_payload2), str(M._update_progress.get("downloaded")))
+check("下载完成后 error 为空", M._update_progress["error"] == "", str(M._update_progress.get("error")))
+check("进度 total 取自 Content-Length",
+      M._update_progress["total"] == len(_payload2), str(M._update_progress.get("total")))
+
+# 12.3) 下载失败时进度里留下可读错误(前端能显示)
+M._read_url_bytes = lambda url, timeout=None: b'{"version": 9999, "url": "https://x.invalid/c.exe"}'
+_import_urllib.urlopen = lambda req, timeout=None: _FakeResp(b'x')
+try:
+    M.update_download()
+except ValueError:
+    pass
+check("下载失败: running=False 且 error 有内容",
+      M._update_progress["running"] is False and len(M._update_progress["error"]) > 0,
+      str(M._update_progress.get("error")))
+M._update_progress.update(_prog0)
+_import_urllib.urlopen = _real_urlopen
+
 # 13) 备份当前版本: 开发模式(非 frozen)明确报错, 不假装成功
 try:
     M.update_backup_current()

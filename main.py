@@ -717,7 +717,10 @@ UPDATE_REPO = "zxcools/OpenCalc"
 UPDATE_BRANCH = "main"
 UPDATE_RAW_BASE = "https://raw.githubusercontent.com/%s/%s" % (UPDATE_REPO, UPDATE_BRANCH.lower())
 UPDATE_MANIFEST_URL = UPDATE_RAW_BASE + "/version.json"
-UPDATE_TIMEOUT = 8                       # 单次请求超时(秒), 不让界面卡住
+UPDATE_TIMEOUT = 8                       # 清单请求超时(秒), 不让界面卡住
+# ⚠ 程序本体 ~10MB, 而 raw.githubusercontent.com 在部分网络下会被限速到几十 KB/s
+#   (实测 20 分钟只下到 3MB) → 给足 20 分钟, 并在前端显示「已下载 x MB」以免用户以为卡死
+UPDATE_DL_TIMEOUT = 1200
 UPDATE_DL_UA = "OpenCalc-Updater/1.0"
 
 
@@ -831,6 +834,10 @@ def _update_dir():
     return d
 
 
+# 下载进度 (供前端轮询显示, 避免慢速网络下用户以为卡死)
+_update_progress = {"downloaded": 0, "total": 0, "running": False, "error": ""}
+
+
 def update_download():
     """下载最新版 exe 到 <数据目录>/updates/, 返回落地路径.
     ⚠ 先写 .part 临时文件, 校验(大小/sha256)通过后再改名 → 中途断了不会留下半截 exe"""
@@ -842,9 +849,10 @@ def update_download():
     final = os.path.join(out_dir, fname)
     part = final + ".part"
     total = 0
+    _update_progress.update({"downloaded": 0, "total": 0, "running": True, "error": ""})
     try:
         req = urllib.request.Request(m["url"], headers={"User-Agent": UPDATE_DL_UA, "Cache-Control": "no-cache"})
-        with urllib.request.urlopen(req, timeout=60) as r, open(part, "wb") as f:
+        with urllib.request.urlopen(req, timeout=UPDATE_DL_TIMEOUT) as r, open(part, "wb") as f:
             declared = r.headers.get("Content-Length")
             while True:
                 chunk = r.read(262144)
@@ -852,6 +860,8 @@ def update_download():
                     break
                 f.write(chunk)
                 total += len(chunk)
+                _update_progress["downloaded"] = total
+                _update_progress["total"] = int(declared) if (declared or "").isdigit() else 0
         # 大小校验: 小于 1MB 基本可以断定不是我们的 exe(拿到了错误页/重定向页)
         if total < 1024 * 1024:
             raise ValueError("下载内容异常（仅 %d 字节），可能是网络被拦截" % total)
@@ -865,8 +875,10 @@ def update_download():
             if h.hexdigest().lower() != m["sha256"]:
                 raise ValueError("文件校验失败（sha256 不一致），已丢弃，请重新下载")
         os.replace(part, final)
+        _update_progress.update({"running": False, "error": ""})
         return {"path": final, "size": total, "version_name": m["version_name"], "dir": out_dir}
-    except Exception:
+    except Exception as e:
+        _update_progress.update({"running": False, "error": _friendly_net_err(e)})
         try:
             if os.path.exists(part):
                 os.remove(part)
@@ -2516,6 +2528,8 @@ class Handler(BaseHTTPRequestHandler):
         # ---- 检查更新 ----
         elif path == "/api/update/check":
             self._send(200, _json(update_check()))
+        elif path == "/api/update/progress":
+            self._send(200, _json({"ok": True, **_update_progress}))
         elif path == "/api/update/backups":
             self._send(200, _json({"ok": True, "backups": update_backup_list(),
                                    "version_name": _version_name(APP_VERSION),
@@ -7090,10 +7104,22 @@ const UpdUI = {
     const old = b.textContent;
     b.disabled = true;
     b.textContent = '⬇ 下载中…';
+    // 慢速网络下 10MB 可能要好几分钟 → 轮询显示进度, 让用户看得出在动
+    const tick = setInterval(async () => {
+      try {
+        const p = await (await fetchT('/api/update/progress', null, 4000)).json();
+        if (p && p.downloaded){
+          const got = (p.downloaded / 1048576).toFixed(1);
+          b.textContent = p.total
+            ? '⬇ ' + got + '/' + (p.total / 1048576).toFixed(1) + ' MB'
+            : '⬇ 已下载 ' + got + ' MB';
+        }
+      } catch (e) { /* 进度查询失败不影响下载本身 */ }
+    }, 1200);
     try {
-      // 下载可能要几十秒(10MB) → 单独放宽到 3 分钟
+      // ⚠ 后端容忍 20 分钟(限速网络下 raw 下载很慢), 前端超时给到 21 分钟
       const d = await (await fetchT('/api/update/download', {method: 'POST',
-        headers: {'Content-Type': 'application/json'}, body: '{}'}, 180000)).json();
+        headers: {'Content-Type': 'application/json'}, body: '{}'}, 1260000)).json();
       if (!d.ok){ alert('下载失败：' + (d.error || '未知错误')); return; }
       b.style.display = 'none';
       alert('✅ 已下载 ' + d.version_name + '（' + (d.size/1048576).toFixed(1) + ' MB）\n\n位置：' + d.path
@@ -7104,6 +7130,7 @@ const UpdUI = {
     } catch (e) {
       alert('下载失败：网络中断或超时，请重试');
     } finally {
+      clearInterval(tick);
       this.busy = false;
       b.disabled = false;
       b.textContent = old;

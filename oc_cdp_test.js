@@ -1420,6 +1420,22 @@ async function main() {
         JSON.stringify(updBk));
   check('接口: 开发模式 frozen=false (不谎报可替换 exe)', updBk.frozen === false, String(updBk.frozen));
 
+  const updProg = await evalJs(ws, `(async () => {
+    const r = await fetch('/api/update/progress');
+    const d = await r.json();
+    return {status: r.status, ok: d.ok, hasDl: typeof d.downloaded === 'number',
+            hasTotal: typeof d.total === 'number', hasRunning: typeof d.running === 'boolean'};
+  })()`);
+  check('接口: /api/update/progress 返回 200 + 进度字段齐全',
+        updProg.status === 200 && updProg.ok && updProg.hasDl && updProg.hasTotal && updProg.hasRunning,
+        JSON.stringify(updProg));
+
+  // 下载按钮文案在轮询中会变成「⬇ x/10.6 MB」→ 至少确认轮询逻辑存在(不真的下载 10MB)
+  check('更新: 下载按钮默认文案为「⬇ 下载最新版」',
+        (await evalJs(ws, `(document.getElementById('updDownload').textContent||'').trim()`)) === '⬇ 下载最新版');
+  check('更新: 下载走轮询显示进度(源码含 /api/update/progress)',
+        /api\/update\/progress/.test(await evalJs(ws, `UpdUI.download.toString()`)));
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();
