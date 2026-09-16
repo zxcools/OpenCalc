@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5050            # 与 README 版本号 v50.50 对齐(数值比较用于单实例接管)
+APP_VERSION = 5051            # 与 README 版本号 v50.51 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -2189,7 +2189,33 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
     def _op_dt(x):
         return x["open_date"] if x["op_type"] == "open" else x["close_date"]
     ops = sorted(items, key=_op_dt)
-    return {"underlying": underlying, "batch": batch or "", "holdings": holdings, "operations": ops}
+
+    # ⚠ v50.51: 这五项必须由**本批次自己**算出来返回给前端。
+    #   原先前端 renderDetail 去主表 groups 里按 underlying 找 → 同品种有多条(不同批次)时
+    #   会拿到别条记录的平仓盈亏/状态, 表现为「新记录明明没平过却显示有平仓收益」。
+    open_dates = [x["open_date"] for x in opens if x["open_date"]]
+    close_dates = [x["close_date"] for x in closes if x["close_date"]]
+    total_pnl = sum((x["pnl"] or 0) for x in closes)
+    has_pos = any((h["qty"] or 0) > 0 for h in holdings)
+    direction = ""
+    if has_pos:
+        direction = max(holdings, key=lambda h: h["qty"] or 0)["direction"]
+    if not direction and opens:
+        direction = opens[-1]["direction"]
+    if not has_pos and opens:
+        close_status = "已平仓"
+    elif has_pos and total_pnl != 0:
+        close_status = "部分平仓"
+    else:
+        close_status = "未平仓"
+
+    return {"underlying": underlying, "batch": batch or "",
+            "direction": direction,
+            "open_date": min(open_dates) if open_dates else "",
+            "close_status": close_status,
+            "total_pnl": round(total_pnl, 2),
+            "last_close_date": max(close_dates) if close_dates else "",
+            "holdings": holdings, "operations": ops}
 
 
 # ----- 监控池快照 -----
@@ -5700,16 +5726,17 @@ const TradeUI = {
     $('tradeDetailPanel').classList.remove('hidden');
     $('tdTitle').textContent = this.underlyingText(d.underlying) + ' 详情';
     // 顶部 meta: 方向/开仓时间/是否平仓/平仓盈亏/平仓时间
-    const g = this.groups.find(x => x.underlying === d.underlying) || {};
-    const dirTxt = this.dirTxt(g.direction);
-    const pnl = g.total_pnl;
+    // ⚠ v50.51: 全部用本批次自己的数据(d.*), 不再去主表 groups 里按 underlying 找 ——
+    //   同品种有多条记录(不同批次)时会捞到别条的平仓盈亏/状态, 看起来像「没平过却有收益」
+    const dirTxt = this.dirTxt(d.direction);
+    const pnl = d.total_pnl || 0;
     const pnlStr = pnl ? (pnl > 0 ? '+CN¥' : (pnl < 0 ? '-CN¥' : 'CN¥')) + Math.abs(pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—';
     $('tdMeta').innerHTML = `
-      <span class="tag ${g.direction==='buy'?'buy':(g.direction==='sell'?'sell':'')}">${dirTxt}</span>
-      &nbsp;开仓时间 <b>${this.fmtDate(g.open_date)}</b>
-      &nbsp;状态 <span class="tag ${g.close_status==='已平仓'?'closed':(g.close_status==='部分平仓'?'partial':'unclosed')}">${escHtml(g.close_status||'—')}</span>
+      <span class="tag ${d.direction==='buy'?'buy':(d.direction==='sell'?'sell':'')}">${dirTxt}</span>
+      &nbsp;开仓时间 <b>${this.fmtDate(d.open_date)}</b>
+      &nbsp;状态 <span class="tag ${d.close_status==='已平仓'?'closed':(d.close_status==='部分平仓'?'partial':'unclosed')}">${escHtml(d.close_status||'—')}</span>
       &nbsp;平仓盈亏 <b class="${pnl>0?'pos':(pnl<0?'neg':'')}">${pnlStr}</b>
-      &nbsp;平仓时间 <b>${this.fmtDate(g.last_close_date)}</b>`
+      &nbsp;平仓时间 <b>${this.fmtDate(d.last_close_date)}</b>`
       + (this.isFut() ? this.futMetaExtra(d) : '');
 
     // 持仓汇总

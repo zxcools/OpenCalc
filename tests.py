@@ -686,6 +686,42 @@ trade_pool_delete(_po)
 for _x in (_o1, _f1, _cf):
     trade_delete(_x)
 
+# 9b4. v50.51: 详情页的 方向/开仓时间/状态/平仓盈亏/平仓时间 必须按批次自己算
+#      (前端原先去主表 groups 里按 underlying 找 → 同品种多条时会捞到别条的平仓收益)
+print("\n== 详情页按批次独立 (v50.51) ==")
+_du = 'detu'
+_da, _db = 'B20260910000001aa', 'B20260916000002bb'
+_do1 = trade_upsert({'underlying': _du, 'contract': 'sr2611', 'op_type': 'open', 'direction': 'buy',
+                     'open_date': '2026-09-10', 'open_price': 5400, 'qty': 5, 'premium': 0,
+                     'mode': 'futures', 'batch': _da})
+_dc1 = trade_upsert({'underlying': _du, 'contract': 'sr2611', 'op_type': 'close', 'direction': 'sell',
+                     'close_date': '2026-09-12', 'close_qty': 2, 'close_price': 5600, 'pnl': 2000,
+                     'mode': 'futures', 'batch': _da})
+_do2 = trade_upsert({'underlying': _du, 'contract': 'sr2611', 'op_type': 'open', 'direction': 'buy',
+                     'open_date': '2026-09-16', 'open_price': 5500, 'qty': 5, 'premium': 0,
+                     'mode': 'futures', 'batch': _db})
+_dA = trade_detail(_du, mode='futures', batch=_da)
+_dB = trade_detail(_du, mode='futures', batch=_db)
+check("已部分平仓那条: 盈亏 2000 + 部分平仓",
+      _dA['total_pnl'] == 2000 and _dA['close_status'] == '部分平仓',
+      str({k: _dA[k] for k in ('total_pnl', 'close_status', 'open_date', 'last_close_date')}))
+check("新开那条: 盈亏 0 + 未平仓(不串上一条的收益)",
+      _dB['total_pnl'] == 0 and _dB['close_status'] == '未平仓',
+      str({k: _dB[k] for k in ('total_pnl', 'close_status', 'open_date', 'last_close_date')}))
+check("两批次开仓时间各自独立",
+      _dA['open_date'] == '2026-09-10' and _dB['open_date'] == '2026-09-16',
+      str([_dA['open_date'], _dB['open_date']]))
+check("两批次平仓时间各自独立(未平的那条为空)",
+      _dA['last_close_date'] == '2026-09-12' and _dB['last_close_date'] == '',
+      str([_dA['last_close_date'], _dB['last_close_date']]))
+check("两批次方向都取自本批次", _dA['direction'] == 'buy' and _dB['direction'] == 'buy',
+      str([_dA['direction'], _dB['direction']]))
+check("两批次持仓手数各自独立(3 vs 5)",
+      sum(h['qty'] for h in _dA['holdings']) == 3 and sum(h['qty'] for h in _dB['holdings']) == 5,
+      str([sum(h['qty'] for h in _dA['holdings']), sum(h['qty'] for h in _dB['holdings'])]))
+for _x in (_do1, _dc1, _do2):
+    trade_delete(_x)
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings

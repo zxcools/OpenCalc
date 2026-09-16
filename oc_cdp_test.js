@@ -1680,6 +1680,54 @@ async function main() {
         pr.inFut && !pr.inOpt, poolRun);
   check('期货监控池(v50.50): 页面上能立刻看到刚加的品种', pr.shown, poolRun);
 
+  // ===== v50.51: 详情页内容必须按批次完全独立 =====
+  const metaRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const U = 'e2emeta01', B1 = 'B20260910000001aa', B2 = 'B20260916000002bb';
+    const clean = async () => {
+      const g = await (await fetch('/api/trades/groups?mode=futures')).json();
+      for (const it of (g.groups || [])) {
+        if (String(it.underlying) !== U) continue;
+        const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + U
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+    };
+    await clean();
+    // 批次1: 开 5 手 + 平 2 手(+2000); 批次2: 只开 5 手(从没平过)
+    await post({underlying: U, contract: 'sr2611', op_type: 'open', direction: 'buy',
+                open_date: '2026-09-10', open_price: 5400, qty: 5, premium: 0, mode: 'futures', batch: B1});
+    await post({underlying: U, contract: 'sr2611', op_type: 'close', direction: 'sell',
+                close_date: '2026-09-12', close_qty: 2, close_price: 5600, pnl: 2000,
+                mode: 'futures', batch: B1});
+    await post({underlying: U, contract: 'sr2611', op_type: 'open', direction: 'buy',
+                open_date: '2026-09-16', open_price: 5500, qty: 5, premium: 0, mode: 'futures', batch: B2});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(900);
+    await TradeUI.loadDetail(U, B2);
+    await w(700);
+    const t2 = document.getElementById('tdMeta').textContent.replace(/\\s+/g, ' ').trim();
+    const ops2 = (TradeUI.detail.operations || []).length;
+    await TradeUI.loadDetail(U, B1);
+    await w(700);
+    const t1 = document.getElementById('tdMeta').textContent.replace(/\\s+/g, ' ').trim();
+    const ops1 = (TradeUI.detail.operations || []).length;
+    await clean();
+    return JSON.stringify({t2, t1, ops1, ops2});
+  })()`);
+  const md = JSON.parse(metaRun);
+  check('详情页(v50.51): 未平仓那条不显示别条记录的平仓盈亏与状态',
+        /未平仓/.test(md.t2) && md.t2.indexOf('2,000') < 0 && md.t2.indexOf('部分平仓') < 0,
+        md.t2);
+  check('详情页(v50.51): 已部分平仓那条自己显示 +CN¥2,000',
+        /部分平仓/.test(md.t1) && /2,000/.test(md.t1), md.t1);
+  check('详情页(v50.51): 操作记录也只属于本批次(1 条 vs 2 条)',
+        md.ops2 === 1 && md.ops1 === 2, 'ops1=' + md.ops1 + ' ops2=' + md.ops2);
+
   // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
   const v541 = await evalJs(ws, `(() => {
     const out = {};
