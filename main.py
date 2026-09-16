@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5048            # 与 README 版本号 v50.48 对齐(数值比较用于单实例接管)
+APP_VERSION = 5050            # 与 README 版本号 v50.50 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1578,16 +1578,21 @@ def fund_withdrawal_summary():
 
 
 def fund_export_backup():
-    """导出全部数据为备份 JSON (资金曲线 + 期权交易记录 + 监控池快照, 跨电脑迁移/定期备份用)"""
+    """导出全部数据为备份 JSON (资金曲线 + 交易记录 + 监控池快照 + 复盘笔记, 跨电脑迁移/定期备份用)
+
+    ⚠ v50.50 修两个「导出不全」的问题:
+      1) trade_pool_list() 默认只取 options 模式 → 期货监控池根本没进备份
+      2) 复盘笔记(trade_reviews) 之前完全没导出 → 恢复备份后全部丢失
+    """
     return {
         "app": "期货开仓计算器",
-        "backup_version": 2,
+        "backup_version": 3,
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "records": fund_list_records(),
         "trades": trade_list_records(),
-        "trade_pools": trade_pool_list(),
+        "trade_pools": trade_pool_list(mode="options") + trade_pool_list(mode="futures"),
+        "trade_reviews": trade_review_list("options") + trade_review_list("futures"),
     }
-
 
 def fund_import_backup(payload):
     """导入备份: 资金曲线 + 期权交易记录 + 监控池快照 逐条 upsert 合并(同主键覆盖, 其余保留)."""
@@ -1626,6 +1631,14 @@ def fund_import_backup(payload):
         for r in payload["trade_pools"]:
             try:
                 trade_pool_import_record(r)
+                imported += 1
+            except Exception:
+                pass
+    # 复盘笔记(v50.50): 之前完全不进备份 → 换电脑/恢复备份会静默丢失全部复盘内容
+    if isinstance(payload.get("trade_reviews"), list):
+        for r in payload["trade_reviews"]:
+            try:
+                trade_review_import_record(r)
                 imported += 1
             except Exception:
                 pass
@@ -1892,6 +1905,11 @@ def trade_upsert(payload):
     # 批次号(v50.47): 空串=默认批次; 主页按 (标的, 批次) 分组 → 同品种不同批次各自成一条记录
     #   ⚠ 必须在平仓校验之前归一, 校验 SQL 要用它把可平量限定在同批次内
     payload["batch"] = (payload.get("batch") or "").strip()
+    # 模式: options 期权(默认, 老数据行为不变) / futures 期货; 两套记录互不可见
+    #   ⚠ 必须提前到这里(v50.50): 下面的平仓校验 SQL 也要按 mode 过滤;
+    #     放在校验之后的话 payload["mode"] 还是 None → IFNULL(mode,'options')=NULL 恒不匹配 → 可平量恒为 0
+    if payload.get("mode") not in ("options", "futures"):
+        payload["mode"] = "options"
     _dup_id = payload.get("id")
 
     # 平仓数量校验: 不可超过开仓剩余(按合约大小写不敏感匹配)
@@ -1904,13 +1922,13 @@ def trade_upsert(payload):
             raise ValueError("平仓数量必须 > 0")
         opened = db.execute(
             "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? "
-            "AND UPPER(TRIM(contract))=? AND IFNULL(batch,'')=?",
-            (strategy, underlying, _k(contract), payload["batch"]),
+            "AND UPPER(TRIM(contract))=? AND IFNULL(mode,'options')=? AND IFNULL(batch,'')=?",
+            (strategy, underlying, _k(contract), payload["mode"], payload["batch"]),
         ).fetchone()[0]
         closed = db.execute(
             "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? "
-            "AND UPPER(TRIM(contract))=? AND IFNULL(batch,'')=?",
-            (strategy, underlying, _k(contract), payload["batch"]),
+            "AND UPPER(TRIM(contract))=? AND IFNULL(mode,'options')=? AND IFNULL(batch,'')=?",
+            (strategy, underlying, _k(contract), payload["mode"], payload["batch"]),
         ).fetchone()[0]
         if cq > opened - closed:
             raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed))
@@ -1939,9 +1957,6 @@ def trade_upsert(payload):
                 raise ValueError("%s不能为负数" % _label)
 
     rec_id = payload.get("id")
-    # 模式: options 期权(默认, 老数据行为不变) / futures 期货; 两套记录互不可见
-    if payload.get("mode") not in ("options", "futures"):
-        payload["mode"] = "options"
     fields = (
         "underlying", "contract", "op_type",
         "open_date", "open_delta", "target_delta", "call_put",
@@ -2197,6 +2212,8 @@ def trade_pool_list(strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
             "contracts": cs,
             "note": r["note"] or "",
             "created_at": r["created_at"] or "",
+            # ⚠ 导出必须带 mode(v50.50): 否则备份恢复后所有期货监控池都变成期权模式
+            "mode": (r["mode"] if "mode" in r.keys() else "options") or "options",
         })
     return out
 
@@ -2292,6 +2309,41 @@ def trade_review_delete(rec_id):
     _fund_db().execute("DELETE FROM trade_reviews WHERE id=?", (rec_id,))
 
 
+def trade_review_import_record(r):
+    """导入单条复盘笔记(备份恢复用): 保留原 id, 同 id 覆盖 → 重复导入幂等
+
+    ⚠ 不能复用 trade_review_upsert — 见到 id 会走 UPDATE, 目标库没有该 id 直接抛错被吞掉
+    """
+    if not isinstance(r, dict):
+        raise ValueError("复盘条目格式不正确")
+    content = (r.get("content") or "").strip()
+    if not content:
+        raise ValueError("复盘内容不能为空")
+    now = datetime.now().isoformat(timespec="seconds")
+    row = {
+        "id": r.get("id"),
+        "mode": r.get("mode") if r.get("mode") in ("options", "futures") else "options",
+        "underlying": (r.get("underlying") or "").strip(),
+        "review_at": (r.get("review_at") or "").strip() or now,
+        "content": content,
+        "created_at": r.get("created_at") or now,
+    }
+    cols = ("id", "mode", "underlying", "review_at", "content", "created_at")
+    db = _fund_db()
+    if row["id"] is None:
+        cols2 = [c for c in cols if c != "id"]
+        db.execute(
+            "INSERT INTO trade_reviews (%s) VALUES (%s)" % (", ".join(cols2), ", ".join("?" for _ in cols2)),
+            [row[c] for c in cols2],
+        )
+        return db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.execute(
+        "INSERT OR REPLACE INTO trade_reviews (%s) VALUES (%s)" % (", ".join(cols), ", ".join("?" for _ in cols)),
+        [row[c] for c in cols],
+    )
+    return row["id"]
+
+
 def trade_import_record(r):
     """导入单条交易记录(备份恢复用): 保留原 id, 同 id 覆盖 → 重复导入幂等"""
     if not isinstance(r, dict):
@@ -2362,7 +2414,9 @@ def trade_pool_import_record(r):
         "note": r.get("note") or "",
         "created_at": r.get("created_at") or now,
     }
-    cols = ("id", "strategy", "snapshot_date", "contracts", "note", "created_at")
+    # ⚠ 必须带上 mode(v50.50): 老备份没这个键 → 回退 options, 与导入前的默认行为一致
+    row["mode"] = r.get("mode") if r.get("mode") in ("options", "futures") else "options"
+    cols = ("id", "strategy", "snapshot_date", "contracts", "note", "created_at", "mode")
     db = _fund_db()
     if row["id"] is None:
         cols2 = [c for c in cols if c != "id"]
@@ -3369,6 +3423,10 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .btn.cyan{background:linear-gradient(135deg,#46d6ea,#21b6cf);border:0;color:#0b2230;
   box-shadow:0 4px 12px rgba(70,214,234,.25)}
 .btn.cyan:hover{box-shadow:0 8px 20px rgba(70,214,234,.4)}
+/* 琥珀金(v50.50): 「保存当前方案」等次要但需一眼找到的动作 */
+.btn.gold{background:linear-gradient(135deg,#f5c76b,#e0a53a);border:0;color:#3a2a06;
+  box-shadow:0 4px 14px rgba(224,165,58,.28)}
+.btn.gold:hover{box-shadow:0 8px 20px rgba(224,165,58,.45)}
 
 /* 期权品种单选按钮组 */
 .chipgroup{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 6px}
@@ -3750,7 +3808,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="dcell"><span class="k" title="每手保证金 × 手数">最大占用保证金</span><span class="v money gold" id="rMarginUsedF">—</span></div>
         </div>
         <div class="anim" style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn xs" id="btnAddToTrade" title="把当前开仓价/止损价/止盈价与上面的测算结果一键写入「交易记录：期货模式」">📥 加入记录</button>
+          <button class="btn xs cyan" id="btnAddToTrade" title="把当前开仓价/止损价/止盈价与上面的测算结果一键写入「交易记录：期货模式」">📥 加入记录</button>
           <span class="dim" style="font-size:11.5px">写入「交易记录：期货模式」；标的默认取品种代码，可在记录里点 ✎ 补月份</span>
         </div>
         <!-- 阶梯止盈: 以止损价差为 1R, 2R~5R 逐级目标价 (独立方块) -->
@@ -3797,7 +3855,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div id="recentPlans" class="hidden" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:2px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
           <span style="font-size:12.5px;color:var(--sub);letter-spacing:.5px">最近方案 <small style="opacity:.75">（最多保留最近 10 组）</small></span>
-          <button class="btn xs ghost" id="btnSavePlan" style="margin-left:auto" title="保存当前参数为方案，点「调出」一键恢复并重算">💾 保存当前方案</button>
+          <button class="btn xs gold" id="btnSavePlan" style="margin-left:auto" title="保存当前参数为方案，点「调出」一键恢复并重算">💾 保存当前方案</button>
         </div>
         <div id="planList" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>
@@ -4908,6 +4966,12 @@ function escHtml(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+/* 生成一个新的批次号(v50.49): 时间戳14位 + 2位随机(同一秒连点也不会撞号)
+   ⚠ 这是全局函数, 不能嵌在 init()/别的作用域里 —— openEditModal 与 addToTradeRecord 都要用 */
+function newBatch(){
+  return new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
+    + Math.random().toString(36).slice(2, 4);
+}
 function loadPlans(){
   try { planList = JSON.parse(localStorage.getItem(PLAN_KEY) || '[]') || []; }
   catch(e){ planList = []; }
@@ -4957,9 +5021,8 @@ async function addToTradeRecord(){
     ladder: (lastCalcF.ladder || []).map(x => ({r: x.r, price: x.price})),
   };
   // 批次号(v50.47): 每次「加入记录」生成一个唯一批次 → 同品种多次开仓在主页各自成一条记录,
-  //   不再全部塞进同一条里当「新操作」。格式: 时间戳 + 2 位随机(防同一秒内连点撞号)
-  const batch = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
-    + Math.random().toString(36).slice(2, 4);
+  //   不再全部塞进同一条里当「新操作」
+  const batch = newBatch();
   const payload = {
     mode: 'futures',
     underlying: c.code,
@@ -5324,7 +5387,10 @@ const TradeUI = {
     $('tdNewClose').addEventListener('click', () => {
       if (!this.detail){ alert('请先在主表点开一个标的的详情'); return; }
       if (!this.detail.holdings || !this.detail.holdings.length){ alert('当前持仓为空, 无可平仓的合约'); return; }
-      this.openEditModal('close', { underlying: this.detail.underlying });
+      // ⚠ 必须带 fromDetail + batch(v50.50): 少了它会被当成「主页新建」→ 生成全新批次,
+      //   后端在那一批里查不到开仓 → 明明有 5 手却报「平仓数量(1)超过剩余可平(0)」
+      this.openEditModal('close', { underlying: this.detail.underlying, fromDetail: true,
+                                    batch: this.detail.batch || '' });
     });
     // modal 关闭/保存
     $('tmCancel').addEventListener('click', () => $('tradeModalBg').classList.add('hidden'));
@@ -5835,6 +5901,21 @@ const TradeUI = {
     $('btnPoolHistory').textContent = allExpanded ? '📜 收起历史快照' : '📜 查看历史快照';
   },
 
+  /* 弹窗落到哪个批次(v50.49): 决定这条操作记录是「新建一条主页记录」还是「并入某条已有记录」
+     - 编辑已有记录    → 用它自己的批次(改了不外逃)
+     - 详情页发起      → 跟着当前详情批次(加仓/平仓应属于这条记录)
+     - 主页新建开仓    → 期货模式生成全新批次(必须是独立一条); 期权模式沿用空批次(多条腿仍归并)
+     ⚠ 之前主页也取 detail.batch, 而 detail 是上一次点开的那行、关闭也不清空
+       → 主页新建同品种会被吞进那条旧记录, 表现为「没新建出去」 */
+  _resolveBatch(preset, fromDetail, type){
+    if (preset && preset.id) return (preset.batch != null ? preset.batch : '') || '';
+    // 平仓永远属于「当前这条详情」——它平的就是详情里那笔持仓, 不可能属于新批次
+    if (type === 'close') return (this.detail && this.detail.batch) || '';
+    if (fromDetail) return (this.detail && this.detail.batch) || '';
+    if (this.isFut()) return newBatch();
+    return (preset && preset.batch) || '';
+  },
+
   /* ---------- 新建/编辑 开仓/平仓 弹框 (统一 modal) ---------- */
   openEditModal(type, preset){
     preset = preset || {};
@@ -5850,9 +5931,10 @@ const TradeUI = {
     $('tmError').textContent = '';
     // 标记「从详情页发起」: 详情页的新建开仓不显示初次止损/止盈(v50.40)
     bg.dataset.fromDetail = preset.fromDetail ? '1' : '';
-    // 批次号(v50.47): 编辑已有记录 → 用它自己的批次; 否则跟着当前详情(详情页新建的开/平仓落进同一批)
-    //   主页「新建开仓」时 detail 为空 → 空批次(与老行为一致, 同品种合并)
-    bg.dataset.batch = (preset.batch != null ? preset.batch : ((this.detail && this.detail.batch) || '')) || '';
+    // 批次号(v50.47): 编辑已有记录 → 用它自己的批次; 详情页发起的开/平仓 → 跟着当前详情(加仓/平仓进同一条)
+    //   ⚠ v50.49: 主页「新建开仓」必须生成**全新批次**, 否则会被当作旧记录的加仓。
+    //     之前取 detail.batch, 而 detail 是上一次点开的行、关掉了也不清空 → 主页新建同品种记录会被吞进那条里
+    bg.dataset.batch = this._resolveBatch(preset, !!preset.fromDetail, type);
     const isOpen = type === 'open';
     const isEdit = !!preset.id;
     $('tmTitle').textContent = isEdit ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
@@ -6179,7 +6261,9 @@ const TradeUI = {
     const contracts = input.split(/[,、， \t\n]+/).map(s => s.trim()).filter(Boolean);
     if (!contracts.length) { alert('至少输入一个品种'); return; }
     const date = preset.snapshot_date || new Date().toISOString().slice(0,10);
-    const payload = { id: preset.id || null, snapshot_date: date, contracts, note: '' };
+    // ⚠ 必须带 mode(v50.50): 不带的话后端按默认 'options' 落库 → 在期货模式里新建的监控池
+    //   会跑到期权模式去(期货列表里永远看不到), 表现为「加不上」
+    const payload = { id: preset.id || null, snapshot_date: date, contracts, note: '', mode: this.mode };
     fetchT('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})
       .then(r => r.json()).then(d => {
         if (!d.ok) { alert('保存失败: ' + d.error); return; }

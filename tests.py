@@ -630,6 +630,62 @@ check("导入保留 mode/止损/测算快照(v50.47 修)", bool(_imp) and _imp[0
 for _x in (_i1, _i2, _ci, _i3, _i4, 99001):
     trade_delete(_x)
 
+# 9b3. v50.50: 平仓校验按模式隔离 + 监控池/复盘能完整进备份
+print("\n== 模式隔离 & 备份完整性 (v50.50) ==")
+from main import (fund_export_backup, trade_pool_upsert, trade_pool_list,
+                  trade_review_upsert, trade_review_list, trade_review_delete,
+                  trade_pool_delete, trade_review_import_record, trade_pool_import_record)
+_mu = 'modeu'
+_o1 = trade_upsert({'underlying': _mu, 'contract': 'cu2610', 'op_type': 'open', 'direction': 'buy',
+                    'open_date': '2026-09-01', 'open_price': 78000, 'qty': 2, 'premium': 0})   # options
+_f1 = trade_upsert({'underlying': _mu, 'contract': 'cu2610', 'op_type': 'open', 'direction': 'buy',
+                    'open_date': '2026-09-01', 'open_price': 78000, 'qty': 5, 'premium': 0, 'mode': 'futures'})
+# options 只开了 2 手 → 平 5 手必须被拒(修复前 SQL 不带 mode, 会算上期货那 5 手 → 误放行)
+try:
+    trade_upsert({'underlying': _mu, 'contract': 'cu2610', 'op_type': 'close', 'direction': 'sell',
+                  'close_date': '2026-09-02', 'close_qty': 5, 'close_price': 78100, 'pnl': 10})
+    check("平仓校验按模式隔离(options 不能平期货开的量)", False, "未拒绝")
+except ValueError as _e:
+    check("平仓校验按模式隔离(options 不能平期货开的量)", "超过剩余可平" in str(_e), str(_e))
+_cf = trade_upsert({'underlying': _mu, 'contract': 'cu2610', 'op_type': 'close', 'direction': 'sell',
+                    'close_date': '2026-09-02', 'close_qty': 5, 'close_price': 78100, 'pnl': 50,
+                    'mode': 'futures'})
+check("期货模式平 5 手正常", bool(_cf), str(_cf))
+# 监控池: 期货模式必须落在 futures(之前前端不传 mode → 全进 options)
+_pf = trade_pool_upsert({'contracts': ['cu'], 'mode': 'futures'})
+_po = trade_pool_upsert({'contracts': ['ao'], 'mode': 'options'})
+check("期货监控池落在 futures 模式", any(x['id'] == _pf for x in trade_pool_list(mode='futures')))
+check("期货监控池不出现在 options 模式", not any(x['id'] == _pf for x in trade_pool_list(mode='options')))
+check("期权监控池不出现在 futures 模式", not any(x['id'] == _po for x in trade_pool_list(mode='futures')))
+# 导出: 两个模式的池都要在 + 带 mode 字段 + 含复盘笔记
+_rv = trade_review_upsert({'mode': 'futures', 'underlying': _mu, 'review_at': '2026-09-16T10:00',
+                           'content': 'v50.50 复盘导入测试'})
+_exp = fund_export_backup()
+check("导出 backup_version=3", _exp.get('backup_version') == 3, str(_exp.get('backup_version')))
+check("导出含 futures 监控池(之前只导 options)", any(x['id'] == _pf for x in _exp['trade_pools']),
+      str([(x['id'], x.get('mode')) for x in _exp['trade_pools']]))
+check("导出监控池带 mode 字段", all('mode' in x for x in _exp['trade_pools']))
+check("导出含 trade_reviews", isinstance(_exp.get('trade_reviews'), list)
+      and any(x['id'] == _rv for x in _exp['trade_reviews']))
+# 导入: 池与复盘的 mode 都要保留
+trade_pool_delete(_pf)
+trade_pool_import_record({'id': _pf, 'snapshot_date': '2026-09-16', 'contracts': ['cu'],
+                          'note': '', 'mode': 'futures'})
+check("监控池导入保留 futures 模式", any(x['id'] == _pf for x in trade_pool_list(mode='futures')))
+check("监控池导入后不在 options", not any(x['id'] == _pf for x in trade_pool_list(mode='options')))
+trade_review_delete(_rv)
+trade_review_import_record({'id': _rv, 'mode': 'futures', 'underlying': _mu,
+                            'review_at': '2026-09-16T10:00', 'content': 'v50.50 复盘导入测试'})
+_rb = [x for x in trade_review_list('futures') if x['id'] == _rv]
+check("复盘导入保留 id 与模式", bool(_rb) and _rb[0]['mode'] == 'futures', str(_rb[:1]))
+check("复盘重复导入幂等(不翻倍)",
+      len([x for x in trade_review_list('futures') if x['id'] == _rv]) == 1)
+trade_review_delete(_rv)
+trade_pool_delete(_pf)
+trade_pool_delete(_po)
+for _x in (_o1, _f1, _cf):
+    trade_delete(_x)
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings

@@ -1133,11 +1133,13 @@ async function main() {
     const w = ms => new Promise(r => setTimeout(r, ms));
     const q = id => document.getElementById(id);
     // 清掉本场景造的数据
+    // ⚠ 必须带 batch: 期货记录现在是分批次的, 不带批次只会删到「默认批次」那一条, 残留会把下轮断言污染
     const cleanUp = async (prefix) => {
       const g = await (await fetch('/api/trades/groups?mode=futures')).json();
       for (const it of (g.groups || [])) {
         if (String(it.underlying).startsWith(prefix)) {
-          const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + it.underlying)).json();
+          const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + it.underlying
+            + '&batch=' + encodeURIComponent(it.batch || ''))).json();
           for (const op of (d.operations || [])) {
             await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
           }
@@ -1190,8 +1192,11 @@ async function main() {
     const go = await (await fetch('/api/trades/groups?mode=options')).json();
     const inFut = (gf.groups || []).some(x => x.underlying === 'e2efut01');
     const inOpt = (go.groups || []).some(x => x.underlying === 'e2efut01');
+    // v50.49: 主页「新建开仓」生产独立批次 → 后面所有详情请求都要带上它
+    const FBATCH = ((gf.groups || []).find(x => x.underlying === 'e2efut01') || {}).batch || '';
+    const newBatchOk = /^\\d{14}[0-9a-z]{2}$/.test(FBATCH);   // 时间戳14位 + 2位随机
     // 打开详情 → 方向显示「多头」, 测算卡/复盘模块存在
-    await TradeUI.loadDetail('e2efut01');
+    await TradeUI.loadDetail('e2efut01', FBATCH);
     await w(700);
     const detailMeta = q('tdMeta').textContent;
     const holdDirTxt = [...document.querySelectorAll('#tdHoldings tr td')].map(t => t.textContent).join('|');
@@ -1288,14 +1293,14 @@ async function main() {
       return {head: vN(t.tHead.rows[0]), span, body: r ? vN(r) : -1, names: vHead(t)};
     });
     // (v50.40) 阶梯止盈: 详情卡里应是和计算器一样的 rung 方块, 不再是单行文本
-    const dt0 = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efut01')).json();
+    const dt0 = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efut01&batch=' + encodeURIComponent(FBATCH))).json();
     const op0 = (dt0.operations || []).find(o => o.op_type === 'open');
     const snap0 = {code: 'e2efut01', name: '测试期货', dir: 'short', entry: 3500, stop: 3450, target: 3650,
       riskPct: 1.5, budget: 1350, lots: 3, pl_ratio: 2.96, per_lot_risk: 1330, risk_used: 3990,
       margin_used: 1680, ladder: [{r:2,price:3400},{r:3,price:3350},{r:4,price:3300},{r:5,price:3250}]};
     await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(Object.assign({}, op0, {calc_json: JSON.stringify(snap0)}))});
-    await TradeUI.loadDetail('e2efut01');
+    await TradeUI.loadDetail('e2efut01', FBATCH);
     await w(700);
     const ladBlk = q('tdCalcCard').querySelector('.ladder-block');
     const ladHtml = ladBlk ? ladBlk.innerHTML : '';
@@ -1325,14 +1330,14 @@ async function main() {
         return k && v && k.textContent.trim() && v.textContent.trim()
           && k.getBoundingClientRect().top <= v.getBoundingClientRect().top; }) : false;
     // (v50.45) 改开仓合约号后, 测算结果不能消失: 模拟前端「修改开仓」(不传 calc_json)
-    const dtB = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efut01')).json();
+    const dtB = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efut01&batch=' + encodeURIComponent(FBATCH))).json();
     const opB = (dtB.operations || []).find(o => o.op_type === 'open');
     const patchB = Object.assign({}, opB);
     delete patchB.calc_json;                       // 前端 collectFromModal 不带这个字段
     patchB.contract = 'e2efut2609v2';
     await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(patchB)});
-    await TradeUI.loadDetail('e2efut01');
+    await TradeUI.loadDetail('e2efut01', FBATCH);
     await w(700);
     const calcAfterEdit = q('tdCalcCard').textContent.indexOf('暂无测算结果') < 0;
     const calcEditName = (q('tdCalcCard').querySelector('.ratio-strip .dim') || {}).textContent || '';
@@ -1340,7 +1345,7 @@ async function main() {
     patchB.contract = opB.contract;
     await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(patchB)});
-    await TradeUI.loadDetail('e2efut01');
+    await TradeUI.loadDetail('e2efut01', FBATCH);
     await w(500);
     // (v50.40) 复盘「修改」: 回填 -> 保存 -> 内容变、条数不变
     const edBtn = document.querySelector('#reviewList [data-rvedit]');
@@ -1358,6 +1363,7 @@ async function main() {
     await fetch('/api/trades/review/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: (await (await fetch('/api/trades/reviews?mode=futures')).json()).reviews[0].id})});
     const rvLeft = (await (await fetch('/api/trades/reviews?mode=futures')).json()).reviews.length;
     return JSON.stringify({tabOk, poolTitle, mainTitle, layTm, modal, saveOk: !!saveR, inFut, inOpt,
+                           FBATCH, newBatchOk,
                            detailMeta, holdDirTxt, calcBox, rvAtDefault, rvItems, rvTimes,
                            rvOptLen: (rvOpt.reviews || []).length, rvNowDefault, rvLeft,
                            detOpenInit, detCloseInit, closeDirOpts, colN,
@@ -1380,6 +1386,8 @@ async function main() {
   check('期货模式新建开仓: 方向选项 = 多头/空头',
         JSON.stringify(fu.modal.dirOpts) === JSON.stringify(['多头', '空头']), JSON.stringify(fu.modal.dirOpts));
   check('期货模式: 记录写入期货列表且不出现在期权列表', fu.saveOk && fu.inFut && !fu.inOpt, futRun);
+  check('批次(v50.49): 主页「新建开仓」自动生成新批次号(14位时间戳+2位随机)',
+        fu.newBatchOk, 'FBATCH=' + fu.FBATCH);
   check('期货模式: 详情方向显示「多头」', fu.holdDirTxt.indexOf('多头') >= 0, fu.holdDirTxt.slice(0, 120));
   check('期货模式: 详情 meta 显示初次止损/止盈',
         fu.detailMeta.indexOf('初次止损价') >= 0 && fu.detailMeta.indexOf('初次止盈价') >= 0, fu.detailMeta.slice(0, 160));
@@ -1539,6 +1547,138 @@ async function main() {
         bt.detBatch === 'B20260915020202bb' && bt.ops2 === 1, 'batch=' + bt.detBatch + ' ops=' + bt.ops2);
   check('批次(v50.47): 详情页新建平仓落在本批次, 不动另一批次的持仓',
         bt.closeOk && bt.otherLeft === 2, 'closeOk=' + bt.closeOk + ' otherLeft=' + bt.otherLeft);
+
+  // ===== v50.49: 主页面「新建开仓」必须新建一条(不能并进之前那条记录) =====
+  const nbRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const U = 'e2eb49';
+    const clean = async () => {
+      const g = await (await fetch('/api/trades/groups?mode=futures')).json();
+      for (const it of (g.groups || [])) {
+        if (String(it.underlying) !== U) continue;
+        const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + U
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) {
+          await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({id: op.id})});
+        }
+      }
+    };
+    const rows = async () => {
+      const g = await (await fetch('/api/trades/groups?mode=futures')).json();
+      return (g.groups || []).filter(x => x.underlying === U).map(x => x.batch || '');
+    };
+    await clean();
+    // 必须在期货模式下操作
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(800);
+    // 主页面「新建开仓」填一条
+    const newOpen = async (price, date, con) => {
+      q('btnNewOpen').click();
+      await w(400);
+      q('tmUnderlying').value = U;
+      q('tmContract').value = con;
+      q('tmOpenPrice').value = String(price);
+      q('tmQty').value = '2';
+      q('tmPremium').value = '1000';
+      q('tmOpenDate').value = date;
+      q('tmDirection').value = 'buy';
+      const ok = await TradeUI.submitModal();
+      await w(700);
+      q('tradeModalBg').classList.add('hidden');
+      await TradeUI.refresh();
+      await w(600);
+      return ok;
+    };
+    const ok1 = await newOpen(3500, '2026-09-01', U + '2609');
+    const n1 = await rows();
+    // 点开这条记录(模拟「之前有这个品种的记录」且详情还开着) → this.detail 残留
+    const tr = [...document.querySelectorAll('#tradesTable tbody tr.clickable')].find(x => x.dataset.u === U);
+    if (tr) tr.click();
+    await w(700);
+    const detB1 = (TradeUI.detail || {}).batch || '';
+    const detSet = !!TradeUI.detail;
+    // 再次从主页面新建同品种 → 必须是新的一条
+    const ok2 = await newOpen(3550, '2026-09-02', U + '2610');
+    const n2 = await rows();
+    // 详情页里「新建开仓」= 加仓, 仍应并进当前这条(条数不变)
+    q('tdNewOpen').click();
+    await w(400);
+    q('tmContract').value = U + '2611';
+    q('tmOpenPrice').value = '3560';
+    q('tmQty').value = '1';
+    q('tmPremium').value = '500';
+    q('tmOpenDate').value = '2026-09-03';
+    const ok3 = await TradeUI.submitModal();
+    await w(700);
+    q('tradeModalBg').classList.add('hidden');
+    await TradeUI.refresh();
+    await w(600);
+    const n3 = await rows();
+    // 真实按钮「➖ 新建平仓」(v50.50): 之前 preset 漏了 fromDetail → 平仓被分到全新批次
+    //   → 后端在那一批查不到开仓 → 明明有 3 手却报「平仓数量(1)超过剩余可平(0)」
+    q('tdNewClose').click();
+    await w(400);
+    const closeBatch = q('tradeModalBg').dataset.batch || '';
+    q('tmCloseDate').value = '2026-09-04';
+    q('tmCloseQty').value = '1';
+    q('tmClosePrice').value = '3600';
+    q('tmPnl').value = '100';
+    const okClsSave = await TradeUI.submitModal();
+    const closeErr = q('tmError').textContent || '';
+    await w(600);
+    q('tradeModalBg').classList.add('hidden');
+    await TradeUI.refresh();
+    await w(600);
+    const n4 = await rows();   // 平仓不该多出一条主页记录
+    await clean();
+    return JSON.stringify({ok1: !!ok1, ok2: !!ok2, ok3: !!ok3, n1, n2, n3, detB1, detSet,
+                           okClsSave: !!okClsSave, closeErr, closeBatch, n4});
+  })()`);
+  const nb = JSON.parse(nbRun);
+  check('主页新建开仓(v50.49): 已有该品种记录时再新建 → 主表多出 1 条(不是并进去)',
+        nb.ok1 && nb.ok2 && nb.n1.length === 1 && nb.n2.length === 2, nbRun);
+  check('主页新建开仓(v50.49): 新记录用全新批次号, 旧那条原封不动(详情残留的批次没有被继承)',
+        nb.n2.length === 2 && new Set(nb.n2).size === 2
+        && nb.n2.filter(b => b === nb.detB1).length === 1,
+        'detail=' + nb.detB1 + ' rows=' + JSON.stringify(nb.n2));
+  check('详情页新建开仓(v50.49): 属于加仓, 仍并进当前这条(主表条数不变)',
+        nb.ok3 && nb.n3.length === 2, nbRun);
+  check('详情页新建平仓(v50.50): 能正常存下(不再报「超过剩余可平(0)」)',
+        nb.okClsSave && !nb.closeErr, 'ok=' + nb.okClsSave + ' err=' + nb.closeErr);
+  check('详情页新建平仓(v50.50): 落进当前这条记录的批次, 且不新增主页记录',
+        nb.closeBatch === nb.detB1 && nb.n4.length === 2,
+        'closeBatch=' + nb.closeBatch + ' detail=' + nb.detB1 + ' rows=' + JSON.stringify(nb.n4));
+
+  // ===== v50.50: 期货模式监控池不能串到期权模式 =====
+  const poolRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(900);
+    const orig = window.prompt;
+    window.prompt = () => 'e2epool01、e2epool02';
+    document.getElementById('btnNewPool').click();
+    await w(1000);
+    window.prompt = orig;
+    const f = await (await fetch('/api/trades/pool?mode=futures')).json();
+    const o = await (await fetch('/api/trades/pool?mode=options')).json();
+    const inFut = (f.snapshots || []).some(x => (x.contracts || []).includes('e2epool01'));
+    const inOpt = (o.snapshots || []).some(x => (x.contracts || []).includes('e2epool01'));
+    // 页面上的期货监控池卡片也要能看到这个品种
+    const shown = document.getElementById('poolArea').textContent.indexOf('e2epool01') >= 0;
+    for (const s of [...(f.snapshots || []), ...(o.snapshots || [])]) {
+      if ((s.contracts || []).includes('e2epool01')) {
+        await fetch('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: s.id})});
+      }
+    }
+    return JSON.stringify({inFut, inOpt, shown});
+  })()`);
+  const pr = JSON.parse(poolRun);
+  check('期货监控池(v50.50): 新建后落在期货模式(之前全进期权模式, 表现为「加不上」)',
+        pr.inFut && !pr.inOpt, poolRun);
+  check('期货监控池(v50.50): 页面上能立刻看到刚加的品种', pr.shown, poolRun);
 
   // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
   const v541 = await evalJs(ws, `(() => {
