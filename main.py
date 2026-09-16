@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5041            # 与 README 版本号 v50.41 对齐(数值比较用于单实例接管)
+APP_VERSION = 5042            # 与 README 版本号 v50.42 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3190,6 +3190,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   transition:background .15s,border-color .15s,transform .1s}
 .side-btn:hover{background:var(--panel2);border-color:var(--accent)}
 .side-btn:active{transform:scale(0.94)}
+/* ⟳ 是无 emoji 变体的箭头类符号: 不强制文本呈现时部分字体会掉成彩色图形或细线 */
+#btnUpdate{font-size:17px;font-variant-emoji:text}
 
 .trades-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:16px;flex-wrap:wrap}
 /* 交易记录页 toolbar: 左侧筛选, 右侧操作按钮 */
@@ -3487,7 +3489,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬆</button>
       <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬇</button>
       <button class="side-btn" id="btnDataDir" style="position:relative" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙<span id="dataRiskDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
-      <button class="side-btn" id="btnUpdate" style="position:relative" title="检查更新">⬆<span id="updateDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
+      <button class="side-btn" id="btnUpdate" style="position:relative" title="检查更新">⟳<span id="updateDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
     </div>
   </aside>
@@ -4182,7 +4184,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <!-- 检查更新 modal -->
   <div class="modalbg hidden" id="updateBg">
     <div class="modal" style="width:min(700px,94vw)">
-      <h3><span class="dot"></span>⬆ 检查更新</h3>
+      <h3><span class="dot"></span>⟳ 检查更新</h3>
       <div id="updBody">
         <div class="tip" style="text-align:center;padding:18px 0">正在检查…</div>
       </div>

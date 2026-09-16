@@ -733,9 +733,31 @@ async function main() {
     nf.sepCp[2] === 'P' && nf.sepCp[3] === '' && nf.sepCp[4] === '', JSON.stringify(nf.sepCp));
 
   // ---- 场景Q (v50.31): 数据安全 — 软件目录内警告 + 自动备份 + 立即备份 ----
-  // 测试实例的数据目录在软件目录内(risky=true), 启动应显示顶部横幅 + 侧栏红点
+  // ⚠ v50.41.1: 测试实例的数据目录**必须在**临时目录(安全铁律), 所以真实 `/api/funds/data-info`
+  //   的 risky 恒为 false。早期这里靠「把测试数据放在软件目录内」来触发警告, 与安全铁律直接冲突。
+  //   改为对 `fetchT('/api/funds/data-info')` 打桩返回 risky:true 的桩响应, 再调 checkDataSafety()
+  //   渲染 —— 验证的是「拿到 risky 数据后 UI 怎么表现」, 不依赖数据真实存放位置。
   const dq = await evalJs(ws, `JSON.stringify({ hasFn: typeof FundUI.checkDataSafety === 'function', hasOpen: typeof FundUI.openDataDir === 'function' })`);
   check('存在数据安全检查方法', JSON.parse(dq).hasFn && JSON.parse(dq).hasOpen, dq);
+  await evalJs(ws, `(() => {
+    window.__stubInfo = { ok: true, risky: true, data_dir: 'D:\\\\Workbuddy\\\\开仓计算器\\\\e2e-data',
+                          app_dir: 'D:\\\\Workbuddy\\\\开仓计算器',
+                          backup_dir: 'D:\\\\Workbuddy\\\\开仓计算器\\\\e2e-data\\\\backup',
+                          backup_count: 3, record_count: 0 };
+    // 两条取数路径都要盖住: checkDataSafety 用 fetchT, openDataDir 用原生 fetch
+    window.__realFetch = window.fetch;
+    window.fetch = (u, o) => (String(u).indexOf('/api/funds/data-info') >= 0)
+      ? Promise.resolve({ ok: true, status: 200, json: async () => window.__stubInfo })
+      : window.__realFetch(u, o);
+    window.__realFetchT = window.fetchT;
+    window.fetchT = (u, o, ms) => (String(u).indexOf('/api/funds/data-info') >= 0)
+      ? Promise.resolve({ json: async () => window.__stubInfo })
+      : window.__realFetchT(u, o, ms);
+    sessionStorage.removeItem('dataRiskClosed');
+    return 'ok';
+  })()`);
+  await evalJs(ws, `FundUI.checkDataSafety()`);
+  await sleep(250);
   const banner = await evalJs(ws, `JSON.stringify((() => {
     const b = document.getElementById('dataRiskBanner');
     return {
@@ -776,6 +798,23 @@ async function main() {
   check('数据在软件目录内 → 侧栏按钮亮红点', dg.dotShown, dlg);
   check('弹窗显示自动备份位置与份数', dg.bkDir.length > 0 && /^\d+$/.test(dg.bkCnt), dlg);
   check('弹窗显示当前数据目录', dg.curDir.includes('e2e-data') || dg.curDir.length > 0, dlg);
+
+  // ⚠ 立刻撤掉 data-info 打桩: 下面「立即备份」等用例要走真实接口, 不还原会读到桩数据假通过
+  await evalJs(ws, `(() => {
+    window.fetch = window.__realFetch; window.fetchT = window.__realFetchT;
+    delete window.__realFetch; delete window.__realFetchT;
+    sessionStorage.removeItem('dataRiskClosed');
+    document.getElementById('dataRiskBanner').classList.add('hidden');
+    document.getElementById('dataRiskDot').classList.add('hidden');
+    document.getElementById('setRisk').classList.add('hidden');
+    document.getElementById('setMigrateSafe').style.display = 'none';
+    return 'restored';
+  })()`);
+  const restored = await evalJs(ws, `(async () => {
+    const d = await (await fetch('/api/funds/data-info')).json();
+    return JSON.stringify({ risky: !!d.risky, real: d.data_dir.indexOf('e2e') >= 0 });
+  })()`);
+  check('已还原打桩: data-info 回到真实数据(测试目录 risky=false)', JSON.parse(restored).risky === false, restored);
 
   // 立即备份: 备份目录满 10 份时会淘汰最旧的 → 份数不一定 +1, 改判「是否写入了新的快照」
   const bkBefore = await evalJs(ws, `(async () => {
@@ -1333,11 +1372,16 @@ async function main() {
     const do_ = document.getElementById('rDetailO');
     out.oGrid = !!do_ && do_.classList.contains('grid2');
     out.oDrow = do_ ? do_.querySelectorAll('.drow').length : -1;
-    // 4) 侧栏「⬆ 检查更新」按钮 + 红点元素存在
+    // 4) 侧栏「⟳ 检查更新」按钮 + 红点元素存在
     out.updBtn = !!document.getElementById('btnUpdate');
     out.updDot = !!document.getElementById('updateDot');
     out.updBg = !!document.getElementById('updateBg');
     out.updBtnTitle = (document.getElementById('btnUpdate') || {}).title || '';
+    // v50.41.1: 检查更新图标必须与导出/导入不重复 —— 曾一度都用 ⬆ 撞车
+    out.iconUpd = (document.getElementById('btnUpdate') || {}).textContent.trim();
+    out.iconExp = (document.getElementById('btnExport') || {}).textContent.trim();
+    out.iconImp = (document.getElementById('btnImport') || {}).textContent.trim();
+    out.modalTitle = (document.querySelector('#updateBg h3') || {}).textContent || '';
     out.updActions = ['updDownload','updBackup','updOpenDir','updClose']
       .filter(id => !document.getElementById(id)).length;   // 缺几个
     return out;
@@ -1358,7 +1402,12 @@ async function main() {
         v541.fLabels.indexOf('开仓标的') >= 0 && v541.fLabels.indexOf('每手风险金额') >= 0
         && v541.fLabels.indexOf('最大占用保证金') >= 0, JSON.stringify(v541.fLabels));
   check('测算结果: 期权明细也改为两列', v541.oGrid && v541.oDrow === 0, 'drow=' + v541.oDrow);
-  check('侧栏: 存在「⬆ 检查更新」按钮', v541.updBtn, v541.updBtnTitle);
+  check('侧栏: 存在「⟳ 检查更新」按钮', v541.updBtn, v541.updBtnTitle);
+  check('侧栏: 检查更新图标不与导出/导入重复',
+        v541.iconUpd && v541.iconUpd !== v541.iconExp && v541.iconUpd !== v541.iconImp
+        && v541.iconUpd === '⟳',
+        'upd=' + v541.iconUpd + ' exp=' + v541.iconExp + ' imp=' + v541.iconImp);
+  check('更新弹窗: 标题为「⟳ 检查更新」', v541.modalTitle.indexOf('⟳ 检查更新') >= 0, v541.modalTitle);
   check('侧栏: 更新提示红点元素存在且默认隐藏', v541.updDot);
   check('更新弹窗: DOM 完整(下载/备份/打开目录/关闭 齐全)', v541.updBg && v541.updActions === 0,
         'missing=' + v541.updActions);
@@ -1393,18 +1442,23 @@ async function main() {
         await evalJs(ws, `document.getElementById('updateBg').classList.contains('hidden')`));
 
   // 接口契约: /api/update/check 在测试环境(可能断网)也必须返回结构化结果, 不能 500
+  // ⚠ 版本号不写死: 与 /api/version 交叉校验两处一致 —— 否则每次升版本都得改断言
   const updApi = await evalJs(ws, `(async () => {
     const r = await fetch('/api/update/check');
     const d = await r.json();
-    return {status: r.status, ok: d.ok, cur: d.current,
-            keys: ['ok','current','current_name','latest','latest_name','has_update','notes','frozen']
+    const v = await (await fetch('/api/version')).json();
+    return {status: r.status, ok: d.ok, cur: d.current, ver: v.version,
+            curName: d.current_name, keys: ['ok','current','current_name','latest','latest_name','has_update','notes','frozen']
                   .filter(k => (k in d)).length,
             err: d.error || ''};
   })()`);
   check('接口: /api/update/check 返回 200 且键位齐全',
         updApi.status === 200 && updApi.keys === 8, JSON.stringify(updApi).slice(0, 160));
-  check('接口: /api/update/check 带回当前版本号',
-        updApi.cur === 5041, 'current=' + updApi.cur);
+  check('接口: /api/update/check 带回当前版本号(与 /api/version 一致)',
+        updApi.cur === updApi.ver && updApi.cur > 0,
+        'check=' + updApi.cur + ' version=' + updApi.ver);
+  check('接口: /api/update/check 带回 current_name(vXX.YY 格式)',
+        /^v\d+\.\d+$/.test(updApi.curName || ''), 'name=' + updApi.curName);
   check('接口: 断网时 ok=false 且带人话错误(不抛 500)',
         updApi.ok === true || (updApi.ok === false && updApi.err.length > 0),
         updApi.ok ? 'online' : updApi.err);
@@ -1412,11 +1466,13 @@ async function main() {
   const updBk = await evalJs(ws, `(async () => {
     const r = await fetch('/api/update/backups');
     const d = await r.json();
+    const v = await (await fetch('/api/version')).json();
     return {status: r.status, ok: d.ok, isArr: Array.isArray(d.backups),
-            vname: d.version_name, frozen: d.frozen};
+            vname: d.version_name, ver: v.version, frozen: d.frozen};
   })()`);
-  check('接口: /api/update/backups 返回 200 + 列表 + 版本名',
-        updBk.status === 200 && updBk.ok && updBk.isArr && /^v50\.41$/.test(updBk.vname || ''),
+  check('接口: /api/update/backups 返回 200 + 列表 + 版本名(与 /api/version 同源)',
+        updBk.status === 200 && updBk.ok && updBk.isArr
+        && /^v\d+\.\d+$/.test(updBk.vname || '') && updBk.vname === 'v' + String(updBk.ver).slice(0, -2) + '.' + String(updBk.ver).slice(-2),
         JSON.stringify(updBk));
   check('接口: 开发模式 frozen=false (不谎报可替换 exe)', updBk.frozen === false, String(updBk.frozen));
 
