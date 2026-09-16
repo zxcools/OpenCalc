@@ -1302,6 +1302,18 @@ async function main() {
     const ladTxt = ladBlk ? ladBlk.textContent.replace(/\s+/g, ' ').trim() : '';
     const rungN = q('tdCalcCard').querySelectorAll('.rung').length;
     const rqShort = q('tdCalcCard').querySelectorAll('.rung .rq.short').length;
+    // (v50.46) 详情测算卡跟随字号: 切大号后明细数值/每手浮盈必须变大(之前写死 px 不跟随)
+    const fzCalc = await (async () => {
+      const v0 = getComputedStyle(q('tdCalcCard').querySelector('.details.grid2 .v')).fontSize;
+      const r0 = getComputedStyle(q('tdCalcCard').querySelector('.rung .rp')).fontSize;
+      document.querySelector('#fontSeg button[data-fz="lg"]').click();
+      await new Promise(r=>setTimeout(r,300));
+      const v1 = getComputedStyle(q('tdCalcCard').querySelector('.details.grid2 .v')).fontSize;
+      const r1 = getComputedStyle(q('tdCalcCard').querySelector('.rung .rp')).fontSize;
+      document.querySelector('#fontSeg button[data-fz="md"]').click();
+      await new Promise(r=>setTimeout(r,300));
+      return {v0, v1, r0, r1};
+    })();
     // (v50.43) 详情卡测算明细与计算器同款两列: .details.grid2 + .dcell, 不再有遗留 .drow
     const ccGrid = q('tdCalcCard').querySelector('.details.grid2');
     const ccCells = q('tdCalcCard').querySelectorAll('.details.grid2 .dcell').length;
@@ -1349,7 +1361,7 @@ async function main() {
                            detOpenInit, detCloseInit, closeDirOpts, colN,
                            ladBlk: !!ladBlk, ladHtml, ladTxt, rungN, rqShort,
                            ccGrid: !!ccGrid, ccCells, ccDrow, ccStack,
-                           calcAfterEdit, calcEditName, hhFirst, holdCell0,
+                           calcAfterEdit, calcEditName, hhFirst, holdCell0, fzCalc,
                            closeIsSel, closeRemaining, closeSelTxt, overErr, cfVis, cfp, nameA, nameUnknown,
                            rvEditTitle, rvEditBack, rvEditAt, rvAfter});
   })()`);
@@ -1412,6 +1424,10 @@ async function main() {
   check('持仓表(v50.45): 首列是「标的」, 认不出代码时原样显示',
         fu.hhFirst === '标的' && fu.holdCell0 === 'e2efut01',
         JSON.stringify([fu.hhFirst, fu.holdCell0]));
+  check('测算卡字号(v50.46): 切大号后明细数值与「每手浮盈」都变大',
+        parseFloat(fu.fzCalc.v1) > parseFloat(fu.fzCalc.v0)
+        && parseFloat(fu.fzCalc.r1) > parseFloat(fu.fzCalc.r0),
+        'v ' + fu.fzCalc.v0 + '→' + fu.fzCalc.v1 + ', rp ' + fu.fzCalc.r0 + '→' + fu.fzCalc.r1);
   check('平仓(v50.44): 合约是下拉且带剩余手数',
         fu.closeIsSel && fu.closeRemaining === 3, JSON.stringify([fu.closeIsSel, fu.closeRemaining]));
   check('平仓(v50.44): 下拉文案含合约号与「余N手」(无看涨看跌)',

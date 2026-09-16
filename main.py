@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5045            # 与 README 版本号 v50.45 对齐(数值比较用于单实例接管)
+APP_VERSION = 5046            # 与 README 版本号 v50.46 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3400,6 +3400,17 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 #fundsArea .funds-bar .seg button{font-size:var(--fz-seg);padding:9px 18px}
 #fundsArea .funds-bar .btn.sm{font-size:var(--fz-btn2);padding:7px 13px}
 #tradesArea .tip, #fundsArea .tip{font-size:var(--fz-tip)}
+/* 详情页测算卡(开仓测算结果+阶梯止盈)跟随字号 (v50.46): 规则与 #calcArea 完全一致。
+   测算卡 v50.43 从计算器抄进交易详情后没带字号覆盖, 基础样式写死 px → 切字号一直不变 */
+#tradesArea .ratio-strip .l{font-size:var(--fz-lbl)}
+#tradesArea .details.grid2 .dcell{padding:10px 16px}
+#tradesArea .details.grid2 .k{font-size:var(--fz-micro)}
+#tradesArea .details.grid2 .v{font-size:var(--fz-td2)}
+#tradesArea .ladder-hd .ladder-sub{font-size:var(--fz-small)}
+#tradesArea .ladder-hd .ladder-note{font-size:var(--fz-micro)}
+#tradesArea .rung .rt{font-size:var(--fz-micro)}
+#tradesArea .rung .rt b{font-size:var(--fz-lbl)}
+#tradesArea .rung .rp{font-size:var(--fz-micro)}
 #fundsArea .chartbox .legend{font-size:var(--fz-legend)}
 
 /* ===== 开仓计算页 字号放大 (变量驱动) ===== */
