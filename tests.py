@@ -722,6 +722,43 @@ check("两批次持仓手数各自独立(3 vs 5)",
 for _x in (_do1, _dc1, _do2):
     trade_delete(_x)
 
+# 9b5. v50.52: 复盘笔记按 (标的, 批次) 归属, 不再按品种共享
+print("\n== 复盘按记录独立 (v50.52) ==")
+from main import (trade_review_upsert, trade_review_list, trade_review_delete,
+                  trade_review_import_record)
+_ru = 'rvu'
+_rb1, _rb2 = 'B20260920000001aa', 'B20260920000002bb'
+_r1 = trade_review_upsert({'mode': 'futures', 'underlying': _ru, 'batch': _rb1,
+                           'review_at': '2026-09-20T10:00', 'content': '第一批的复盘'})
+_r2 = trade_review_upsert({'mode': 'futures', 'underlying': _ru, 'batch': _rb2,
+                           'review_at': '2026-09-20T11:00', 'content': '第二批的复盘'})
+check("两批次的复盘各自只看到自己那条",
+      [x['content'] for x in trade_review_list('futures', _ru, _rb1)] == ['第一批的复盘']
+      and [x['content'] for x in trade_review_list('futures', _ru, _rb2)] == ['第二批的复盘'],
+      str([x['content'] for x in trade_review_list('futures', _ru, _rb1)],
+          ) + ' / ' + str([x['content'] for x in trade_review_list('futures', _ru, _rb2)]))
+check("复盘带 batch 字段返回",
+      all(x['batch'] in (_rb1, _rb2) for x in trade_review_list('futures', _ru, _rb1)), '')
+# 不传 batch = 该标的全部(导出备份用), 条数不能少
+check("不带批次查=该标的全部(备份导出用)",
+      len(trade_review_list('futures', _ru)) == 2, str(len(trade_review_list('futures', _ru))))
+# 编辑内容不改归属: 只传 id + content(前端也可能漏传 batch)
+trade_review_upsert({'id': _r1, 'mode': 'futures', 'underlying': _ru,
+                     'review_at': '2026-09-20T10:00', 'content': '第一批的复盘(改)'})
+check("编辑复盘不丢批次归属",
+      [x['content'] for x in trade_review_list('futures', _ru, _rb1)] == ['第一批的复盘(改)'], '')
+# 备份导入保留 batch
+trade_review_delete(_r2)
+trade_review_import_record({'id': _r2, 'mode': 'futures', 'underlying': _ru, 'batch': _rb2,
+                            'review_at': '2026-09-20T11:00', 'content': '第二批的复盘'})
+check("复盘导入保留批次归属",
+      [x['content'] for x in trade_review_list('futures', _ru, _rb2)] == ['第二批的复盘'], '')
+check("导入后两个批次仍是各自一条(没并到一起)",
+      len([x for x in trade_review_list('futures', _ru) if x['batch'] == _rb1]) == 1
+      and len([x for x in trade_review_list('futures', _ru) if x['batch'] == _rb2]) == 1, '')
+trade_review_delete(_r1)
+trade_review_delete(_r2)
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings

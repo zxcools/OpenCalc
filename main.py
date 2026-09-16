@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5051            # 与 README 版本号 v50.51 对齐(数值比较用于单实例接管)
+APP_VERSION = 5052            # 与 README 版本号 v50.52 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1296,7 +1296,8 @@ def _db_ensure_schema(conn):
             underlying  TEXT    NOT NULL DEFAULT '',
             review_at   TEXT    NOT NULL,     -- ISO 时间, 默认当前时间
             content     TEXT    NOT NULL DEFAULT '',
-            created_at  TEXT
+            created_at  TEXT,
+            batch       TEXT                  -- 批次号: 复盘跟着「哪一条记录」走(v50.52)
         )
         """
     )
@@ -1314,7 +1315,10 @@ def _db_ensure_schema(conn):
         ("batch", "TEXT"),                              # 批次号: 空=默认批次(手动新增/老数据); 非空=独立成一条主页记录
     ])
     _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
-    _ensure_cols("trade_reviews", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
+    _ensure_cols("trade_reviews", [
+        ("mode", "TEXT NOT NULL DEFAULT 'options'"),
+        ("batch", "TEXT"),        # v50.52: 复盘按 (标的, 批次) 归属, 不再按品种共享
+    ])
 
 
 def _calc_record_metrics(initial_equity, end_equity, cash_flow):
@@ -2295,16 +2299,24 @@ _TRADE_IMPORT_COLS = (
 def trade_review_to_dict(r):
     return {"id": r["id"], "mode": (r["mode"] if "mode" in r.keys() else "options") or "options",
             "underlying": r["underlying"] or "", "review_at": r["review_at"] or "",
-            "content": r["content"] or "", "created_at": r["created_at"] or ""}
+            "content": r["content"] or "", "created_at": r["created_at"] or "",
+            "batch": (r["batch"] if "batch" in r.keys() else "") or ""}
 
 
-def trade_review_list(mode="options", underlying=None):
-    """复盘笔记列表: 按时间倒序(最近的在最上)。underlying=None → 该模式全部。"""
+def trade_review_list(mode="options", underlying=None, batch=None):
+    """复盘笔记列表: 按时间倒序(最近的在最上)。
+
+    underlying=None → 该模式全部(导出备份用)
+    underlying=某标的 → 只取该标的; 再传 batch → 只取该「记录(批次)」的复盘(v50.52)
+    ⚠ 详情页必须 underlying + batch 一起传, 否则同品种多条记录会看到同一份复盘
+    """
     db = _fund_db()
     sql = "SELECT * FROM trade_reviews WHERE IFNULL(mode,'options')=?"
     args = [mode]
     if underlying is not None:
         sql += " AND underlying=?"; args.append(underlying)
+    if batch is not None:
+        sql += " AND IFNULL(batch,'')=?"; args.append(batch or "")
     rows = db.execute(sql + " ORDER BY review_at DESC, id DESC", args).fetchall()
     return [trade_review_to_dict(r) for r in rows]
 
@@ -2318,16 +2330,25 @@ def trade_review_upsert(payload):
     if not content:
         raise ValueError("复盘内容不能为空")
     review_at = (payload.get("review_at") or "").strip() or now
+    underlying = (payload.get("underlying") or "").strip()
+    batch = (payload.get("batch") or "").strip()
     rec_id = payload.get("id")
     if rec_id:
-        if not db.execute("SELECT id FROM trade_reviews WHERE id=?", (rec_id,)).fetchone():
+        old = db.execute("SELECT underlying, IFNULL(batch,'') AS batch FROM trade_reviews WHERE id=?", (rec_id,)).fetchone()
+        if not old:
             raise ValueError("复盘不存在 id=%s" % rec_id)
-        db.execute("UPDATE trade_reviews SET review_at=?, content=?, underlying=? WHERE id=?",
-                   (review_at, content, (payload.get("underlying") or "").strip(), rec_id))
+        # 编辑时调用方没传归属 → 保持原样, 免得一次改内容把复盘挪到别的记录去
+        if not underlying:
+            underlying = old["underlying"] or ""
+        if payload.get("batch") is None:
+            batch = old["batch"] or ""
+        db.execute("UPDATE trade_reviews SET review_at=?, content=?, underlying=?, batch=? WHERE id=?",
+                   (review_at, content, underlying, batch, rec_id))
         return rec_id
     db.execute(
-        "INSERT INTO trade_reviews (mode, underlying, review_at, content, created_at) VALUES (?,?,?,?,?)",
-        (mode, (payload.get("underlying") or "").strip(), review_at, content, now))
+        "INSERT INTO trade_reviews (mode, underlying, review_at, content, created_at, batch) "
+        "VALUES (?,?,?,?,?,?)",
+        (mode, underlying, review_at, content, now, batch))
     return db.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
@@ -2353,8 +2374,9 @@ def trade_review_import_record(r):
         "review_at": (r.get("review_at") or "").strip() or now,
         "content": content,
         "created_at": r.get("created_at") or now,
+        "batch": (r.get("batch") or "").strip(),
     }
-    cols = ("id", "mode", "underlying", "review_at", "content", "created_at")
+    cols = ("id", "mode", "underlying", "review_at", "content", "created_at", "batch")
     db = _fund_db()
     if row["id"] is None:
         cols2 = [c for c in cols if c != "id"]
@@ -2619,7 +2641,9 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             mode = _mode_arg(qs.get("mode"))
             u = (qs.get("underlying") or [None])[0]
-            self._send(200, _json({"ok": True, "reviews": trade_review_list(mode, u)}))
+            # v50.52: 详情页要同时传 batch, 复盘才跟着「这条记录」走
+            bt = (qs.get("batch") or [None])[0]
+            self._send(200, _json({"ok": True, "reviews": trade_review_list(mode, u, bt)}))
 
         elif path == "/api/funds/data-info":
             self._send(200, _json({"ok": True, **fund_data_info()}))
@@ -5635,8 +5659,11 @@ const TradeUI = {
   async loadReviews(){
     if (!this.isFut()){ this.reviews = []; this.renderReviews(); return; }
     const u = (this.detail && this.detail.underlying) || '';
+    // ⚠ v50.52: 必须带 batch —— 复盘跟着「这条记录」走, 只按品种查会让同品种多条记录看到同一份复盘
+    const b = (this.detail && this.detail.batch) || '';
     try {
-      const r = await fetchT('/api/trades/reviews?mode=futures&underlying=' + encodeURIComponent(u));
+      const r = await fetchT('/api/trades/reviews?mode=futures&underlying=' + encodeURIComponent(u)
+        + '&batch=' + encodeURIComponent(b));
       const d = await r.json();
       this.reviews = d.ok ? (d.reviews || []) : [];
     } catch (e) { this.reviews = []; }
@@ -5697,6 +5724,7 @@ const TradeUI = {
     const payload = {
       mode: 'futures',
       underlying: (this.detail && this.detail.underlying) || '',
+      batch: (this.detail && this.detail.batch) || '',   // v50.52: 复盘跟着当前这条记录走
       review_at: $('rvAt').value || '',
       content: content,
     };

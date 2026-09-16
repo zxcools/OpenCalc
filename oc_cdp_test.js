@@ -1728,6 +1728,64 @@ async function main() {
   check('详情页(v50.51): 操作记录也只属于本批次(1 条 vs 2 条)',
         md.ops2 === 1 && md.ops1 === 2, 'ops1=' + md.ops1 + ' ops2=' + md.ops2);
 
+  // ===== v50.52: 复盘笔记跟着「这条记录」走 =====
+  const rvRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const U = 'e2erv01', B1 = 'B20260920000001aa', B2 = 'B20260920000002bb';
+    const clean = async () => {
+      const g = await (await fetch('/api/trades/groups?mode=futures')).json();
+      for (const it of (g.groups || [])) {
+        if (String(it.underlying) !== U) continue;
+        const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + U
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+      const rv = await (await fetch('/api/trades/reviews?mode=futures&underlying=' + U)).json();
+      for (const x of (rv.reviews || [])) {
+        await fetch('/api/trades/review/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: x.id})});
+      }
+    };
+    await clean();
+    for (const b of [B1, B2]) {
+      await post({underlying: U, contract: 'sr2611', op_type: 'open', direction: 'buy',
+                  open_date: '2026-09-20', open_price: 5400, qty: 1, premium: 0, mode: 'futures', batch: b});
+    }
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(900);
+    // 批次1 里写一条复盘
+    await TradeUI.loadDetail(U, B1);
+    await w(700);
+    TradeUI.openReviewModal();
+    await w(300);
+    document.getElementById('rvContent').value = '只属于批次1的复盘';
+    await TradeUI.submitReview();
+    await w(800);
+    const list1 = [...document.querySelectorAll('#reviewList .review-item .rv-c')].map(x => x.textContent);
+    // 切到批次2 → 不该看到批次1 的复盘
+    await TradeUI.loadDetail(U, B2);
+    await w(800);
+    const list2 = [...document.querySelectorAll('#reviewList .review-item .rv-c')].map(x => x.textContent);
+    const txt2 = document.getElementById('reviewList').textContent.replace(/\\s+/g, ' ').trim().slice(0, 30);
+    // 再切回批次1 → 复盘还在
+    await TradeUI.loadDetail(U, B1);
+    await w(800);
+    const list1b = [...document.querySelectorAll('#reviewList .review-item .rv-c')].map(x => x.textContent);
+    await clean();
+    return JSON.stringify({list1, list2, list1b, txt2});
+  })()`);
+  const rv = JSON.parse(rvRun);
+  check('复盘(v50.52): 在这条记录里写的复盘, 本记录能看到',
+        rv.list1.length === 1 && rv.list1[0] === '只属于批次1的复盘', JSON.stringify(rv.list1));
+  check('复盘(v50.52): 同品种另一条记录的详情里看不到(不再按品种共享)',
+        rv.list2.length === 0 && /暂无复盘笔记/.test(rv.txt2), rvRun);
+  check('复盘(v50.52): 切回原记录复盘仍在(归属稳定)',
+        rv.list1b.length === 1 && rv.list1b[0] === '只属于批次1的复盘', JSON.stringify(rv.list1b));
+
   // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
   const v541 = await evalJs(ws, `(() => {
     const out = {};
