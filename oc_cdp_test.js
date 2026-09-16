@@ -1304,15 +1304,17 @@ async function main() {
     const rqShort = q('tdCalcCard').querySelectorAll('.rung .rq.short').length;
     // (v50.46) 详情测算卡跟随字号: 切大号后明细数值/每手浮盈必须变大(之前写死 px 不跟随)
     const fzCalc = await (async () => {
-      const v0 = getComputedStyle(q('tdCalcCard').querySelector('.details.grid2 .v')).fontSize;
-      const r0 = getComputedStyle(q('tdCalcCard').querySelector('.rung .rp')).fontSize;
+      const g = sel => getComputedStyle(q('tdCalcCard').querySelector(sel)).fontSize;
+      const grab = () => ({v: g('.details.grid2 .v'), rp: g('.rung .rp'),
+                           rq: g('.rung .rq'), lb: g('.ladder-hd .lb'), k: g('.details.grid2 .k')});
+      const a = grab();
       document.querySelector('#fontSeg button[data-fz="lg"]').click();
       await new Promise(r=>setTimeout(r,300));
-      const v1 = getComputedStyle(q('tdCalcCard').querySelector('.details.grid2 .v')).fontSize;
-      const r1 = getComputedStyle(q('tdCalcCard').querySelector('.rung .rp')).fontSize;
+      const b = grab();
       document.querySelector('#fontSeg button[data-fz="md"]').click();
       await new Promise(r=>setTimeout(r,300));
-      return {v0, v1, r0, r1};
+      return {v0:a.v, v1:b.v, r0:a.rp, r1:b.rp,
+              rq0:a.rq, rq1:b.rq, lb0:a.lb, lb1:b.lb, k0:a.k, k1:b.k};
     })();
     // (v50.43) 详情卡测算明细与计算器同款两列: .details.grid2 + .dcell, 不再有遗留 .drow
     const ccGrid = q('tdCalcCard').querySelector('.details.grid2');
@@ -1428,6 +1430,16 @@ async function main() {
         parseFloat(fu.fzCalc.v1) > parseFloat(fu.fzCalc.v0)
         && parseFloat(fu.fzCalc.r1) > parseFloat(fu.fzCalc.r0),
         'v ' + fu.fzCalc.v0 + '→' + fu.fzCalc.v1 + ', rp ' + fu.fzCalc.r0 + '→' + fu.fzCalc.r1);
+  // v50.48: 之前 .rung .rq(阶梯止盈价格)/ .ladder-hd .lb 写死 px, 切字号纹丝不动 → 整块看着还是小
+  check('测算卡字号(v50.48): 阶梯止盈价格/标题也跟随字号(不再写死 px)',
+        parseFloat(fu.fzCalc.rq1) > parseFloat(fu.fzCalc.rq0)
+        && parseFloat(fu.fzCalc.lb1) > parseFloat(fu.fzCalc.lb0)
+        && parseFloat(fu.fzCalc.k1) > parseFloat(fu.fzCalc.k0),
+        'rq ' + fu.fzCalc.rq0 + '→' + fu.fzCalc.rq1 + ', lb ' + fu.fzCalc.lb0 + '→' + fu.fzCalc.lb1
+        + ', k ' + fu.fzCalc.k0 + '→' + fu.fzCalc.k1);
+  check('测算卡字号(v50.48): 中号下明细数值 ≥17px、止盈价 ≥24px(整体放大一档)',
+        parseFloat(fu.fzCalc.v0) >= 17 && parseFloat(fu.fzCalc.rq0) >= 24,
+        'v=' + fu.fzCalc.v0 + ' rq=' + fu.fzCalc.rq0);
   check('平仓(v50.44): 合约是下拉且带剩余手数',
         fu.closeIsSel && fu.closeRemaining === 3, JSON.stringify([fu.closeIsSel, fu.closeRemaining]));
   check('平仓(v50.44): 下拉文案含合约号与「余N手」(无看涨看跌)',
@@ -1448,6 +1460,85 @@ async function main() {
         JSON.stringify([fu.rvEditTitle, fu.rvEditBack, fu.rvEditAt]));
   check('复盘: 修改后内容更新且条数不变',
         fu.rvAfter.length === 2 && fu.rvAfter[0] === '第二条复盘(已改)', JSON.stringify(fu.rvAfter));
+
+  // ===== v50.47: 同品种不同批次 → 主页分成多条独立记录 =====
+  const batRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const U = 'e2ebat01', B1 = 'B20260915010101aa', B2 = 'B20260915020202bb';
+    // 清残留
+    const g0 = await (await fetch('/api/trades/groups?mode=futures')).json();
+    for (const it of (g0.groups || [])) {
+      if (String(it.underlying) !== U) continue;
+      const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + U
+        + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+      for (const op of (d.operations || [])) await del(op.id);
+    }
+    // 同品种、同合约, 两个批次各开一次
+    const base = {underlying: U, contract: 'e2ebat2609', op_type: 'open', direction: 'buy',
+                  open_price: 3500, qty: 2, premium: 1000, mode: 'futures'};
+    const i1 = (await post(Object.assign({}, base, {batch: B1, open_date: '2026-09-01'}))).id;
+    const i2 = (await post(Object.assign({}, base, {batch: B2, open_date: '2026-09-02'}))).id;
+    // 无批次的第三次(老行为: 与默认批次合并, 不额外增加)
+    const i3 = (await post(Object.assign({}, base, {open_date: '2026-09-03'}))).id;
+    const g = await (await fetch('/api/trades/groups?mode=futures')).json();
+    const mine = (g.groups || []).filter(x => x.underlying === U);
+    const ui = async () => {
+      await TradeUI.refresh(); await w(500);
+      return [...document.querySelectorAll('#tradesTable tbody tr.clickable')]
+        .filter(tr => tr.dataset.u === U)
+        .map(tr => ({b: tr.dataset.b || '', sub: (tr.querySelector('.u-sub') || {}).textContent || ''}));
+    };
+    // 主页: 同品种 3 条(2 个批次 + 1 个默认批次)
+    const rows = await ui();
+    // 点第二条(不同批次) → 详情只带该批次的操作记录
+    const tr2 = [...document.querySelectorAll('#tradesTable tbody tr.clickable')]
+      .filter(x => x.dataset.u === U).find(x => (x.dataset.b || '') === B2);
+    if (tr2) tr2.click();
+    await w(600);
+    const ops2 = (TradeUI.detail.operations || []).length;
+    const detBatch = TradeUI.detail.batch || '';
+    const holdQty = (TradeUI.detail.holdings || []).reduce((s,h) => s + (+h.qty||0), 0);
+    // 平仓 2 手(本批次正好 2 手) → 应成功, 且不影响另一批次
+    let closeOk = false, otherLeft = 0;
+    if (detBatch === B2) {
+      TradeUI.openEditModal('close', {fromDetail: true});
+      await w(400);
+      document.getElementById('tmCloseDate').value = '2026-09-04';
+      document.getElementById('tmCloseQty').value = '2';
+      document.getElementById('tmClosePrice').value = '3600';
+      document.getElementById('tmPnl').value = '2000';
+      closeOk = await TradeUI.submitModal();
+      await w(600);
+      const d1 = await (await fetch('/api/trades/detail?mode=futures&underlying=' + U + '&batch=' + B1)).json();
+      otherLeft = (d1.holdings || []).reduce((s,h) => s + (+h.qty||0), 0);
+    }
+    // 清理
+    for (const it of [...(await (await fetch('/api/trades/groups?mode=futures')).json()).groups]) {
+      if (String(it.underlying) !== U) continue;
+      const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + U
+        + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+      for (const op of (d.operations || [])) await del(op.id);
+    }
+    return JSON.stringify({n: mine.length, batches: mine.map(x => x.batch || ''), rows,
+                           ops2, detBatch, holdQty, closeOk, otherLeft,
+                           i1: !!i1, i2: !!i2, i3: !!i3});
+  })()`);
+  const bt = JSON.parse(batRun);
+  check('批次(v50.47): 同品种两个批次 → 主页 2 条独立记录(不是塞进同一条)',
+        bt.n === 3 && bt.batches.indexOf('B20260915010101aa') >= 0 && bt.batches.indexOf('B20260915020202bb') >= 0,
+        batRun);
+  check('批次(v50.47): 主表每行带自己的批次号(data-b), 三行互不相同',
+        bt.rows.length === 3 && new Set(bt.rows.map(r => r.b)).size === 3, JSON.stringify(bt.rows));
+  check('批次(v50.47): 标的下方补合约小字(同品种多行时区分用)',
+        bt.rows.every(r => /e2ebat2609/.test(r.sub)), JSON.stringify(bt.rows.map(r => r.sub)));
+  check('批次(v50.47): 点某批次行 → 详情只加载该批次的操作(1 条开仓)',
+        bt.detBatch === 'B20260915020202bb' && bt.ops2 === 1, 'batch=' + bt.detBatch + ' ops=' + bt.ops2);
+  check('批次(v50.47): 详情页新建平仓落在本批次, 不动另一批次的持仓',
+        bt.closeOk && bt.otherLeft === 2, 'closeOk=' + bt.closeOk + ' otherLeft=' + bt.otherLeft);
 
   // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
   const v541 = await evalJs(ws, `(() => {

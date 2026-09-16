@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5046            # 与 README 版本号 v50.46 对齐(数值比较用于单实例接管)
+APP_VERSION = 5048            # 与 README 版本号 v50.48 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1311,6 +1311,7 @@ def _db_ensure_schema(conn):
         ("init_stop", "REAL"),                          # 期货: 初次止损价
         ("init_target", "REAL"),                        # 期货: 初次止盈价
         ("calc_json", "TEXT"),                          # 期货: 开仓计算器测算结果快照(JSON)
+        ("batch", "TEXT"),                              # 批次号: 空=默认批次(手动新增/老数据); 非空=独立成一条主页记录
     ])
     _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
     _ensure_cols("trade_reviews", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
@@ -1849,6 +1850,7 @@ def _trade_record_to_dict(r):
         "init_stop": (r["init_stop"] if "init_stop" in r.keys() else None),
         "init_target": (r["init_target"] if "init_target" in r.keys() else None),
         "calc_json": (r["calc_json"] if "calc_json" in r.keys() else None),
+        "batch": (r["batch"] if "batch" in r.keys() else "") or "",
         "created_at": r["created_at"] or "",
         "updated_at": r["updated_at"] or "",
     }
@@ -1887,6 +1889,9 @@ def trade_upsert(payload):
 
     # 合约代码归一化(品种小写 + C/P 大写), 避免同一合约因大小写不同被当成两个
     payload["contract"] = normalize_contract(payload.get("contract"))
+    # 批次号(v50.47): 空串=默认批次; 主页按 (标的, 批次) 分组 → 同品种不同批次各自成一条记录
+    #   ⚠ 必须在平仓校验之前归一, 校验 SQL 要用它把可平量限定在同批次内
+    payload["batch"] = (payload.get("batch") or "").strip()
     _dup_id = payload.get("id")
 
     # 平仓数量校验: 不可超过开仓剩余(按合约大小写不敏感匹配)
@@ -1898,12 +1903,14 @@ def trade_upsert(payload):
         if cq <= 0:
             raise ValueError("平仓数量必须 > 0")
         opened = db.execute(
-            "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=?",
-            (strategy, underlying, _k(contract)),
+            "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? AND underlying=? "
+            "AND UPPER(TRIM(contract))=? AND IFNULL(batch,'')=?",
+            (strategy, underlying, _k(contract), payload["batch"]),
         ).fetchone()[0]
         closed = db.execute(
-            "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? AND UPPER(TRIM(contract))=?",
-            (strategy, underlying, _k(contract)),
+            "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? AND underlying=? "
+            "AND UPPER(TRIM(contract))=? AND IFNULL(batch,'')=?",
+            (strategy, underlying, _k(contract), payload["batch"]),
         ).fetchone()[0]
         if cq > opened - closed:
             raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed))
@@ -1940,7 +1947,7 @@ def trade_upsert(payload):
         "open_date", "open_delta", "target_delta", "call_put",
         "direction", "open_price", "qty", "premium",
         "close_qty", "close_price", "pnl", "close_date", "note",
-        "mode", "init_stop", "init_target", "calc_json",
+        "mode", "init_stop", "init_target", "calc_json", "batch",
     )
     # 兜底: close 类型允许 qty/premium 为空(平仓字段用 close_qty/pnl 表达; API 直调漏传不报错)
     if payload.get("op_type") == "close":
@@ -1973,13 +1980,13 @@ def trade_upsert(payload):
             underlying = payload.get("underlying")
             opened = db.execute(
                 "SELECT COALESCE(SUM(qty),0) FROM trade_records WHERE op_type='open' AND strategy=? "
-                "AND underlying=? AND UPPER(TRIM(contract))=? AND IFNULL(mode,'options')=?",
-                (strategy, underlying, _k(contract), payload["mode"]),
+                "AND underlying=? AND UPPER(TRIM(contract))=? AND IFNULL(mode,'options')=? AND IFNULL(batch,'')=?",
+                (strategy, underlying, _k(contract), payload["mode"], payload["batch"]),
             ).fetchone()[0]
             closed_ex = db.execute(
                 "SELECT COALESCE(SUM(close_qty),0) FROM trade_records WHERE op_type='close' AND strategy=? "
-                "AND underlying=? AND UPPER(TRIM(contract))=? AND id<>? AND IFNULL(mode,'options')=?",
-                (strategy, underlying, _k(contract), rec_id, payload["mode"]),
+                "AND underlying=? AND UPPER(TRIM(contract))=? AND id<>? AND IFNULL(mode,'options')=? AND IFNULL(batch,'')=?",
+                (strategy, underlying, _k(contract), rec_id, payload["mode"], payload["batch"]),
             ).fetchone()[0]
             if cq > opened - closed_ex:
                 raise ValueError("平仓数量(%d)超过剩余可平(%d)" % (cq, opened - closed_ex))
@@ -2023,12 +2030,14 @@ def trade_groups(strategy=None, mode="options"):
     recs = trade_list_records(strategy, mode)
     if not recs:
         return []
+    # ⚠ 分组键 = (标的, 批次): 同品种不同批次各自成一条主页记录(v50.47)
+    #   批次来自「开仓计算器 → 📥 加入记录」(每次生成唯一号); 手动新增/老数据批次为空 → 行为与以前一致
     by_u = {}
     for r in recs:
-        by_u.setdefault(r["underlying"], []).append(r)
+        by_u.setdefault((r["underlying"], r.get("batch") or ""), []).append(r)
 
     groups = []
-    for u, items in by_u.items():
+    for (u, batch), items in by_u.items():
         opens = [x for x in items if x["op_type"] == "open"]
         closes = [x for x in items if x["op_type"] == "close"]
         # 首次开仓日期
@@ -2073,6 +2082,7 @@ def trade_groups(strategy=None, mode="options"):
             close_status = "未平仓"
         groups.append({
             "underlying": u,
+            "batch": batch,
             "direction": direction,
             "open_date": first_open,
             "close_status": close_status,
@@ -2086,13 +2096,14 @@ def trade_groups(strategy=None, mode="options"):
     return groups
 
 
-def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
-    """单个标的详情: 上方持仓汇总(按 contract 分组, 仅算未平仓部分加权均价), 下方操作记录(按日期升序)."""
+def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", batch=""):
+    """单个标的详情: 上方持仓汇总(按 contract 分组, 仅算未平仓部分加权均价), 下方操作记录(按日期升序).
+    batch: 批次号(v50.47), 只取该批次的操作记录; 空串=默认批次"""
     db = _fund_db()
     rows = db.execute(
         "SELECT * FROM trade_records WHERE strategy=? AND underlying=? "
-        "AND IFNULL(mode,'options')=? ORDER BY id ASC",
-        (strategy, underlying, mode),
+        "AND IFNULL(mode,'options')=? AND IFNULL(batch,'')=? ORDER BY id ASC",
+        (strategy, underlying, mode, batch or ""),
     ).fetchall()
     items = [_trade_record_to_dict(r) for r in rows]
     opens = [x for x in items if x["op_type"] == "open"]
@@ -2163,7 +2174,7 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
     def _op_dt(x):
         return x["open_date"] if x["op_type"] == "open" else x["close_date"]
     ops = sorted(items, key=_op_dt)
-    return {"underlying": underlying, "holdings": holdings, "operations": ops}
+    return {"underlying": underlying, "batch": batch or "", "holdings": holdings, "operations": ops}
 
 
 # ----- 监控池快照 -----
@@ -2232,6 +2243,9 @@ _TRADE_IMPORT_COLS = (
     "id", "strategy", "underlying", "contract", "op_type", "open_date", "open_delta",
     "target_delta", "call_put", "direction", "open_price", "qty", "premium",
     "close_qty", "close_price", "pnl", "close_date", "note", "created_at", "updated_at",
+    # ⚠ 这几个必须带上: 之前只导上面那些字段 → 恢复备份后期货记录全变成 options 模式、
+    #   初次止损止盈与测算快照被清空、批次号丢失(v50.47 一并修)
+    "mode", "init_stop", "init_target", "calc_json", "batch",
 )
 
 
@@ -2309,6 +2323,11 @@ def trade_import_record(r):
         "note": r.get("note") or "",
         "created_at": r.get("created_at") or now,
         "updated_at": r.get("updated_at") or now,
+        "mode": r.get("mode") if r.get("mode") in ("options", "futures") else "options",
+        "init_stop": r.get("init_stop"),
+        "init_target": r.get("init_target"),
+        "calc_json": r.get("calc_json") or None,
+        "batch": (r.get("batch") or "").strip(),
     }
     db = _fund_db()
     if row["id"] is None:
@@ -2505,10 +2524,11 @@ class Handler(BaseHTTPRequestHandler):
             underlying = qs.get("underlying", [""])[0]
             strategy = (qs.get("strategy") or [TRADE_STRATEGY_DEFAULT])[0]
             mode = _mode_arg(qs.get("mode"))
+            batch = (qs.get("batch") or [""])[0]        # v50.47: 批次号(缺省=默认批次)
             if not underlying:
                 self._send(200, _json({"ok": False, "error": "缺少 underlying"}))
                 return
-            self._send(200, _json({"ok": True, **trade_detail(underlying, strategy, mode)}))
+            self._send(200, _json({"ok": True, **trade_detail(underlying, strategy, mode, batch)}))
 
         elif path == "/api/trades/pool":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
@@ -2910,6 +2930,11 @@ HTML = r"""<!DOCTYPE html>
   --fz-legend:13px;  /* 图表图例 */
   --fz-chart:13px;    /* Chart.js 刻度字号(实时读取) */
   --fz-chart2:14px;   /* Chart.js 数值标签 */
+  /* 分页面「开仓测算结果」专用(v50.48): 侧栏窄, 通用变量偏小 → 这一组整体放大一档 */
+  --fz-calc-k:13px;   /* 测算卡标签(通用 micro=12) */
+  --fz-calc-v:17px;   /* 测算卡数值(通用 td2=14.5) */
+  --fz-rungq:24px;    /* 阶梯止盈价格(原写死 20) */
+  --fz-lbh:14.5px;    /* 阶梯止盈标题(原写死 13) */
 }
 body.fz-sm{
   --fz-th:12.5px; --fz-td:13.5px; --fz-td2:13px; --fz-tag:12px;
@@ -2918,6 +2943,7 @@ body.fz-sm{
   --fz-lbl:12.5px; --fz-input:13.5px;
   --fz-micro:11px; --fz-small:11.5px; --fz-mid:12px; --fz-fml:11px;
   --fz-legend:11.5px; --fz-chart:11.5px; --fz-chart2:12.5px;
+  --fz-calc-k:12px; --fz-calc-v:15.5px; --fz-rungq:21px; --fz-lbh:13.5px;
 }
 body.fz-lg{
   --fz-th:15.5px; --fz-td:17px; --fz-td2:16px; --fz-tag:15px;
@@ -2926,6 +2952,7 @@ body.fz-lg{
   --fz-lbl:15px; --fz-input:17px;
   --fz-micro:13.5px; --fz-small:14px; --fz-mid:14.5px; --fz-fml:13.5px;
   --fz-legend:14.5px; --fz-chart:15px; --fz-chart2:16px;
+  --fz-calc-k:14.5px; --fz-calc-v:19px; --fz-rungq:27px; --fz-lbh:16.5px;
 }
 [data-theme="light"]{
   /* 护眼浅色(白天): 豆绿底 + 米绿卡片(明显非纯白) */
@@ -3401,16 +3428,25 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 #fundsArea .funds-bar .btn.sm{font-size:var(--fz-btn2);padding:7px 13px}
 #tradesArea .tip, #fundsArea .tip{font-size:var(--fz-tip)}
 /* 详情页测算卡(开仓测算结果+阶梯止盈)跟随字号 (v50.46): 规则与 #calcArea 完全一致。
-   测算卡 v50.43 从计算器抄进交易详情后没带字号覆盖, 基础样式写死 px → 切字号一直不变 */
+   测算卡 v50.43 从计算器抄进交易详情后没带字号覆盖, 基础样式写死 px → 切字号一直不变
+   v50.48: 侧栏窄、整体偏小 → 数值类改用放大的 --fz-calc-* / --fz-rungq / --fz-lbh 一组,
+           并把之前漏掉的 .rung .rq(阶梯止盈价格, 写死 20px) / .ladder-hd .lb 也接上变量 */
 #tradesArea .ratio-strip .l{font-size:var(--fz-lbl)}
+#tradesArea .ratio-strip .l .dim{font-size:var(--fz-micro)}
 #tradesArea .details.grid2 .dcell{padding:10px 16px}
-#tradesArea .details.grid2 .k{font-size:var(--fz-micro)}
-#tradesArea .details.grid2 .v{font-size:var(--fz-td2)}
+#tradesArea .details.grid2 .k{font-size:var(--fz-calc-k)}
+#tradesArea .details.grid2 .v{font-size:var(--fz-calc-v)}
+#tradesArea .ladder-hd .lb{font-size:var(--fz-lbh)}
 #tradesArea .ladder-hd .ladder-sub{font-size:var(--fz-small)}
 #tradesArea .ladder-hd .ladder-note{font-size:var(--fz-micro)}
 #tradesArea .rung .rt{font-size:var(--fz-micro)}
 #tradesArea .rung .rt b{font-size:var(--fz-lbl)}
+#tradesArea .rung .rt .ad{font-size:var(--fz-mid)}
+#tradesArea .rung .rq{font-size:var(--fz-rungq)}
 #tradesArea .rung .rp{font-size:var(--fz-micro)}
+/* v50.47: 同品种多条记录时, 标的下面的合约小字(区分用) */
+#tradesArea .trades-tbl .u-sub{font-size:var(--fz-micro);color:var(--sub);font-weight:400;
+  margin-top:2px;font-family:Consolas,monospace;opacity:.85}
 #fundsArea .chartbox .legend{font-size:var(--fz-legend)}
 
 /* ===== 开仓计算页 字号放大 (变量驱动) ===== */
@@ -4920,10 +4956,15 @@ async function addToTradeRecord(){
     margin_used: lastCalcF.margin_used,
     ladder: (lastCalcF.ladder || []).map(x => ({r: x.r, price: x.price})),
   };
+  // 批次号(v50.47): 每次「加入记录」生成一个唯一批次 → 同品种多次开仓在主页各自成一条记录,
+  //   不再全部塞进同一条里当「新操作」。格式: 时间戳 + 2 位随机(防同一秒内连点撞号)
+  const batch = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
+    + Math.random().toString(36).slice(2, 4);
   const payload = {
     mode: 'futures',
     underlying: c.code,
     contract: c.code,
+    batch: batch,
     op_type: 'open',
     direction: dirF === 'short' ? 'sell' : 'buy',
     open_date: new Date().toISOString().slice(0, 10),
@@ -4949,7 +4990,7 @@ async function addToTradeRecord(){
     // 直接跳到交易记录：期货模式, 并打开该标的详情
     const tab = document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]');
     if (tab) tab.click();
-    if (typeof TradeUI !== 'undefined') TradeUI.loadDetail(c.code);
+    if (typeof TradeUI !== 'undefined') TradeUI.loadDetail(c.code, batch);
   } catch (e) { alert('加入记录失败：' + e); }
 }
 
@@ -5321,7 +5362,7 @@ const TradeUI = {
     this.renderPool();
     if (this.detail) {
       const u = this.detail.underlying;
-      this.loadDetail(u);
+      this.loadDetail(u, this.detail.batch || '');   // v50.47: 带上批次, 否则会跳回默认批次那条
     }
   },
 
@@ -5355,16 +5396,19 @@ const TradeUI = {
       const statusTag = g.close_status === '已平仓' ? 'closed' : (g.close_status === '部分平仓' ? 'partial' : 'unclosed');
       const pnl = g.total_pnl;
       const pnlCls = pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '');
-      return `<tr class="clickable" data-u="${escHtml(g.underlying)}">
-        <td><b>${escHtml(this.underlyingText(g.underlying))}</b></td>
+      // v50.47: 同品种会有多条(不同批次) → 标的下面补一行合约小字, 否则两行长得一模一样分不清
+      const con = (g.contracts || []).filter(Boolean);
+      const conTxt = con.length ? ('<div class="u-sub">' + escHtml(con.join(' / ')) + '</div>') : '';
+      return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
+        <td><b>${escHtml(this.underlyingText(g.underlying))}</b>${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
         <td>${this.fmtDate(g.open_date)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>
         <td class="${pnlCls}" style="font-weight:600">${pnl ? (pnl > 0 ? '+' : '') + 'CN¥' + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
         <td>${this.fmtDate(g.last_close_date)}</td>
         <td class="row-actions">
-          <button class="iconbtn" data-act="edit" data-u="${escHtml(g.underlying)}" title="修改开仓内容">✎</button>
-          <button class="iconbtn" data-act="del" data-u="${escHtml(g.underlying)}" title="删除该标的全部记录">🗑</button>
+          <button class="iconbtn" data-act="edit" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}" title="修改开仓内容">✎</button>
+          <button class="iconbtn" data-act="del" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}" title="删除该记录全部操作">🗑</button>
         </td>
       </tr>`;
     }).join('');
@@ -5386,12 +5430,12 @@ const TradeUI = {
         const btn = e.target.closest('[data-act]');
         if (btn) {
           e.stopPropagation();
-          const u = btn.dataset.u;
-          if (btn.dataset.act === 'edit') this.editUnderlying(u);
-          else if (btn.dataset.act === 'del') this.deleteUnderlying(u);
+          const u = btn.dataset.u, b = btn.dataset.b || '';
+          if (btn.dataset.act === 'edit') this.editUnderlying(u, b);
+          else if (btn.dataset.act === 'del') this.deleteUnderlying(u, b);
           return;
         }
-        this.loadDetail(tr.dataset.u);
+        this.loadDetail(tr.dataset.u, tr.dataset.b || '');
       });
     });
   },
@@ -5413,9 +5457,11 @@ const TradeUI = {
     return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.indexOf(t) >= 0);
   },
 
-  async loadDetail(underlying){
+  async loadDetail(underlying, batch){
+    batch = batch || '';
     try {
-      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying));
+      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying)
+        + '&batch=' + encodeURIComponent(batch));   // v50.47: 只取该批次的操作记录
       const d = await r.json();
       if (!d.ok) { alert('加载详情失败: ' + d.error); return; }
       this.detail = d;
@@ -5453,7 +5499,7 @@ const TradeUI = {
     /* 测算明细与计算器同款两列网格(.details.grid2 + .dcell): 标签在上数值在下, 长标签挪 title(v50.43) */
     box.innerHTML =
       '<div class="ratio-strip" style="margin-bottom:8px"><span class="l">开仓测算结果'
-      + '<span class="dim" style="font-size:11px">（开仓计算器 · ' + escHtml(c.name || c.code || '')
+      + '<span class="dim">（开仓计算器 · ' + escHtml(c.name || c.code || '')
       + ' ' + (c.dir === 'short' ? '空头' : '多头') + '）</span></span></div>'
       + '<div class="details grid2" style="margin-top:0">'
       + '<div class="dcell"><span class="k">开仓额度（预算）</span><span class="v money">' + money(c.budget) + '</span></div>'
@@ -5804,6 +5850,9 @@ const TradeUI = {
     $('tmError').textContent = '';
     // 标记「从详情页发起」: 详情页的新建开仓不显示初次止损/止盈(v50.40)
     bg.dataset.fromDetail = preset.fromDetail ? '1' : '';
+    // 批次号(v50.47): 编辑已有记录 → 用它自己的批次; 否则跟着当前详情(详情页新建的开/平仓落进同一批)
+    //   主页「新建开仓」时 detail 为空 → 空批次(与老行为一致, 同品种合并)
+    bg.dataset.batch = (preset.batch != null ? preset.batch : ((this.detail && this.detail.batch) || '')) || '';
     const isOpen = type === 'open';
     const isEdit = !!preset.id;
     $('tmTitle').textContent = isEdit ? ('修改' + (isOpen?'开仓':'平仓')) : ('新建' + (isOpen?'开仓':'平仓'));
@@ -6036,6 +6085,7 @@ const TradeUI = {
       close_date: $('tmCloseDate').value,
       note: $('tmNote').value,
       mode: this.mode,
+      batch: ($('tradeModalBg').dataset.batch || ''),   // v50.47: 跟随批次, 平仓/加仓落进同一条主页记录
     };
     // 期货: 无看涨看跌/delta; 合约就是用户填的具体合约号(v50.44 起不再「标的即合约」); 补初次止损止盈
     if (this.isFut()){
@@ -6087,24 +6137,29 @@ const TradeUI = {
     } catch (e) { alert('删除失败: ' + e); }
   },
 
-  /* 主表行修改/删除: 编辑最新一条 open 记录 / 删除该 underlying 全部记录 */
-  async editUnderlying(underlying){
+  /* 主表行修改/删除: 编辑最新一条 open 记录 / 删除该 (标的, 批次) 的全部记录 */
+  async editUnderlying(underlying, batch){
+    batch = batch || '';
     try {
-      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying));
+      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying)
+        + '&batch=' + encodeURIComponent(batch));
       const d = await r.json();
       if (!d.ok || !d.operations.length){ alert('无记录可编辑'); return; }
       // 取最早一条 open 记录(代表性"开仓内容")
       const open = d.operations.find(x => x.op_type === 'open');
       if (!open){ alert('该标的没有开仓记录, 无需修改'); return; }
-      this.loadDetail(underlying);   // 同时展开分页面, 让用户看到全貌
+      this.loadDetail(underlying, batch);   // 同时展开分页面, 让用户看到全貌
       this.openEditModal('open', open);
     } catch (e) { alert('加载失败: ' + e); }
   },
 
-  async deleteUnderlying(underlying){
-    if (!confirm('确认删除 ' + underlying + ' 的全部交易记录? 此操作不可恢复')) return;
+  async deleteUnderlying(underlying, batch){
+    batch = batch || '';
+    const _nm = this.underlyingText(underlying);
+    if (!confirm('确认删除「' + _nm + '」这条记录下的全部操作? 此操作不可恢复')) return;
     try {
-      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying));
+      const r = await fetchT('/api/trades/detail?' + this.modeQ() + '&underlying=' + encodeURIComponent(underlying)
+        + '&batch=' + encodeURIComponent(batch));
       const d = await r.json();
       if (!d.ok){ alert('加载失败'); return; }
       for (const op of d.operations){

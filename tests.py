@@ -575,6 +575,61 @@ check("持仓项带 underlying 字段", bool(_hd['holdings']) and _hd['holdings'
       str(_hd['holdings'][:1]))
 trade_delete(_hid)
 
+# 9b2. 批次号 (v50.47): 同品种不同批次 → 主页各自成一条记录, 详情/平仓都限定在同批次
+print("\n== 批次号分组 (v50.47) ==")
+_bu = 'batchu'
+_b1, _b2 = 'B20260915010101aa', 'B20260915020202bb'
+_i1 = trade_upsert({'underlying': _bu, 'contract': 'cu2610', 'op_type': 'open', 'direction': 'buy',
+                    'open_date': '2026-09-01', 'open_price': 78000, 'qty': 2, 'premium': 0,
+                    'mode': 'futures', 'batch': _b1})
+_i2 = trade_upsert({'underlying': _bu, 'contract': 'cu2610', 'op_type': 'open', 'direction': 'buy',
+                    'open_date': '2026-09-02', 'open_price': 78100, 'qty': 3, 'premium': 0,
+                    'mode': 'futures', 'batch': _b2})
+_gs = trade_groups(mode='futures')
+_gm = [g for g in _gs if g['underlying'] == _bu]
+check("同品种两个批次 → 主页 2 条记录", len(_gm) == 2, str([(g['batch'], g['open_date']) for g in _gm]))
+check("分组带 batch 字段", sorted(g['batch'] for g in _gm) == sorted([_b1, _b2]), str(_gm))
+_d1 = trade_detail(_bu, mode='futures', batch=_b1)
+check("详情按批次过滤(只看到本批 1 条开仓)", len(_d1['operations']) == 1 and _d1['operations'][0]['qty'] == 2,
+      str(_d1['operations']))
+check("详情返回 batch", _d1.get('batch') == _b1, str(_d1.get('batch')))
+_d2 = trade_detail(_bu, mode='futures', batch=_b2)
+check("另一批次详情独立", len(_d2['operations']) == 1 and _d2['operations'][0]['qty'] == 3, str(_d2['operations']))
+# 平仓不能跨批次占用: 批次2 只开了 3 手, 平 5 手应被拒(不限批次的话会被允许)
+try:
+    trade_upsert({'underlying': _bu, 'contract': 'cu2610', 'op_type': 'close', 'direction': 'sell',
+                  'close_date': '2026-09-03', 'close_qty': 5, 'close_price': 78200, 'pnl': 100,
+                  'mode': 'futures', 'batch': _b2})
+    check("平仓数量不跨批次(超本批可平被拒)", False, "未拒绝")
+except ValueError as _e:
+    check("平仓数量不跨批次(超本批可平被拒)", "超过剩余可平" in str(_e), str(_e))
+_ci = trade_upsert({'underlying': _bu, 'contract': 'cu2610', 'op_type': 'close', 'direction': 'sell',
+                    'close_date': '2026-09-03', 'close_qty': 3, 'close_price': 78200, 'pnl': 300,
+                    'mode': 'futures', 'batch': _b2})
+check("本批次内平仓正常", trade_detail(_bu, mode='futures', batch=_b1)['operations'][0]['qty'] == 2,
+      "批次1 不该被批次2 的平仓影响")
+# 无批次的老数据仍按标的合并(向后兼容)
+_i3 = trade_upsert({'underlying': _bu, 'contract': 'cu2612', 'op_type': 'open', 'direction': 'buy',
+                    'open_date': '2026-09-04', 'open_price': 78200, 'qty': 1, 'premium': 0, 'mode': 'futures'})
+_i4 = trade_upsert({'underlying': _bu, 'contract': 'cu2612', 'op_type': 'open', 'direction': 'buy',
+                    'open_date': '2026-09-05', 'open_price': 78300, 'qty': 1, 'premium': 0, 'mode': 'futures'})
+_gm2 = [g for g in trade_groups(mode='futures') if g['underlying'] == _bu and not g['batch']]
+check("无批次记录仍合并成 1 条(老行为不变)", len(_gm2) == 1, str(_gm2))
+check("空批次详情能看到两条开仓", len(trade_detail(_bu, mode='futures')['operations']) == 2,
+      str(len(trade_detail(_bu, mode='futures')['operations'])))
+# 导入/导出要带上批次(否则备份恢复后又被合并)
+from main import trade_import_record
+_im = trade_import_record({'id': 99001, 'underlying': _bu, 'contract': 'cu2610', 'op_type': 'open',
+                           'direction': 'buy', 'open_date': '2026-09-06', 'open_price': 78400,
+                           'qty': 1, 'premium': 0, 'mode': 'futures', 'batch': _b1,
+                           'calc_json': '{"lots":1}', 'init_stop': 77800, 'init_target': 79000})
+_imp = [o for o in trade_detail(_bu, mode='futures', batch=_b1)['operations'] if o['id'] == 99001]
+check("导入保留批次号", bool(_imp) and _imp[0]['batch'] == _b1, str(_imp[:1]))
+check("导入保留 mode/止损/测算快照(v50.47 修)", bool(_imp) and _imp[0]['mode'] == 'futures'
+      and _imp[0]['init_stop'] == 77800 and _imp[0]['calc_json'] == '{"lots":1}', str(_imp[:1]))
+for _x in (_i1, _i2, _ci, _i3, _i4, 99001):
+    trade_delete(_x)
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings
