@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5042            # 与 README 版本号 v50.42 对齐(数值比较用于单实例接管)
+APP_VERSION = 5043            # 与 README 版本号 v50.43 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -5411,17 +5411,18 @@ const TradeUI = {
     }
     const money = v => v == null ? '—' : ('¥ ' + Number(v).toLocaleString('en-US',{maximumFractionDigits:2}));
     /* 阶梯止盈改成与开仓计算器一致的独立方块, 见 ladderBlockHtml() */
+    /* 测算明细与计算器同款两列网格(.details.grid2 + .dcell): 标签在上数值在下, 长标签挪 title(v50.43) */
     box.innerHTML =
       '<div class="ratio-strip" style="margin-bottom:8px"><span class="l">开仓测算结果'
       + '<span class="dim" style="font-size:11px">（开仓计算器 · ' + escHtml(c.name || c.code || '')
       + ' ' + (c.dir === 'short' ? '空头' : '多头') + '）</span></span></div>'
-      + '<div class="details" style="margin-top:0">'
-      + '<div class="drow"><span class="k">开仓额度（预算）</span><span class="v money">' + money(c.budget) + '</span></div>'
-      + '<div class="drow"><span class="k">对应风险金额（权益 × ' + escHtml(String(c.riskPct)) + '%）</span><span class="v money good">' + money(c.budget) + '</span></div>'
-      + '<div class="drow"><span class="k">开仓手数</span><span class="v">' + (c.lots != null ? c.lots + ' 手' : '—') + '</span></div>'
-      + '<div class="drow"><span class="k">初次开仓盈亏比</span><span class="v">' + (c.pl_ratio != null ? Number(c.pl_ratio).toFixed(2) : '—') + '</span></div>'
-      + '<div class="drow"><span class="k">每手风险金额</span><span class="v money good">' + money(c.per_lot_risk) + '</span></div>'
-      + '<div class="drow"><span class="k">实际最大风险金额（每手风险 × 手数）</span><span class="v money good">' + money(c.risk_used) + '</span></div>'
+      + '<div class="details grid2" style="margin-top:0">'
+      + '<div class="dcell"><span class="k">开仓额度（预算）</span><span class="v money">' + money(c.budget) + '</span></div>'
+      + '<div class="dcell"><span class="k" title="对应风险金额 = 权益 × ' + escHtml(String(c.riskPct)) + '%">风险金额（权益 × ' + escHtml(String(c.riskPct)) + '%）</span><span class="v money good">' + money(c.budget) + '</span></div>'
+      + '<div class="dcell"><span class="k">开仓手数</span><span class="v">' + (c.lots != null ? c.lots + ' 手' : '—') + '</span></div>'
+      + '<div class="dcell"><span class="k">初次开仓盈亏比</span><span class="v">' + (c.pl_ratio != null ? Number(c.pl_ratio).toFixed(2) : '—') + '</span></div>'
+      + '<div class="dcell"><span class="k">每手风险金额</span><span class="v money good">' + money(c.per_lot_risk) + '</span></div>'
+      + '<div class="dcell"><span class="k" title="实际最大风险金额 = 每手风险 × 手数">实际最大风险金额</span><span class="v money good">' + money(c.risk_used) + '</span></div>'
       + '</div>'
       + this.ladderBlockHtml(c);
   },

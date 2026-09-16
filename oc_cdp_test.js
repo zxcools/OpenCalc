@@ -1251,6 +1251,14 @@ async function main() {
     const ladTxt = ladBlk ? ladBlk.textContent.replace(/\s+/g, ' ').trim() : '';
     const rungN = q('tdCalcCard').querySelectorAll('.rung').length;
     const rqShort = q('tdCalcCard').querySelectorAll('.rung .rq.short').length;
+    // (v50.43) 详情卡测算明细与计算器同款两列: .details.grid2 + .dcell, 不再有遗留 .drow
+    const ccGrid = q('tdCalcCard').querySelector('.details.grid2');
+    const ccCells = q('tdCalcCard').querySelectorAll('.details.grid2 .dcell').length;
+    const ccDrow = q('tdCalcCard').querySelectorAll('.details.grid2 .drow').length;
+    const ccStack = ccGrid ? [...q('tdCalcCard').querySelectorAll('.details.grid2 .dcell')]
+      .every(c => { const k = c.querySelector('.k'), v = c.querySelector('.v');
+        return k && v && k.textContent.trim() && v.textContent.trim()
+          && k.getBoundingClientRect().top <= v.getBoundingClientRect().top; }) : false;
     // (v50.40) 复盘「修改」: 回填 -> 保存 -> 内容变、条数不变
     const edBtn = document.querySelector('#reviewList [data-rvedit]');
     edBtn.click();
@@ -1271,6 +1279,7 @@ async function main() {
                            rvOptLen: (rvOpt.reviews || []).length, rvNowDefault, rvLeft,
                            detOpenInit, detCloseInit, closeDirOpts, colN,
                            ladBlk: !!ladBlk, ladHtml, ladTxt, rungN, rqShort,
+                           ccGrid: !!ccGrid, ccCells, ccDrow, ccStack,
                            rvEditTitle, rvEditBack, rvEditAt, rvAfter});
   })()`);
   const fu = JSON.parse(futRun);
@@ -1320,6 +1329,10 @@ async function main() {
   check('阶梯止盈: 含「每手浮盈」与「1R = 止损价差」',
         /每手浮盈/.test(fu.ladHtml) && fu.ladTxt.indexOf('1R = 止损价差') >= 0,
         fu.ladTxt.slice(0, 160));
+  check('测算明细: 详情卡与计算器同款两列网格(6 dcell 无遗留 drow)',
+        fu.ccGrid && fu.ccCells === 6 && fu.ccDrow === 0,
+        'grid=' + fu.ccGrid + ' cells=' + fu.ccCells + ' drow=' + fu.ccDrow);
+  check('测算明细: 每格「标签在上 · 数值在下」', fu.ccStack);
   check('复盘: 点「修改」回填原时间与原内容',
         fu.rvEditTitle === '修改复盘' && fu.rvEditBack === '第二条复盘(新)'
         && fu.rvEditAt === '2026-09-16T09:00',
