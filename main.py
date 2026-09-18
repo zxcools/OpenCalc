@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5054            # 与 README 版本号 v50.54 对齐(数值比较用于单实例接管)
+APP_VERSION = 5055            # 与 README 版本号 v50.55 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3338,7 +3338,10 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* ⟳ 是无 emoji 变体的箭头类符号: 不强制文本呈现时部分字体会掉成彩色图形或细线 */
 #btnUpdate{font-size:17px;font-variant-emoji:text}
 
-.trades-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:16px;flex-wrap:wrap}
+.trades-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:16px;flex-wrap:wrap}
+/* 交易记录页顶部收紧(v50.55): #tradesArea 外面已有全局 header(margin-bottom:26px),
+   里面这层 .wrap 再留 28px padding-top 就太空 → 只留 4px, 总间距约 30px */
+#tradesArea .wrap{padding-top:4px}
 /* 交易记录页 toolbar: 左侧筛选, 右侧操作按钮 */
 .trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%}
 .trades-toolbar > .spacer{flex:1}
@@ -3361,7 +3364,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   margin:2px 0 3px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat-card .ss{font-size:var(--fz-micro);color:var(--sub);opacity:.85;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.chk{display:flex;align-items:center;gap:6px;font-size:var(--fz-chk);color:var(--text);cursor:pointer;white-space:nowrap}
+/* ⚠ margin:0 必须写(v50.55): 全局 label{margin:14px 0 6px} 是给表单用的,
+   工具栏里的 .chk 是 flex item, 会被这 14px 上边距推低(align-items:center 按 margin box 居中) */
+.chk{display:flex;align-items:center;gap:6px;font-size:var(--fz-chk);color:var(--text);cursor:pointer;white-space:nowrap;margin:0}
 .chk input{accent-color:var(--accent);margin:0}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
@@ -3499,6 +3504,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .btn.gold{background:linear-gradient(135deg,#f5c76b,#e0a53a);border:0;color:#3a2a06;
   box-shadow:0 4px 14px rgba(224,165,58,.28)}
 .btn.gold:hover{box-shadow:0 8px 20px rgba(224,165,58,.45)}
+/* 实心按钮(rose/cyan/gold)原本 border:0, 比描边按钮矮 2px → 同一行 flex 居中后错位 1px。
+   补一层透明边框统一盒模型, 保证工具栏/表头一排按钮像素级对齐(v50.55) */
+.btn.rose, .btn.cyan, .btn.gold{border:1px solid transparent}
 
 /* 期权品种单选按钮组 */
 .chipgroup{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 6px}
@@ -3550,6 +3558,15 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 #tradesArea .btn.sm, #fundsArea .btn.sm{font-size:var(--fz-btn2);padding:7px 15px}
 #tradesArea .btn.ghost, #fundsArea .btn.ghost{font-size:var(--fz-btn)}
 #tradesArea .chk{font-size:var(--fz-chk)}
+/* 「只展示未平仓」等筛选开关统一成按钮外观(v50.55):
+   与旁边 .btn.xs.ghost（隐藏统计）同款 padding/圆角/字号, 选中态高亮 + 打勾 */
+#tradesArea .chk.tgl{gap:0;padding:5px 13px;border:1px solid var(--border);border-radius:8px;
+  background:transparent;color:var(--sub);font-size:var(--fz-btn);transition:all .2s}
+#tradesArea .chk.tgl:hover{color:var(--accent);border-color:var(--accent)}
+/* 原生勾选框藏起来(保留 input 语义与 change 事件), 用整个 label 当按钮 */
+#tradesArea .chk.tgl input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+#tradesArea .chk.tgl.on{background:rgba(76,212,147,.16);border-color:var(--accent);color:var(--text);font-weight:600}
+#tradesArea .chk.tgl.on .tgl-txt::before{content:'✓ ';font-weight:700}
 #tradesArea .op-filter{font-size:var(--fz-opf)}
 #tradesArea .op-filter select{font-size:var(--fz-opf);padding:5px 9px}
 #tradesArea .iconbtn{font-size:var(--fz-icon)}
@@ -4036,7 +4053,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="wrap">
       <header class="trades-header">
         <div class="trades-toolbar">
-          <label class="chk"><input type="checkbox" id="tradesOnlyOpen"> 只展示未平仓</label>
+          <!-- 筛选开关统一成按钮外观(v50.55): 与右边「🙈 隐藏统计」同款 .btn.xs.ghost 尺寸/圆角 -->
+          <label class="chk tgl" id="onlyOpenLbl"><input type="checkbox" id="tradesOnlyOpen"><span class="tgl-txt">只展示未平仓</span></label>
+          <!-- 统计卡片显示/隐藏(v50.55): 状态存 localStorage, 下次打开保持上次的选择 -->
+          <button class="btn xs ghost" id="btnToggleStats" title="隐藏顶部统计卡片（状态会记住）">🙈 隐藏统计</button>
           <span class="spacer"></span>
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
         </div>
@@ -5419,7 +5439,14 @@ const TradeUI = {
   },
 
   async init(){
-    $('tradesOnlyOpen').addEventListener('change', e => { this.onlyOpen = e.target.checked; this.renderMain(); });
+    $('tradesOnlyOpen').addEventListener('change', e => {
+      this.onlyOpen = e.target.checked;
+      this.syncOnlyOpenBtn();      // v50.55: 按钮外观的选中态
+      this.renderMain();
+    });
+    this.syncOnlyOpenBtn();
+    $('btnToggleStats').addEventListener('click', () => this.toggleStats());
+    this.applyStatsPref();        // v50.55: 恢复上次的统计卡片显隐选择(默认显示)
     // 主表搜索框: 输入即筛选(与「只展示未平仓」叠加生效)
     $('tradesSearch').addEventListener('input', e => {
       this.mainQuery = e.target.value;
@@ -5531,9 +5558,39 @@ const TradeUI = {
       maxLoss: losses.length ? Math.min(...losses.map(pnlOf)) : 0,
     };
   },
+  /* 「只展示未平仓」按钮外观的选中态(v50.55): 原生 checkbox 已隐藏, 用 label 上的 .on 表示选中 */
+  syncOnlyOpenBtn(){
+    const el = $('tradesOnlyOpen');
+    const lbl = el && el.closest ? el.closest('.chk') : null;
+    if (lbl) lbl.classList.toggle('on', !!el.checked);
+  },
+
+  /* 统计卡片显示/隐藏(v50.55): 状态存 localStorage(oc-trade-stats: '1'显示/'0'隐藏),
+     默认显示; 用户点过隐藏后, 下次打开软件仍是隐藏 —— 期权/期货模式共用一个开关 */
+  statsHidden: false,
+  applyStatsPref(){
+    try { this.statsHidden = localStorage.getItem('oc-trade-stats') === '0'; } catch (e) { this.statsHidden = false; }
+    this.syncStatsToggle();
+  },
+  syncStatsToggle(){
+    const box = $('tradeStats');
+    if (box) box.classList.toggle('hidden', !!this.statsHidden);
+    const btn = $('btnToggleStats');
+    if (btn){
+      btn.textContent = this.statsHidden ? '👁 显示统计' : '🙈 隐藏统计';
+      btn.title = (this.statsHidden ? '显示' : '隐藏') + '顶部统计卡片（状态会记住）';
+    }
+  },
+  toggleStats(){
+    this.statsHidden = !this.statsHidden;
+    try { localStorage.setItem('oc-trade-stats', this.statsHidden ? '0' : '1'); } catch (e) {}
+    this.syncStatsToggle();
+  },
+
   renderStats(){
     const box = $('tradeStats');
     if (!box) return;
+    this.syncStatsToggle();   // 保证显隐/按钮文案与状态一致(隐藏时不占高度, .hidden 连 margin 一起去掉)
     const s = this.calcStats();
     const money = v => (v > 0 ? '+CN¥' : (v < 0 ? '-CN¥' : 'CN¥'))
       + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});

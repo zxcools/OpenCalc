@@ -1873,6 +1873,92 @@ async function main() {
         stat.optMode === 'options' && cardOf(stat.opt, '累计盈亏').v === '—'
         && cardOf(stat.opt, '已平仓').v === '0', JSON.stringify(stat.opt));
 
+  // ===== v50.55: 统计卡片「显示/隐藏」按钮(状态持久化) =====
+  const stgRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(900);
+    const btn = document.getElementById('btnToggleStats');
+    const box = document.getElementById('tradeStats');
+    const chk = document.getElementById('tradesOnlyOpen');
+    const br = btn.getBoundingClientRect(), cr = chk.getBoundingClientRect();
+    const onRight = br.left >= cr.right - 1;          // 排在「只展示未平仓」右边
+    const snap = () => ({
+      hidden: box.classList.contains('hidden'),
+      label: btn.textContent.trim(),
+      stored: localStorage.getItem('oc-trade-stats'),
+      boxH: Math.round(box.getBoundingClientRect().height),
+    });
+    try { localStorage.removeItem('oc-trade-stats'); } catch (e) {}
+    TradeUI.applyStatsPref(); await w(200);
+    const before = snap();                             // 没有记录时默认显示
+    btn.click(); await w(350);
+    const afterHide = snap();
+    TradeUI.applyStatsPref(); await w(200);            // 模拟「下次打开」
+    const reopen1 = snap();
+    btn.click(); await w(350);
+    const afterShow = snap();
+    TradeUI.applyStatsPref(); await w(200);
+    const reopen2 = snap();
+    try { localStorage.removeItem('oc-trade-stats'); } catch (e) {}
+    TradeUI.applyStatsPref();
+    // v50.55: 「只展示未平仓」与「隐藏统计」按钮外观统一(同款高度/圆角) + 选中时高亮打勾
+    const ooLbl = document.getElementById('onlyOpenLbl');
+    const oo = document.getElementById('tradesOnlyOpen');
+    const hOO = Math.round(ooLbl.getBoundingClientRect().height);
+    const hTG = Math.round(btn.getBoundingClientRect().height);
+    const ooRadius = getComputedStyle(ooLbl).borderRadius;
+    const tgRadius = getComputedStyle(btn).borderRadius;
+    oo.checked = true; oo.dispatchEvent(new Event('change'));
+    await w(350);
+    const onCls = ooLbl.classList.contains('on');
+    const onRows = document.querySelectorAll('#tradesTable tbody tr.clickable').length;
+    oo.checked = false; oo.dispatchEvent(new Event('change'));
+    await w(350);
+    const offCls = ooLbl.classList.contains('on');
+    // v50.55: 工具栏三个按钮必须同一水平线(此前 label 带 label{margin:14px 0 6px} 被推低 4px)
+    const tops = [ooLbl, btn, document.getElementById('btnNewOpen')]
+      .map(el => Math.round(el.getBoundingClientRect().top));
+    const wrapPT = parseInt(getComputedStyle(document.querySelector('#tradesArea .wrap')).paddingTop, 10);
+    const hdrMB = parseInt(getComputedStyle(document.querySelector('#tradesArea').previousElementSibling).marginBottom, 10)
+               || parseInt(getComputedStyle(document.querySelector('.wrap > header')).marginBottom, 10);
+    const gapTop = Math.round(ooLbl.getBoundingClientRect().top)
+                 - Math.round(document.querySelector('.wrap > header').getBoundingClientRect().bottom);
+    return JSON.stringify({onRight, before, afterHide, reopen1, afterShow, reopen2,
+                           hOO, hTG, ooRadius, tgRadius, onCls, offCls, onRows,
+                           tops, wrapPT, hdrMB, gapTop});
+  })()`);
+  const stg = JSON.parse(stgRun);
+  check('统计开关(v50.55): 按钮排在「只展示未平仓」右边', stg.onRight, stgRun);
+  check('统计开关(v50.55): 没有记录时默认显示统计',
+        stg.before.hidden === false && /隐藏统计/.test(stg.before.label),
+        JSON.stringify(stg.before));
+  check('统计开关(v50.55): 点一下隐藏(卡片不占高度) + 写入偏好 0',
+        stg.afterHide.hidden === true && stg.afterHide.boxH === 0
+        && stg.afterHide.stored === '0' && /显示统计/.test(stg.afterHide.label),
+        JSON.stringify(stg.afterHide));
+  check('统计开关(v50.55): 隐藏后「下次打开」仍是隐藏',
+        stg.reopen1.hidden === true && /显示统计/.test(stg.reopen1.label),
+        JSON.stringify(stg.reopen1));
+  check('统计开关(v50.55): 再点显示 + 写入偏好 1',
+        stg.afterShow.hidden === false && stg.afterShow.boxH > 0
+        && stg.afterShow.stored === '1' && /隐藏统计/.test(stg.afterShow.label),
+        JSON.stringify(stg.afterShow));
+  check('统计开关(v50.55): 显示后「下次打开」仍是显示',
+        stg.reopen2.hidden === false && /隐藏统计/.test(stg.reopen2.label),
+        JSON.stringify(stg.reopen2));
+  check('筛选开关(v50.55): 「只展示未平仓」外观与旁边按钮统一(高度/圆角一致)',
+        Math.abs(stg.hOO - stg.hTG) <= 2 && stg.ooRadius === stg.tgRadius,
+        'h=' + stg.hOO + '/' + stg.hTG + ' r=' + stg.ooRadius + '/' + stg.tgRadius);
+  check('筛选开关(v50.55): 勾选时高亮(.on)且表格只剩未平仓',
+        stg.onCls === true && stg.onRows === 0 && stg.offCls === false,
+        JSON.stringify({onCls: stg.onCls, offCls: stg.offCls, onRows: stg.onRows}));
+  check('工具栏对齐(v50.55): 三个按钮在同一水平线(顶部坐标一致)',
+        new Set(stg.tops).size === 1, JSON.stringify(stg.tops));
+  check('工具栏间距(v50.55): 与上方标题的间隙已收紧(内层 wrap 不再留 28px)',
+        stg.wrapPT <= 6 && stg.gapTop <= 34,
+        'wrapPT=' + stg.wrapPT + ' gapTop=' + stg.gapTop + ' hdrMB=' + stg.hdrMB);
+
   // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
   const v541 = await evalJs(ws, `(() => {
     const out = {};
