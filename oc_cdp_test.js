@@ -1786,6 +1786,81 @@ async function main() {
   check('复盘(v50.52): 切回原记录复盘仍在(归属稳定)',
         rv.list1b.length === 1 && rv.list1b[0] === '只属于批次1的复盘', JSON.stringify(rv.list1b));
 
+  // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
+  const stRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const wipe = async (mode) => {
+      const g = await (await fetch('/api/trades/groups?mode=' + mode)).json();
+      for (const it of (g.groups || [])) {
+        const d = await (await fetch('/api/trades/detail?mode=' + mode + '&underlying='
+          + encodeURIComponent(it.underlying) + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+    };
+    // 清空两个模式, 让统计口径可预期
+    await wipe('futures'); await wipe('options');
+    // 4 笔已平仓: 3 胜 1 负 -> 累计 4125 / 胜率 75.0% / 盈亏比 7.07 / 平均 1031.25
+    const cases = [['e2est01', 2105], ['e2est02', 1000], ['e2est03', 1700], ['e2est04', -680]];
+    for (const [u, pnl] of cases) {
+      await post({underlying: u, contract: u + '2611', op_type: 'open', direction: 'buy',
+                  open_date: '2026-09-01', open_price: 100, qty: 1, premium: 0, mode: 'futures'});
+      await post({underlying: u, contract: u + '2611', op_type: 'close', direction: 'sell',
+                  close_date: '2026-09-02', close_qty: 1, close_price: 200, pnl: pnl, mode: 'futures'});
+    }
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(1000);
+    const read = () => [...document.querySelectorAll('#tradeStats .stat-card')].map(c => ({
+      k: (c.querySelector('.sk') || {}).textContent || '',
+      v: (c.querySelector('.sv') || {}).textContent || '',
+      s: (c.querySelector('.ss') || {}).textContent || '',
+      cls: (c.querySelector('.sv') || {}).className || ''}));
+    const fut = read();
+    // 「只展示未平仓」只该影响表格, 不该改变统计卡片
+    const chk = document.getElementById('tradesOnlyOpen');
+    chk.checked = true; chk.dispatchEvent(new Event('change'));
+    await w(500);
+    const afterFilter = read();
+    const rowsAfterFilter = document.querySelectorAll('#tradesTable tbody tr.clickable').length;
+    chk.checked = false; chk.dispatchEvent(new Event('change'));
+    await w(500);
+    // 切到期权模式 -> 期货那 4 笔不算进来
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+    await w(1000);
+    const opt = read();
+    const optMode = TradeUI.mode;
+    await wipe('futures'); await wipe('options');
+    return JSON.stringify({fut, afterFilter, rowsAfterFilter, opt, optMode});
+  })()`);
+  const stat = JSON.parse(stRun);
+  const cardOf = (arr, k) => (arr || []).find(c => c.k === k) || {};
+  check('统计卡(v50.53): 期货/期权两模式顶部各有 5 张卡',
+        stat.fut.length === 5 && stat.opt.length === 5,
+        'fut=' + stat.fut.length + ' opt=' + stat.opt.length);
+  check('统计卡(v50.53): 累计盈亏 = 3胜1负的已实现盈亏合计 +CN¥4,125',
+        cardOf(stat.fut, '累计盈亏').v === '+CN¥4,125' && /pos/.test(cardOf(stat.fut, '累计盈亏').cls),
+        JSON.stringify(cardOf(stat.fut, '累计盈亏')));
+  check('统计卡(v50.53): 胜率 75.0%(3 胜 / 1 负)',
+        cardOf(stat.fut, '胜率').v === '75.0%' && cardOf(stat.fut, '胜率').s === '3 胜 / 1 负',
+        JSON.stringify(cardOf(stat.fut, '胜率')));
+  check('统计卡(v50.53): 已平仓 4 / 持仓中 0',
+        cardOf(stat.fut, '已平仓').v === '4' && /持仓中: 0/.test(cardOf(stat.fut, '已平仓').s),
+        JSON.stringify(cardOf(stat.fut, '已平仓')));
+  check('统计卡(v50.53): 盈亏比 = 盈利4805 / 亏损680 = 7.07',
+        cardOf(stat.fut, '盈亏比').v === '7.07' && /盈利 CN¥4,805 \/ 亏损 CN¥680/.test(cardOf(stat.fut, '盈亏比').s),
+        JSON.stringify(cardOf(stat.fut, '盈亏比')));
+  check('统计卡(v50.53): 平均盈亏 = 4125 / 4 = +CN¥1,031.25',
+        cardOf(stat.fut, '平均盈亏').v === '+CN¥1,031.25', JSON.stringify(cardOf(stat.fut, '平均盈亏')));
+  check('统计卡(v50.53): 不受「只展示未平仓」影响(表格空了卡片不变)',
+        stat.rowsAfterFilter === 0 && JSON.stringify(stat.afterFilter) === JSON.stringify(stat.fut),
+        'rows=' + stat.rowsAfterFilter + ' after=' + JSON.stringify(stat.afterFilter));
+  check('统计卡(v50.53): 期权模式独立统计(期货那 4 笔不计入)',
+        stat.optMode === 'options' && cardOf(stat.opt, '累计盈亏').v === '—'
+        && cardOf(stat.opt, '已平仓').v === '0', JSON.stringify(stat.opt));
+
   // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
   const v541 = await evalJs(ws, `(() => {
     const out = {};

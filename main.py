@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5052            # 与 README 版本号 v50.52 对齐(数值比较用于单实例接管)
+APP_VERSION = 5053            # 与 README 版本号 v50.53 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3039,6 +3039,7 @@ HTML = r"""<!DOCTYPE html>
   --fz-calc-v:17px;   /* 测算卡数值(通用 td2=14.5) */
   --fz-rungq:24px;    /* 阶梯止盈价格(原写死 20) */
   --fz-lbh:14.5px;    /* 阶梯止盈标题(原写死 13) */
+  --fz-stat:22px;     /* 交易统计卡片大数字(v50.53) */
 }
 body.fz-sm{
   --fz-th:12.5px; --fz-td:13.5px; --fz-td2:13px; --fz-tag:12px;
@@ -3048,6 +3049,7 @@ body.fz-sm{
   --fz-micro:11px; --fz-small:11.5px; --fz-mid:12px; --fz-fml:11px;
   --fz-legend:11.5px; --fz-chart:11.5px; --fz-chart2:12.5px;
   --fz-calc-k:12px; --fz-calc-v:15.5px; --fz-rungq:21px; --fz-lbh:13.5px;
+  --fz-stat:20px;
 }
 body.fz-lg{
   --fz-th:15.5px; --fz-td:17px; --fz-td2:16px; --fz-tag:15px;
@@ -3057,6 +3059,7 @@ body.fz-lg{
   --fz-micro:13.5px; --fz-small:14px; --fz-mid:14.5px; --fz-fml:13.5px;
   --fz-legend:14.5px; --fz-chart:15px; --fz-chart2:16px;
   --fz-calc-k:14.5px; --fz-calc-v:19px; --fz-rungq:27px; --fz-lbh:16.5px;
+  --fz-stat:25px;
 }
 [data-theme="light"]{
   /* 护眼浅色(白天): 豆绿底 + 米绿卡片(明显非纯白) */
@@ -3339,6 +3342,23 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* 交易记录页 toolbar: 左侧筛选, 右侧操作按钮 */
 .trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%}
 .trades-toolbar > .spacer{flex:1}
+/* 交易统计卡片(v50.53): 口径 = 主表每条记录(一条=一笔), 不看分表逐笔操作; 左侧色条区分卡片 */
+.stat-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+@media(max-width:760px){.stat-cards{grid-template-columns:repeat(2,1fr)}}
+.stat-card{position:relative;background:var(--panel2);border:1px solid var(--border);border-radius:10px;
+  padding:10px 14px 9px 17px;overflow:hidden;min-width:0}
+.stat-card::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;
+  border-radius:0 2px 2px 0;background:var(--accent)}
+.stat-card.k2::before{background:#46d6ea}
+.stat-card.k3::before{background:#e2c985}
+.stat-card.k4::before{background:#a58ae0}
+.stat-card.k5::before{background:#e78fb5}
+.stat-card .sk{font-size:var(--fz-micro);color:var(--sub);letter-spacing:.3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat-card .sv{font-size:var(--fz-stat);font-weight:800;font-variant-numeric:tabular-nums;
+  margin:2px 0 3px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat-card .ss{font-size:var(--fz-micro);color:var(--sub);opacity:.85;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chk{display:flex;align-items:center;gap:6px;font-size:var(--fz-chk);color:var(--text);cursor:pointer;white-space:nowrap}
 .chk input{accent-color:var(--accent);margin:0}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
@@ -4019,6 +4039,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
         </div>
       </header>
+      <!-- 交易统计卡片(v50.53): 全部按主表「记录」统计(一条记录=一笔), 不看分表逐笔操作 -->
+      <div class="stat-cards" id="tradeStats"></div>
       <div class="trades-layout" data-tm="options">
         <div class="trades-main">
           <div class="card results">
@@ -5482,8 +5504,62 @@ const TradeUI = {
     }
   },
 
+  /* ---------- 交易统计卡片 (v50.53) ----------
+     口径: 全部按**主表每条记录**(一条记录 = 一笔交易)统计, 不去汇总分表的逐笔操作。
+     已实现盈亏 = 该记录 close 记录 pnl 之和(即主表「平仓盈亏」列)。
+     ⚠ 不受搜索 /「只展示未平仓」影响 —— 那俩只是表格显示过滤, 不该改变战绩口径 */
+  calcStats(){
+    const gs = this.groups || [];
+    const pnlOf = g => (g.total_pnl || 0);
+    const closed = gs.filter(g => pnlOf(g) !== 0);        // 有已实现盈亏(已平完 + 部分平)
+    const wins = closed.filter(g => pnlOf(g) > 0);
+    const losses = closed.filter(g => pnlOf(g) < 0);
+    const grossWin = wins.reduce((s, g) => s + pnlOf(g), 0);
+    const grossLoss = losses.reduce((s, g) => s + pnlOf(g), 0);   // 负数
+    const realized = grossWin + grossLoss;
+    const flat = gs.filter(g => g.close_status === '已平仓').length;
+    return {
+      n: gs.length, flat, holding: gs.length - flat,
+      closedN: closed.length, wins: wins.length, losses: losses.length,
+      grossWin, grossLoss, realized,
+      winRate: closed.length ? wins.length / closed.length : null,
+      plRatio: grossLoss ? grossWin / Math.abs(grossLoss) : null,
+      avg: closed.length ? realized / closed.length : null,
+      maxWin: wins.length ? Math.max(...wins.map(pnlOf)) : 0,
+      maxLoss: losses.length ? Math.min(...losses.map(pnlOf)) : 0,
+    };
+  },
+  renderStats(){
+    const box = $('tradeStats');
+    if (!box) return;
+    const s = this.calcStats();
+    const money = v => (v > 0 ? '+CN¥' : (v < 0 ? '-CN¥' : 'CN¥'))
+      + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+    const plain = v => 'CN¥' + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+    const cls = v => v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
+    const card = (k, title, val, sub, valCls) =>
+      '<div class="stat-card k' + k + '">'
+      + '<div class="sk">' + escHtml(title) + '</div>'
+      + '<div class="sv ' + (valCls || '') + '">' + escHtml(val) + '</div>'
+      + '<div class="ss">' + escHtml(sub) + '</div></div>';
+    const ratioTxt = s.plRatio != null ? s.plRatio.toFixed(2)
+      : (s.grossWin > 0 ? '∞' : '—');                    // 有盈利无亏损 → ∞
+    box.innerHTML =
+      card(1, '累计盈亏', s.closedN ? money(s.realized) : '—',
+           s.closedN ? ('已实现 · ' + s.closedN + ' 笔') : '暂无已平仓记录', cls(s.realized))
+      + card(2, '胜率', s.winRate == null ? '—' : (s.winRate * 100).toFixed(1) + '%',
+           s.closedN ? (s.wins + ' 胜 / ' + s.losses + ' 负') : '暂无已平仓记录')
+      + card(3, '已平仓', String(s.flat), '持仓中: ' + s.holding + ' · 共 ' + s.n + ' 条')
+      + card(4, '盈亏比', ratioTxt,
+           s.closedN ? ('盈利 ' + plain(s.grossWin) + ' / 亏损 ' + plain(s.grossLoss)) : '—')
+      + card(5, '平均盈亏', s.avg == null ? '—' : money(s.avg),
+           s.closedN ? ('均值 · 最大盈 ' + plain(s.maxWin) + ' 亏 ' + plain(Math.abs(s.maxLoss))) : '—',
+           cls(s.avg));
+  },
+
   renderMain(){
     const tb = document.querySelector('#tradesTable tbody');
+    this.renderStats();          // v50.53: 顶部统计卡片随数据一起刷新
     let rows = this.groups.slice();
     if (this.onlyOpen) rows = rows.filter(g => g.close_status !== '已平仓');
     const q = (this.mainQuery || '').trim();
