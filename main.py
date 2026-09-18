@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5053            # 与 README 版本号 v50.53 对齐(数值比较用于单实例接管)
+APP_VERSION = 5054            # 与 README 版本号 v50.54 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3342,11 +3342,13 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* 交易记录页 toolbar: 左侧筛选, 右侧操作按钮 */
 .trades-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%}
 .trades-toolbar > .spacer{flex:1}
-/* 交易统计卡片(v50.53): 口径 = 主表每条记录(一条=一笔), 不看分表逐笔操作; 左侧色条区分卡片 */
-.stat-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
-@media(max-width:760px){.stat-cards{grid-template-columns:repeat(2,1fr)}}
+/* 交易统计卡片(v50.53): 口径 = 主表每条记录(一条=一笔), 不看分表逐笔操作; 左侧色条区分卡片
+   默认 5 列排一行; 窗口不够宽时依次降到 3 列 / 2 列(数字有 ellipsis + title 兜底) */
+.stat-cards{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:16px}
+@media(max-width:1180px){.stat-cards{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:680px){.stat-cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .stat-card{position:relative;background:var(--panel2);border:1px solid var(--border);border-radius:10px;
-  padding:10px 14px 9px 17px;overflow:hidden;min-width:0}
+  padding:10px 12px 9px 15px;overflow:hidden;min-width:0}
 .stat-card::before{content:'';position:absolute;left:0;top:8px;bottom:8px;width:3px;
   border-radius:0 2px 2px 0;background:var(--accent)}
 .stat-card.k2::before{background:#46d6ea}
@@ -5535,13 +5537,15 @@ const TradeUI = {
     const s = this.calcStats();
     const money = v => (v > 0 ? '+CN¥' : (v < 0 ? '-CN¥' : 'CN¥'))
       + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
-    const plain = v => 'CN¥' + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+    // 卡片小字用纯数字(参考图标尺): 5 列一行时列窄, 带 CN¥ 前缀会被 ellipsis 截掉
+    const num = v => Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
     const cls = v => v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
     const card = (k, title, val, sub, valCls) =>
       '<div class="stat-card k' + k + '">'
       + '<div class="sk">' + escHtml(title) + '</div>'
-      + '<div class="sv ' + (valCls || '') + '">' + escHtml(val) + '</div>'
-      + '<div class="ss">' + escHtml(sub) + '</div></div>';
+      + '<div class="sv ' + (valCls || '') + '" title="' + escHtml(title + ' ' + val) + '">'
+      + escHtml(val) + '</div>'
+      + '<div class="ss" title="' + escHtml(sub) + '">' + escHtml(sub) + '</div></div>';
     const ratioTxt = s.plRatio != null ? s.plRatio.toFixed(2)
       : (s.grossWin > 0 ? '∞' : '—');                    // 有盈利无亏损 → ∞
     box.innerHTML =
@@ -5551,9 +5555,9 @@ const TradeUI = {
            s.closedN ? (s.wins + ' 胜 / ' + s.losses + ' 负') : '暂无已平仓记录')
       + card(3, '已平仓', String(s.flat), '持仓中: ' + s.holding + ' · 共 ' + s.n + ' 条')
       + card(4, '盈亏比', ratioTxt,
-           s.closedN ? ('盈利 ' + plain(s.grossWin) + ' / 亏损 ' + plain(s.grossLoss)) : '—')
+           s.closedN ? ('盈利 ' + num(s.grossWin) + ' / 亏损 ' + num(s.grossLoss)) : '—')
       + card(5, '平均盈亏', s.avg == null ? '—' : money(s.avg),
-           s.closedN ? ('均值 · 最大盈 ' + plain(s.maxWin) + ' 亏 ' + plain(Math.abs(s.maxLoss))) : '—',
+           s.closedN ? ('最大盈 ' + num(s.maxWin) + ' / 亏 ' + num(Math.abs(s.maxLoss))) : '—',
            cls(s.avg));
   },
 

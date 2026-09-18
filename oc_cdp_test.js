@@ -1069,7 +1069,11 @@ async function main() {
   check('显示全部: 展开后超出的行在容器内滚动',
         tr.expanded.g.sh > tr.expanded.g.ch && tr.expanded.g.ch === tr.expanded.g.h,
         'scroll=' + tr.expanded.g.sh + ' client=' + tr.expanded.g.ch);
-  check('显示全部: 展开后页面总高度不变', tr.expanded.g.page === tr.collapsed.g.page,
+  // ⚠ 页面总高度给 ±2px 容差(v50.53): 容器折叠时是像素小数高度(实测 596.x), 展开时被锁成整数
+  //    maxHeight(597px) → documentElement.scrollHeight 取整后差 1px。已用 dump 确认两态的
+  //    tblwrap / 统计卡 / header 高度完全一致, 差值只来自 scrollHeight 取整, 不是布局跳动
+  check('显示全部: 展开后页面总高度不变(±2px 取整容差)',
+        Math.abs(tr.expanded.g.page - tr.collapsed.g.page) <= 2,
         'collapsed=' + tr.collapsed.g.page + ' expanded=' + tr.expanded.g.page);
   check('显示全部: 收起后解除限高', tr.back.g.maxH === '' && tr.back.g.sh === tr.back.g.ch,
         'maxH="' + tr.back.g.maxH + '"');
@@ -1819,6 +1823,11 @@ async function main() {
       s: (c.querySelector('.ss') || {}).textContent || '',
       cls: (c.querySelector('.sv') || {}).className || ''}));
     const fut = read();
+    // v50.53: 视口够宽时 5 张卡必须排在同一行(用户要求"能一行就一行")
+    const tops = [...document.querySelectorAll('#tradeStats .stat-card')]
+      .map(c => Math.round(c.getBoundingClientRect().top));
+    const oneRow = new Set(tops).size === 1;
+    const gridCols = getComputedStyle(document.getElementById('tradeStats')).gridTemplateColumns.split(' ').length;
     // 「只展示未平仓」只该影响表格, 不该改变统计卡片
     const chk = document.getElementById('tradesOnlyOpen');
     chk.checked = true; chk.dispatchEvent(new Event('change'));
@@ -1833,7 +1842,7 @@ async function main() {
     const opt = read();
     const optMode = TradeUI.mode;
     await wipe('futures'); await wipe('options');
-    return JSON.stringify({fut, afterFilter, rowsAfterFilter, opt, optMode});
+    return JSON.stringify({fut, afterFilter, rowsAfterFilter, opt, optMode, oneRow, gridCols});
   })()`);
   const stat = JSON.parse(stRun);
   const cardOf = (arr, k) => (arr || []).find(c => c.k === k) || {};
@@ -1850,13 +1859,16 @@ async function main() {
         cardOf(stat.fut, '已平仓').v === '4' && /持仓中: 0/.test(cardOf(stat.fut, '已平仓').s),
         JSON.stringify(cardOf(stat.fut, '已平仓')));
   check('统计卡(v50.53): 盈亏比 = 盈利4805 / 亏损680 = 7.07',
-        cardOf(stat.fut, '盈亏比').v === '7.07' && /盈利 CN¥4,805 \/ 亏损 CN¥680/.test(cardOf(stat.fut, '盈亏比').s),
+        cardOf(stat.fut, '盈亏比').v === '7.07' && /盈利 4,805 \/ 亏损 680/.test(cardOf(stat.fut, '盈亏比').s),
         JSON.stringify(cardOf(stat.fut, '盈亏比')));
   check('统计卡(v50.53): 平均盈亏 = 4125 / 4 = +CN¥1,031.25',
         cardOf(stat.fut, '平均盈亏').v === '+CN¥1,031.25', JSON.stringify(cardOf(stat.fut, '平均盈亏')));
   check('统计卡(v50.53): 不受「只展示未平仓」影响(表格空了卡片不变)',
         stat.rowsAfterFilter === 0 && JSON.stringify(stat.afterFilter) === JSON.stringify(stat.fut),
         'rows=' + stat.rowsAfterFilter + ' after=' + JSON.stringify(stat.afterFilter));
+  check('统计卡(v50.53): 视口够宽时 5 张卡排在同一行(不是硬分两行)',
+        stat.oneRow && stat.gridCols >= 5,
+        'oneRow=' + stat.oneRow + ' cols=' + stat.gridCols);
   check('统计卡(v50.53): 期权模式独立统计(期货那 4 笔不计入)',
         stat.optMode === 'options' && cardOf(stat.opt, '累计盈亏').v === '—'
         && cardOf(stat.opt, '已平仓').v === '0', JSON.stringify(stat.opt));
