@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5055            # 与 README 版本号 v50.55 对齐(数值比较用于单实例接管)
+APP_VERSION = 5056            # 与 README 版本号 v50.56 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3477,9 +3477,17 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   background:transparent;color:var(--sub);font-weight:600;font-size:13px;transition:all .2s}
 .funds-bar .seg button.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .funds-bar .seg button:not(.active):hover{background:var(--panel2);color:var(--text)}
+/* 资金曲线工具栏的标签与累计提现(v50.56):
+   ⚠ 原来「策略」写死 12.5px、提现胶囊写死 11.5px(还是内联样式) → 明显比旁边的
+     seg 按钮(--fz-seg) 和右侧按钮(--fz-btn2) 小, 且切字号时纹丝不动。
+     现在统一到 --fz-btn2, 既与同行按钮一致, 也跟着 小/中/大 字号设置缩放 */
+.funds-bar .funds-label{font-weight:600;color:var(--sub);font-size:var(--fz-btn2);letter-spacing:.5px}
+.funds-bar .withdraw-box{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;margin-left:8px;
+  font-size:var(--fz-btn2);white-space:nowrap}
+.funds-bar .withdraw-box .w-lbl{color:var(--sub)}
 /* 累计提现展示 */
-.wchip{padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--panel2);
-  color:var(--text);font-weight:600;font-size:11.5px;white-space:nowrap}
+.wchip{padding:5px 11px;border-radius:8px;border:1px solid var(--border);background:var(--panel2);
+  color:var(--text);font-weight:600;font-size:var(--fz-btn2);white-space:nowrap}
 .wchip b{color:var(--accent)}
 .btn{padding:10px 18px;border-radius:11px;border:1px solid var(--border);background:var(--panel2);
   color:var(--text);font-weight:600;cursor:pointer;transition:all .2s;font-size:var(--fz-btn)}
@@ -3959,15 +3967,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <!-- ============================================================ -->
   <div id="fundsArea" class="hidden">
     <div class="funds-bar">
-      <div style="font-weight:600;color:var(--sub);font-size:12.5px;letter-spacing:.5px">策略</div>
+      <div class="funds-label">策略</div>
       <div class="seg" id="stratSeg">
         <button class="active" data-strategy="abe">abe</button>
         <button data-strategy="威科夫">威科夫</button>
         <button data-strategy="combined">汇总</button>
       </div>
       <!-- 各策略累计提现(出金) 展示 -->
-      <div id="withdrawBox" style="display:flex;gap:6px;align-items:center;flex-wrap:nowrap;margin-left:8px;font-size:11.5px;white-space:nowrap">
-        <span style="color:var(--sub)">提现</span>
+      <div id="withdrawBox" class="withdraw-box">
+        <span class="w-lbl">提现</span>
         <span class="wchip" id="wdAbe">abe ¥0</span>
         <span class="wchip" id="wdWk">威科夫 ¥0</span>
         <span class="wchip" id="wdAll">汇总 ¥0</span>

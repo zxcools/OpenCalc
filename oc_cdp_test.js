@@ -1959,6 +1959,36 @@ async function main() {
         stg.wrapPT <= 6 && stg.gapTop <= 34,
         'wrapPT=' + stg.wrapPT + ' gapTop=' + stg.gapTop + ' hdrMB=' + stg.hdrMB);
 
+  // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
+  const wdRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    document.querySelector('#mainTabs .maintab[data-tab="funds"]').click();
+    await w(1000);
+    const fs = el => el ? getComputedStyle(el).fontSize : 'none';
+    const chip = document.getElementById('wdAbe');
+    const lbl = document.querySelector('#withdrawBox .w-lbl');
+    const label = document.querySelector('.funds-bar .funds-label');
+    const smBtn = document.getElementById('btnClearAll');
+    const read = () => ({chip: fs(chip), lbl: fs(lbl), label: fs(label), sm: fs(smBtn)});
+    const md = read();
+    document.querySelector('#fontSeg button[data-fz="lg"]').click();
+    await w(450);
+    const lg = read();
+    document.querySelector('#fontSeg button[data-fz="sm"]').click();
+    await w(450);
+    const smm = read();
+    document.querySelector('#fontSeg button[data-fz="md"]').click();
+    await w(350);
+    return JSON.stringify({md, lg, sm: smm});
+  })()`);
+  const wd = JSON.parse(wdRun);
+  check('提现字号(v50.56): 「累计提现」与同行按钮字号一致(不再写死 11.5px)',
+        wd.md.chip === wd.md.sm && wd.md.lbl === wd.md.sm && wd.md.label === wd.md.sm,
+        JSON.stringify(wd.md));
+  check('提现字号(v50.56): 跟随字号设置缩放(小 < 中 < 大)',
+        parseFloat(wd.sm.chip) < parseFloat(wd.md.chip) && parseFloat(wd.md.chip) < parseFloat(wd.lg.chip),
+        'sm=' + wd.sm.chip + ' md=' + wd.md.chip + ' lg=' + wd.lg.chip);
+
   // ===== v50.41: 侧栏文案 / 测算结果两列 / 检查更新 =====
   const v541 = await evalJs(ws, `(() => {
     const out = {};
