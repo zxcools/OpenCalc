@@ -1790,6 +1790,120 @@ async function main() {
   check('复盘(v50.52): 切回原记录复盘仍在(归属稳定)',
         rv.list1b.length === 1 && rv.list1b[0] === '只属于批次1的复盘', JSON.stringify(rv.list1b));
 
+  // ===== v50.57: 期权也能写复盘(与期货隔离) / 弹窗价格按 tick 步进 / 备份带最近方案 =====
+  const v57Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const delRv = async (mode, u) => {
+      const rv = await (await fetch('/api/trades/reviews?mode=' + mode + '&underlying=' + u)).json();
+      for (const x of (rv.reviews || [])) {
+        await fetch('/api/trades/review/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: x.id})});
+      }
+    };
+    const wipe = async (mode, u) => {
+      const g = await (await fetch('/api/trades/groups?mode=' + mode)).json();
+      for (const it of (g.groups || [])) {
+        if (String(it.underlying) !== u) continue;
+        const d = await (await fetch('/api/trades/detail?mode=' + mode + '&underlying=' + u
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+      await delRv(mode, u);
+    };
+
+    // ---------- 1) 期权复盘: 能写, 且不串到期货 ----------
+    const OU = 'e2eopt57', OB = 'B20260921000001cc';
+    await wipe('options', OU);
+    await wipe('futures', OU);
+    await post({underlying: OU, contract: 'lc2611-C-144000', op_type: 'open', direction: 'buy',
+                open_date: '2026-09-21', open_price: 9800, qty: 1, premium: 9800,
+                mode: 'options', batch: OB});
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+    await w(1200);
+    await TradeUI.loadDetail(OU, OB);
+    await w(900);
+    const optBlockShown = (() => {
+      const box = document.getElementById('reviewList');
+      return !!(box && box.offsetParent !== null);
+    })();
+    TradeUI.openReviewModal();
+    await w(300);
+    document.getElementById('rvContent').value = '期权这条的复盘';
+    await TradeUI.submitReview();
+    await w(900);
+    const optList = [...document.querySelectorAll('#reviewList .review-item .rv-c')].map(x => x.textContent);
+    const optApi = (await (await fetch('/api/trades/reviews?mode=options&underlying=' + OU
+      + '&batch=' + OB)).json()).reviews || [];
+    const futSame = (await (await fetch('/api/trades/reviews?mode=futures&underlying=' + OU
+      + '&batch=' + OB)).json()).reviews || [];
+    const optMode = optApi.length ? optApi[0].mode : '';
+
+    // ---------- 2) 弹窗价格按品种 tick 步进(期货) ----------
+    const FB = 'B20260921000002dd';
+    await wipe('futures', 'lc');
+    await post({underlying: 'lc', contract: 'lc2611', op_type: 'open', direction: 'buy',
+                open_date: '2026-09-21', open_price: 78600, qty: 1, premium: 0,
+                init_stop: 75200, init_target: 89400, mode: 'futures', batch: FB});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(1000);
+    await TradeUI.loadDetail('lc', FB);
+    await w(900);
+    document.getElementById('tdNewOpen').click();
+    await w(500);
+    const stepLc = document.getElementById('tmOpenPrice').step;
+    const hintLc = document.getElementById('tmTickHint').textContent;
+    document.getElementById('tradeModalBg').classList.add('hidden');
+    await w(200);
+    // 换成螺纹钢(tick=1) → step 应跟着变
+    TradeUI.openEditModal('open', {underlying: 'rb', batch: 'B20260921000003ee'});
+    await w(400);
+    const stepRb = document.getElementById('tmOpenPrice').step;
+    document.getElementById('tradeModalBg').classList.add('hidden');
+    await w(200);
+
+    // ---------- 3) 最近方案: 快照 → 清空 → 恢复 ----------
+    const p1 = [{name: '测试方案A', code: 'cu', dir: 'long', entry: 72150}];
+    const p2 = [{name: '期权方案B', code: 'lc', entry: 9800}];
+    localStorage.setItem('oc_futures_plans', JSON.stringify(p1));
+    localStorage.setItem('oc_options_plans', JSON.stringify(p2));
+    const snap = plansSnapshot();
+    localStorage.setItem('oc_futures_plans', '[]');
+    localStorage.setItem('oc_options_plans', '[]');
+    const restored = plansRestore(snap);
+    const backF = JSON.parse(localStorage.getItem('oc_futures_plans') || '[]');
+    const backO = JSON.parse(localStorage.getItem('oc_options_plans') || '[]');
+    localStorage.removeItem('oc_futures_plans');
+    localStorage.removeItem('oc_options_plans');
+
+    const lcTick = (CONTRACTS.find(x => String(x.code).toLowerCase() === 'lc') || {}).tick;
+    const rbTick = (CONTRACTS.find(x => String(x.code).toLowerCase() === 'rb') || {}).tick;
+    await wipe('options', OU);
+    await wipe('futures', 'lc');
+    return JSON.stringify({optBlockShown, optList, futSameLen: futSame.length, optMode,
+                           stepLc, hintLc, stepRb, lcTick, rbTick,
+                           snapF: snap.futures.length, snapO: snap.options.length,
+                           restored, backF: backF[0] ? backF[0].name : '', backO: backO[0] ? backO[0].name : ''});
+  })()`);
+  const v57 = JSON.parse(v57Run);
+  check('复盘(v50.57): 期权详情页显示复盘模块', v57.optBlockShown === true, v57Run);
+  check('复盘(v50.57): 期权记录能写复盘并读回',
+        v57.optList.length === 1 && v57.optList[0] === '期权这条的复盘', JSON.stringify(v57.optList));
+  check('复盘(v50.57): 期权复盘 mode=options, 同标的期货查不到(隔离)',
+        v57.optMode === 'options' && v57.futSameLen === 0, 'mode=' + v57.optMode + ' 期货侧=' + v57.futSameLen);
+  check('价格步进(v50.57): 期货弹窗开仓价 step = 品种最小变动价位',
+        String(v57.stepLc) === String(v57.lcTick) && /最小变动价位/.test(v57.hintLc || ''),
+        'lc step=' + v57.stepLc + '(tick=' + v57.lcTick + ') hint=' + v57.hintLc);
+  check('价格步进(v50.57): 换品种后 step 跟着变(不是写死的)',
+        String(v57.stepRb) === String(v57.rbTick) && String(v57.stepLc) !== String(v57.stepRb),
+        'rb step=' + v57.stepRb + '(tick=' + v57.rbTick + ')');
+  check('最近方案(v50.57): 快照含两个模式, 恢复后原样写回',
+        v57.snapF === 1 && v57.snapO === 1 && v57.restored === 2
+        && v57.backF === '测试方案A' && v57.backO === '期权方案B', v57Run);
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

@@ -9,7 +9,7 @@ import json
 import os
 import urllib.request
 
-BASE = 'http://127.0.0.1:8899'
+BASE = os.environ.get('OC_E2E_BASE', 'http://127.0.0.1:8899')
 for k in ('HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'):
     os.environ.pop(k, None)
 os.environ['NO_PROXY'] = '127.0.0.1,localhost'

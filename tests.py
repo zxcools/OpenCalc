@@ -759,6 +759,35 @@ check("导入后两个批次仍是各自一条(没并到一起)",
 trade_review_delete(_r1)
 trade_review_delete(_r2)
 
+# 9b6. v50.57: 期权也能写复盘, 且与期货完全隔离(同标的同批次也不串)
+print("\n== 期权复盘与期货隔离 (v50.57) ==")
+from main import (trade_review_upsert, trade_review_list, trade_review_delete)
+_ou = "e2eopt_rv"
+_ob = "20260920120000ab"
+_of = trade_review_upsert({'mode': 'options', 'underlying': _ou, 'batch': _ob,
+                           'review_at': '2026-09-20T12:00', 'content': '期权这条的复盘'})
+_ff = trade_review_upsert({'mode': 'futures', 'underlying': _ou, 'batch': _ob,
+                           'review_at': '2026-09-20T12:30', 'content': '期货这条的复盘'})
+check("期权复盘能写入并读回",
+      [x['content'] for x in trade_review_list('options', _ou, _ob)] == ['期权这条的复盘'],
+      str([x['content'] for x in trade_review_list('options', _ou, _ob)]))
+check("同标的同批次: 期货复盘不会被期权读到",
+      [x['content'] for x in trade_review_list('futures', _ou, _ob)] == ['期货这条的复盘'], '')
+check("复盘列表按模式过滤(两边各 1 条, 不混)",
+      len(trade_review_list('options', _ou)) == 1 and len(trade_review_list('futures', _ou)) == 1,
+      '%d / %d' % (len(trade_review_list('options', _ou)), len(trade_review_list('futures', _ou))))
+_exp2 = fund_export_backup()
+_ids = [x['id'] for x in _exp2['trade_reviews']]
+check("导出同时含期权与期货复盘", _of in _ids and _ff in _ids, str(_ids))
+trade_review_delete(_of)
+trade_review_import_record({'id': _of, 'mode': 'options', 'underlying': _ou, 'batch': _ob,
+                            'review_at': '2026-09-20T12:00', 'content': '期权这条的复盘'})
+check("期权复盘导入保留 mode=options",
+      [x['mode'] for x in trade_review_list('options', _ou, _ob)] == ['options'],
+      str(trade_review_list('options', _ou, _ob)))
+trade_review_delete(_of)
+trade_review_delete(_ff)
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings

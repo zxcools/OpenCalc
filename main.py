@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5056            # 与 README 版本号 v50.56 对齐(数值比较用于单实例接管)
+APP_VERSION = 5057            # 与 README 版本号 v50.57 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1582,11 +1582,13 @@ def fund_withdrawal_summary():
 
 
 def fund_export_backup():
-    """导出全部数据为备份 JSON (资金曲线 + 交易记录 + 监控池快照 + 复盘笔记, 跨电脑迁移/定期备份用)
+    """导出全部数据为备份 JSON (资金曲线 + 期货/期权交易记录 + 监控池快照 + 复盘笔记, 跨电脑迁移/定期备份用)
 
     ⚠ v50.50 修两个「导出不全」的问题:
       1) trade_pool_list() 默认只取 options 模式 → 期货监控池根本没进备份
       2) 复盘笔记(trade_reviews) 之前完全没导出 → 恢复备份后全部丢失
+    ⚠ 交易记录用 trade_list_records() 不传 mode → 两个模式全导(期货记录一直在里面)
+    ⚠ 计算器「最近方案」存在 localStorage, 后端拿不到 → 由前端 plansSnapshot() 附到备份上(v50.57)
     """
     return {
         "app": "期货开仓计算器",
@@ -1599,7 +1601,8 @@ def fund_export_backup():
     }
 
 def fund_import_backup(payload):
-    """导入备份: 资金曲线 + 期权交易记录 + 监控池快照 逐条 upsert 合并(同主键覆盖, 其余保留)."""
+    """导入备份: 资金曲线 + 期货/期权交易记录 + 监控池快照 + 复盘笔记 逐条 upsert 合并(同主键覆盖, 其余保留).
+    ⚠ plans(计算器最近方案)不经后端 —— 前端在导入时自己写回 localStorage(v50.57)。"""
     if not isinstance(payload, dict):
         raise ValueError("备份文件格式不正确")
     if not isinstance(payload.get("records"), list):
@@ -3699,8 +3702,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>期货模式</small></div>
     <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
     <div class="side-extras">
-      <button class="side-btn" id="btnExport" title="导出全部数据(资金曲线 + 期权交易记录 + 监控池)">⬆</button>
-      <button class="side-btn" id="btnImport" title="导入备份(合并资金曲线 + 期权交易记录 + 监控池)">⬇</button>
+      <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记 + 计算器最近方案）">⬆</button>
+      <button class="side-btn" id="btnImport" title="导入备份（合并资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记 + 计算器最近方案）">⬇</button>
       <button class="side-btn" id="btnDataDir" style="position:relative" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙<span id="dataRiskDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnUpdate" style="position:relative" title="检查更新">⟳<span id="updateDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
@@ -4146,8 +4149,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               </table>
             </div>
 
-            <!-- 复盘笔记(期货模式) -->
-            <div class="fut-only" style="margin-top:16px;border-top:1px dashed var(--border);padding-top:12px">
+            <!-- 复盘笔记(期货/期权两个模式各记各的, 按记录归属) -->
+            <div style="margin-top:16px;border-top:1px dashed var(--border);padding-top:12px">
               <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
                 <h3 style="font-size:13px;margin:0;color:var(--accent2)">复盘笔记</h3>
                 <span class="dim" id="rvHint" style="font-size:11.5px"></span>
@@ -4324,6 +4327,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
         <label>开仓价
           <input id="tmOpenPrice" type="number" step="0.0001" min="0" placeholder="700">
+          <span id="tmTickHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
         <label id="tmClosePriceWrap">平仓价
           <input id="tmClosePrice" type="number" step="0.0001" min="0" placeholder="510">
@@ -5090,6 +5094,26 @@ function persistPlans(){
   }
   renderPlans();
 }
+/* 备份用: 导出两个模式的「最近方案」(v50.57)
+   ⚠ 方案存在 localStorage, 不在后端库里 → 之前备份完全没带它们, 换电脑后方案全丢 */
+function plansSnapshot(){
+  loadPlans();
+  return { futures: planList.slice(), options: planListO.slice() };
+}
+/* 备份恢复: 把备份里的方案写回 localStorage 与本进程内存, 返回恢复的组数 */
+function plansRestore(pl){
+  if (!pl || typeof pl !== 'object' || Array.isArray(pl)) return 0;
+  let n = 0;
+  [[PLAN_KEY, 'futures', PLAN_MAX], [PLAN_KEY_O, 'options', PLAN_MAX_O]].forEach(([key, k, mx]) => {
+    const arr = Array.isArray(pl[k]) ? pl[k].filter(x => x && typeof x === 'object') : null;
+    if (!arr || !arr.length) return;
+    const cut = arr.slice(0, mx);
+    try { localStorage.setItem(key, JSON.stringify(cut)); } catch(e){}
+    n += cut.length;
+  });
+  if (n){ loadPlans(); renderPlans(); }
+  return n;
+}
 /* 把当前期货测算一键写入「交易记录：期货模式」 */
 async function addToTradeRecord(){
   if (curMode !== 'futures'){ alert('请先切到开仓计算器的「期货模式」'); return; }
@@ -5800,14 +5824,15 @@ const TradeUI = {
       + '</div>';
   },
 
-  /* ---- 复盘笔记 ---- */
+  /* ---- 复盘笔记(两个模式各记各的, 按「标的 + 批次」归属) ---- */
   async loadReviews(){
-    if (!this.isFut()){ this.reviews = []; this.renderReviews(); return; }
     const u = (this.detail && this.detail.underlying) || '';
+    if (!u){ this.reviews = []; this.renderReviews(); return; }
     // ⚠ v50.52: 必须带 batch —— 复盘跟着「这条记录」走, 只按品种查会让同品种多条记录看到同一份复盘
+    // ⚠ v50.57: mode 跟着当前模式走, 期货/期权互不可见(期权也支持复盘了)
     const b = (this.detail && this.detail.batch) || '';
     try {
-      const r = await fetchT('/api/trades/reviews?mode=futures&underlying=' + encodeURIComponent(u)
+      const r = await fetchT('/api/trades/reviews?' + this.modeQ() + '&underlying=' + encodeURIComponent(u)
         + '&batch=' + encodeURIComponent(b));
       const d = await r.json();
       this.reviews = d.ok ? (d.reviews || []) : [];
@@ -5817,10 +5842,6 @@ const TradeUI = {
   renderReviews(){
     const box = $('reviewList');
     if (!box) return;
-    const isFut = this.isFut();
-    const wrap = box.closest('.fut-only');
-    if (wrap) wrap.hidden = !isFut;
-    if (!isFut){ box.innerHTML = ''; return; }
     const list = this.reviews || [];
     if ($('rvHint')) $('rvHint').textContent = list.length ? ('共 ' + list.length + ' 条 · 按时间倒序') : '';
     if (!list.length){
@@ -5867,7 +5888,7 @@ const TradeUI = {
     if (!content){ errBox.textContent = '复盘内容不能为空'; return; }
     const editing = $('reviewModalBg').dataset.editing;
     const payload = {
-      mode: 'futures',
+      mode: this.mode,   // v50.57: 跟着当前模式 —— 期货/期权复盘互不可见
       underlying: (this.detail && this.detail.underlying) || '',
       batch: (this.detail && this.detail.batch) || '',   // v50.52: 复盘跟着当前这条记录走
       review_at: $('rvAt').value || '',
@@ -5943,7 +5964,7 @@ const TradeUI = {
     this.contractFilter = selF.value;
     this.renderOps();
     this.renderCalcCard(d);     // 期货: 顶部测算结果卡
-    this.loadReviews();         // 期货: 底部复盘笔记
+    this.loadReviews();         // 底部复盘笔记(两个模式都有)
   },
 
   renderOps(){
@@ -6224,7 +6245,7 @@ const TradeUI = {
         const cp = this.detectCallPut(inp.value);
         if (cp) $('tmCallPut').value = cp;
       };
-      inp.addEventListener('input', _autoCp);
+      inp.addEventListener('input', () => { _autoCp(); this.syncModalTick(); });
       // 失焦时把输入框内容格式化成规范写法(品种小写 + C/P 大写 + 分隔符统一), 与后端保存口径一致
       inp.addEventListener('blur', () => {
         const v = this.normalizeContract(inp.value);
@@ -6282,8 +6303,42 @@ const TradeUI = {
       }
     }
     $('tmUnderlying').readOnly = preset.id ? true : (preset.underlying ? true : false);
+    this.syncModalTick();     // v50.57: 价格框按当前品种的最小变动价位步进
     bg.classList.remove('hidden');
     bg.dataset.editing = preset.id || '';
+  },
+
+  /* 价格输入框按当前品种的最小变动价位步进(v50.57)
+     ⚠ 之前弹窗里四个价格框都写死 step="0.0001", 上下箭头按 0.0001 跳, 跟品种 tick 无关;
+       现在期货跟着合约 tick 走(与开仓计算器口径一致), 期权权利金保持精细步进 */
+  syncModalTick(){
+    const ids = ['tmOpenPrice', 'tmInitStop', 'tmInitTarget', 'tmClosePrice'];
+    const c = this.isFut() ? this._tickContract() : null;
+    const tick = (c && +c.tick > 0) ? +c.tick : 0;
+    ids.forEach(id => { const el = $(id); if (el) el.step = tick ? String(tick) : '0.0001'; });
+    const hint = $('tmTickHint');
+    if (hint){
+      hint.textContent = tick
+        ? ('最小变动价位 ' + tick + '（1 跳），价格上下箭头按此步进')
+        : (this.isFut() ? '选好品种/合约后按最小变动价位步进' : '');
+    }
+  },
+
+  /* 从标的(品种代码)或手填合约里解析品种, 用来取最小变动价位 */
+  _tickContract(){
+    const uEl = $('tmUnderlying'), cEl = $('tmContract');
+    const cands = [uEl ? uEl.value : '', cEl && cEl.tagName === 'INPUT' ? cEl.value : ''];
+    for (const raw of cands){
+      const s = String(raw || '').trim().toLowerCase();
+      if (!s) continue;
+      let c = CONTRACTS.find(x => String(x.code).toLowerCase() === s);
+      if (!c){
+        const m = s.match(/^([a-z]+)\d/);        // 手填合约如 a2609 / SA2611 → 取前导字母
+        if (m) c = CONTRACTS.find(x => String(x.code).toLowerCase() === m[1]);
+      }
+      if (c) return c;
+    }
+    return null;
   },
 
   /* 当前弹窗所选合约的「剩余可平手数」; 取不到返回 null(交给后端兜底校验, 不误拦) */
@@ -6671,13 +6726,18 @@ const FundUI = {
       const r = await fetchT('/api/funds/export');
       const d = await r.json();
       if (!d.ok) { alert('导出失败：' + (d.error||'')); return; }
-      // 备份含三部分: 资金曲线 / 交易记录 / 监控池 — 任一部分有数据即可导出
+      // 备份含五部分: 资金曲线 / 期货+期权交易记录 / 监控池 / 复盘笔记 / 计算器最近方案
       const nRec = (d.records||[]).length;
       const nTrd = (d.trades||[]).length;
       const nPool = (d.trade_pools||[]).length;
-      const total = nRec + nTrd + nPool;
-      if (!total) { alert('当前没有可导出的数据（资金曲线 / 交易记录 / 监控池均为空）'); return; }
-      const summary = '资金曲线 ' + nRec + ' 条 · 交易记录 ' + nTrd + ' 条 · 监控池 ' + nPool + ' 条';
+      const nRev = (d.trade_reviews||[]).length;
+      const plans = plansSnapshot();          // v50.57: 方案在 localStorage, 由前端一并打包
+      const nPlan = plans.futures.length + plans.options.length;
+      const total = nRec + nTrd + nPool + nRev + nPlan;
+      if (!total) { alert('当前没有可导出的数据（资金曲线 / 交易记录 / 监控池 / 复盘笔记 / 最近方案均为空）'); return; }
+      d.plans = plans;
+      const summary = '资金曲线 ' + nRec + ' 条 · 交易记录 ' + nTrd + ' 条 · 监控池 ' + nPool
+        + ' 条 · 复盘 ' + nRev + ' 条 · 最近方案 ' + nPlan + ' 组';
       const blob = new Blob([JSON.stringify(d, null, 2)], {type:'application/json'});
       const now = new Date();
       const pad = n=>String(n).padStart(2,'0');
@@ -6723,7 +6783,9 @@ const FundUI = {
           body:JSON.stringify(payload)});
         const d = await r.json();
         if (!d.ok) { alert('导入失败：' + (d.error||'备份文件格式不正确')); return; }
-        alert('✅ 导入成功：共 ' + d.imported + ' 条（资金曲线 + 交易记录 + 监控池，同主键覆盖合并）'
+        const nPlan = plansRestore(payload.plans);      // v50.57: 方案在前端 localStorage, 这里单独写回
+        alert('✅ 导入成功：共 ' + d.imported + ' 条（资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记，同主键覆盖合并）'
+          + (nPlan ? '\n计算器最近方案：' + nPlan + ' 组已恢复' : '')
           + (d.strategies && d.strategies.length ? '\n资金曲线策略：' + d.strategies.join('、') : ''));
         this.refreshAll();
         if (typeof TradeUI !== 'undefined' && TradeUI.refresh) TradeUI.refresh();   // 交易记录页同步刷新
