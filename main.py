@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5057            # 与 README 版本号 v50.57 对齐(数值比较用于单实例接管)
+APP_VERSION = 5058            # 与 README 版本号 v50.58 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3264,7 +3264,13 @@ select{cursor:pointer;appearance:none;
 [data-theme="light"] .plans-item .nm .d.long{color:#e05252}
 [data-theme="light"] .plans-item .nm .d.short{color:#0e9fc8}
 .plans-item .meta{font-size:11px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.plans-item .go{margin-left:auto;flex:none;font-size:12px;font-weight:600;color:var(--accent);
+/* 删除按钮(v50.58): 放在「调出」左边, 单独占位, 点击不会触发调出 */
+.plans-item .del{margin-left:auto;flex:none;width:22px;height:22px;display:flex;align-items:center;
+  justify-content:center;border-radius:7px;color:var(--sub);font-size:15px;line-height:1;
+  border:1px solid transparent;transition:color .15s,background .15s,border-color .15s}
+.plans-item .del:hover{color:#ff6b6b;background:rgba(255,107,107,.14);border-color:rgba(255,107,107,.35)}
+.plans-item .del:active{transform:scale(.94)}
+.plans-item .go{margin-left:8px;flex:none;font-size:12px;font-weight:600;color:var(--accent);
   background:rgba(62,207,143,.1);border:1px solid rgba(62,207,143,.35);border-radius:8px;padding:4px 12px}
 .plans-item:hover .go{background:rgba(62,207,143,.2)}
 .plans-item .go:active{transform:scale(.96)}
@@ -4811,7 +4817,7 @@ function setMode(m){
   curMode = m;
   $('futuresFields').classList.toggle('hidden', curMode!=='futures');
   $('optionsFields').classList.toggle('hidden', curMode!=='options');
-  if (typeof renderPlans === 'function') renderPlans();   // 最近方案区仅期货显示
+  if (typeof renderPlans === 'function') renderPlans();   // 最近方案区(期货/期权各一套)
   if (typeof applyEquityForMode === 'function') applyEquityForMode(curMode);   // 切到该模式自己的权益
   onInput();
 }
@@ -5205,6 +5211,7 @@ function renderPlans(){
         '<span class="nm">' + escHtml(p.contract) + ' <span class="d long">买</span> ' + escHtml(p.entry) + '</span>' +
         '<span class="meta">' + escHtml(String(p.code||'').toUpperCase()) + ' · 权利金 ' + escHtml(p.entry) + ' 元/手 · 风险 ' + escHtml(p.riskPct) + '%' +
         (p.eqWan ? ' · 权益 ' + escHtml(p.eqWan) + '万' : '') + '</span>' +
+        '<span class="del" data-del="1" title="删除这条方案">✕</span>' +
         '<span class="go">调出</span>' +
       '</div>';
     }
@@ -5213,6 +5220,7 @@ function renderPlans(){
     return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' ' + dTxt + ' @' + escHtml(p.entry) + '">' +
       '<span class="nm">' + escHtml(p.contract) + ' <span class="d ' + dCls + '">' + dTxt + '</span> ' + escHtml(p.entry) + '</span>' +
       '<span class="meta">' + escHtml(String(p.code||'').toUpperCase()) + ' · 止损 ' + escHtml(p.stop) + ' → 止盈 ' + escHtml(p.target) + ' · 风险 ' + escHtml(p.riskPct) + '%</span>' +
+      '<span class="del" data-del="1" title="删除这条方案">✕</span>' +
       '<span class="go">调出</span>' +
     '</div>';
   }).join('');
@@ -5304,6 +5312,16 @@ function recallPlan(p){
   updateTickHint();
   onInput();                                            // 用方案参数重新测算
 }
+/* 删除一条方案(v50.58): 只动当前模式的列表, 写回本地存储后重渲染 */
+function deletePlan(idx){
+  const list = activePlans();
+  const p = list[idx];
+  if (!p) return;
+  const name = String(p.contract || p.code || '这条方案');
+  if (!confirm('删除方案「' + name + '」？删除后不可恢复，需要时重新测算再保存。')) return;
+  list.splice(idx, 1);
+  persistPlans();                    // 内部会按当前模式写回 localStorage 并 renderPlans()
+}
 loadPlans();
 renderPlans();
 $('btnSavePlan').addEventListener('click', saveCurrentPlan);
@@ -5312,7 +5330,9 @@ if (_btnAttr) _btnAttr.addEventListener('click', addToTradeRecord);
 $('planList').addEventListener('click', e=>{
   const it = e.target.closest('.plans-item');
   if (!it || it.dataset.idx === undefined) return;
-  recallPlan(activePlans()[+it.dataset.idx]);   // 取当前模式的方案列表(期货/期权各一套)
+  const idx = +it.dataset.idx;
+  if (e.target.closest('.del')){ deletePlan(idx); return; }   // v50.58: 卡片上的 ✕ 只删方案, 不触发调出
+  recallPlan(activePlans()[idx]);   // 取当前模式的方案列表(期货/期权各一套)
 });
 
 init();

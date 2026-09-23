@@ -1904,6 +1904,53 @@ async function main() {
         v57.snapF === 1 && v57.snapO === 1 && v57.restored === 2
         && v57.backF === '测试方案A' && v57.backO === '期权方案B', v57Run);
 
+  // ===== v50.58: 最近方案支持删除 =====
+  const dpRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const mk = n => ({code: 'cu', contract: '沪铜', dir: 'long', entry: 70000 + n,
+                      stop: 69000 + n, target: 72000 + n, riskPct: '1', marginRate: '16', eqWan: '90'});
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();
+    await w(500);
+    localStorage.setItem('oc_futures_plans', JSON.stringify([mk(1), mk(2)]));
+    loadPlans(); renderPlans();
+    await w(300);
+    const before = document.querySelectorAll('#planList .plans-item').length;
+    const delCount = document.querySelectorAll('#planList .plans-item .del').length;
+    // 点第二条的 ✕ → 只删方案, 不能触发调出(输入框不该被填)
+    const orig = window.confirm;
+    window.confirm = () => true;
+    document.getElementById('entry').value = '88888';
+    const items = document.querySelectorAll('#planList .plans-item');
+    items[1].querySelector('.del').click();
+    await w(500);
+    window.confirm = orig;
+    const after = document.querySelectorAll('#planList .plans-item').length;
+    const stored = JSON.parse(localStorage.getItem('oc_futures_plans') || '[]');
+    const entryUntouched = document.getElementById('entry').value === '88888';
+    // 取消删除 → 数量不变
+    const keep = JSON.parse(localStorage.getItem('oc_futures_plans') || '[]');
+    window.confirm = () => false;
+    document.querySelector('#planList .plans-item .del').click();
+    await w(400);
+    window.confirm = orig;
+    const afterCancel = document.querySelectorAll('#planList .plans-item').length;
+    // 清理
+    localStorage.removeItem('oc_futures_plans');
+    document.getElementById('entry').value = '';
+    loadPlans(); renderPlans();
+    return JSON.stringify({before, delCount, after, storedLen: stored.length,
+                           storedEntry: stored[0] ? stored[0].entry : null,
+                           entryUntouched, afterCancel, keepLen: keep.length});
+  })()`);
+  const dp = JSON.parse(dpRun);
+  check('方案删除(v50.58): 每条方案卡片都带删除按钮', dp.before === 2 && dp.delCount === 2, dpRun);
+  check('方案删除(v50.58): 点 ✕ 删掉对应那条并写回本地存储',
+        dp.after === 1 && dp.storedLen === 1 && Number(dp.storedEntry) === 70001,
+        '剩 ' + dp.storedLen + ' 条, 保留 entry=' + dp.storedEntry);
+  check('方案删除(v50.58): 点 ✕ 不会被当成「调出」(输入框不变)', dp.entryUntouched === true, dpRun);
+  check('方案删除(v50.58): 确认框点取消则不删', dp.afterCancel === 1 && dp.keepLen === 1,
+        'afterCancel=' + dp.afterCancel);
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
