@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5058            # 与 README 版本号 v50.58 对齐(数值比较用于单实例接管)
+APP_VERSION = 5059            # 与 README 版本号 v50.59 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -190,6 +190,18 @@ def _num(value, name):
     if v <= 0:
         raise ValueError("%s必须大于 0" % name)
     return v
+
+
+def _num_any(value, name):
+    """解析任意实数(delta 这类可为负的值), 非法抛 ValueError"""
+    if value in (None, ""):
+        raise ValueError("请填写 %s" % name)
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return float(str(value).replace(",", "").replace("，", "").strip())
+    except (TypeError, ValueError):
+        raise ValueError("%s 必须是数字" % name)
 
 
 def calc_futures(params):
@@ -366,10 +378,150 @@ def calc_options(params):
     }
 
 
+def _fmt_num(v):
+    """数字 → 合约代码里用的字符串: 去掉多余的 0 (144000.0 → 144000, 560.50 → 560.5)"""
+    if v in (None, ""):
+        return ""
+    f = float(v)
+    if abs(f - round(f)) < 1e-9:
+        return str(int(round(f)))
+    return ("%.4f" % f).rstrip("0").rstrip(".")
+
+
+def calc_dual(params):
+    """
+    期权双买(买跨式 / 宽跨式)测算 — v50.59
+
+    params: equity(总权益), code(标的), month(合约年月, 如 2611),
+            call_strike / call_delta / call_premium, put_strike / put_delta / put_premium,
+            risk_percent(风险额度%, 默认 3)
+
+    口径(与用户约定):
+      1. 手数按 delta 中性 →  call手数 × |call delta| = put手数 × |put delta|
+      2. 预算 = 权益 × 风险额度%, 两腿权利金合计不超过预算, 超出则回调手数
+      3. 止盈目标价位 = 「期权权利金」的目标价(不是标的价格): 持仓总价值达到 N 倍总权利金时
+         单腿各自的每手权利金 —— 上涨时 put 归零全靠 call 撑, 下跌时反过来
+    """
+    equity = _num(params.get("equity"), "总权益")
+    risk_percent = params.get("risk_percent")
+    if risk_percent not in (None, ""):
+        rp = _num(risk_percent, "风险额度百分比")
+        if rp <= 0:
+            raise ValueError("风险额度百分比必须大于 0")
+        risk_ratio = rp / 100.0
+    else:
+        risk_ratio = OPTIONS_RISK_RATIO
+    budget = equity * risk_ratio
+
+    contract = get_contract(params.get("code", ""))
+    if contract is None:
+        raise ValueError("未找到该标的, 请从列表中选择")
+    opt_mult = contract["opt_mult"]
+    if contract["code"] in OPTION_MULT_OVERRIDES:
+        opt_mult = OPTION_MULT_OVERRIDES[contract["code"]]
+
+    c_strike = _num(params.get("call_strike"), "call 行权价")
+    p_strike = _num(params.get("put_strike"), "put 行权价")
+    c_delta = _num_any(params.get("call_delta"), "call delta")
+    p_delta = _num_any(params.get("put_delta"), "put delta")
+    c_prem = _num(params.get("call_premium"), "call 每手权利金")
+    p_prem = _num(params.get("put_premium"), "put 每手权利金")
+    for v, lbl in ((c_strike, "call 行权价"), (p_strike, "put 行权价"),
+                   (c_prem, "call 每手权利金"), (p_prem, "put 每手权利金")):
+        if v <= 0:
+            raise ValueError("%s 必须大于 0" % lbl)
+    if c_delta <= 0:
+        raise ValueError("call delta 必须大于 0（买方看涨）")
+    if p_delta >= 0:
+        raise ValueError("put delta 必须小于 0（买方看跌）")
+    if abs(c_delta) > 1 or abs(p_delta) > 1:
+        raise ValueError("delta 的绝对值不能大于 1")
+
+    c_abs, p_abs = abs(c_delta), abs(p_delta)
+    # 手数比: call : put = |put delta| : |call delta|  (使两腿 delta 相加为 0)
+    ratio = p_abs / c_abs
+    unit_cost = p_prem + ratio * c_prem            # 1 手 put + 对应比例 call 的成本
+
+    def _cost(cq, pq):
+        return cq * c_prem + pq * p_prem
+
+    put_qty = int(budget // unit_cost)
+    call_qty = int(round(ratio * put_qty))
+    # 取整(round 向上)可能超预算 → 逐手回调, 直到装得下
+    while put_qty > 0 and _cost(call_qty, put_qty) > budget:
+        put_qty -= 1
+        call_qty = int(round(ratio * put_qty))
+    # 双买要求两腿都在: 任一腿不足 1 手 → 整组不开
+    if call_qty < 1 or put_qty < 1:
+        call_qty = put_qty = 0
+
+    enough = call_qty >= 1 and put_qty >= 1
+    total_premium = _cost(call_qty, put_qty)
+    c_delta_sum = call_qty * c_abs
+    p_delta_sum = put_qty * p_abs
+    net_delta = c_delta_sum - p_delta_sum
+    gap_pct = (abs(net_delta) / c_delta_sum * 100.0) if c_delta_sum > 0 else 0.0
+
+    month = "".join(ch for ch in str(params.get("month") or "") if ch.isdigit())
+    code = contract["code"]
+    c_code = "%s%s-C-%s" % (code, month, _fmt_num(c_strike)) if month else ""
+
+    # 止盈目标: 持仓总价值到 N 倍权利金 → 单腿每手权利金目标价
+    targets = []
+    for n in (2, 3, 4, 5):
+        t = total_premium * n
+        targets.append({
+            "n": n,
+            "value": round(t, 2),
+            "call_price": round(t / call_qty, 2) if call_qty else None,
+            "put_price": round(t / put_qty, 2) if put_qty else None,
+            "call_mult": round(t / (call_qty * c_prem), 2) if call_qty else None,
+            "put_mult": round(t / (put_qty * p_prem), 2) if put_qty else None,
+        })
+
+    msg = ""
+    if not enough:
+        msg = ("预算 %s 元装不下 1 组（1 手 call %s + %s 手 put %s）"
+               % (_fmt_num(round(budget, 2)), _fmt_num(c_prem), _fmt_num(round(ratio, 2)), _fmt_num(p_prem)))
+
+    return {
+        "ok": True,
+        "contract": contract["name"],
+        "code": code,
+        "exchange": contract["exchange"],
+        "opt_mult": opt_mult,
+        "unit": contract["unit"],
+        "month": month,
+        "risk_ratio": risk_ratio,
+        "risk_percent": risk_ratio * 100,
+        "budget": round(budget, 2),
+        "call": {
+            "strike": c_strike, "delta": c_delta, "premium_per_lot": c_prem,
+            "qty": call_qty, "premium_total": round(call_qty * c_prem, 2),
+            "delta_sum": round(c_delta_sum, 4), "contract_code": c_code,
+            "strike_fmt": _fmt_num(c_strike),
+        },
+        "put": {
+            "strike": p_strike, "delta": p_delta, "premium_per_lot": p_prem,
+            "qty": put_qty, "premium_total": round(put_qty * p_prem, 2),
+            "delta_sum": round(-p_delta_sum, 4),
+            "contract_code": ("%s%s-P-%s" % (code, month, _fmt_num(p_strike))) if month else "",
+            "strike_fmt": _fmt_num(p_strike),
+        },
+        "qty_ratio": round(ratio, 4),
+        "total_premium": round(total_premium, 2),
+        "funds_used": round(total_premium, 2),
+        "net_delta": round(net_delta, 4),          # 越接近 0 越中性
+        "delta_gap_pct": round(gap_pct, 2),        # 两腿 delta 的不平衡度(%)
+        "enough_lots": enough,
+        "targets": targets,
+        "message": msg,
+    }
+
+
 # ===========================================================================
 # 实时行情 (新浪财经, 主力连续合约)
-# ===========================================================================
-def _quote_candidates(symbol):
+# ===========================================================================def _quote_candidates(symbol):
     """生成未来12个自然月的候选合约代码 (如 RB2608...RB2707)"""
     now = datetime.now()
     out = []
@@ -468,7 +620,7 @@ def get_quote(code):
 
 # ===========================================================================
 # 资金曲线记录模块 (SQLite 持久化)
-# - 两个策略分开记录: 'abe' (主) + '威科夫' (预留)
+# - 三个策略分开记录: 期权买方(原 abe) / 威科夫 / 期权双买
 # - 月度明细 + 年度汇总, 年度汇总由月度数据自动累加
 # - ⚠ 数据必须存在持久目录: 打包成 exe 后 __file__ 指向临时解压目录(%TEMP%\_MEI*),
 #   若按 __file__ 存数据, 程序退出后会被 bootloader 清理 → 记录丢失(已踩坑修复)
@@ -543,7 +695,29 @@ elif _custom_data_dir:
 else:
     FUND_DB_PATH = os.path.join(_persistent_data_dir(), "funds.db")
 FUND_DB_CONN = None
-FUND_STRATEGIES = ["abe", "威科夫"]
+
+# ---- 资金曲线策略(v50.59) ----
+# ⚠ 'abe' 已改名为「期权买方」: 启动时会把老库里的 abe 批量迁移过来(见 _migrate_strategy_names),
+#   读旧备份时也用 STRATEGY_ALIASES 兜底, 保证历史数据不丢
+STRATEGY_OPTIONS_BUY = "期权买方"      # 原 abe
+STRATEGY_WYCKOFF = "威科夫"
+STRATEGY_DUAL_BUY = "期权双买"
+FUND_STRATEGIES = [STRATEGY_OPTIONS_BUY, STRATEGY_WYCKOFF, STRATEGY_DUAL_BUY]
+STRATEGY_ALIASES = {"abe": STRATEGY_OPTIONS_BUY}   # 旧名 → 新名
+
+# ---- 交易记录的三种模式(v50.59): 期权买方 / 期权双买 / 期货 ----
+TRADE_MODES = ("options", "dual", "futures")
+TRADE_MODE_DEFAULT = "options"
+
+
+def norm_strategy(name, default=None):
+    """策略名归一: 旧名(abe) → 新名; 未知的返回 default(不传则返回原值)"""
+    s = (name or "").strip()
+    if s in FUND_STRATEGIES:
+        return s
+    if s in STRATEGY_ALIASES:
+        return STRATEGY_ALIASES[s]
+    return default if default is not None else s
 
 # 自动备份: 每次数据变动后把库快照到 <数据目录>/backup/, 只保留最近 N 份
 AUTO_BACKUP_KEEP = 10
@@ -1247,7 +1421,7 @@ def _db_ensure_schema(conn):
     cols = [row[1] for row in conn.execute("PRAGMA table_info(records)").fetchall()]
     if "cash" not in cols:
         conn.execute("ALTER TABLE records ADD COLUMN cash REAL NOT NULL DEFAULT 0")
-    # 期权交易记录 (策略=abe, 与资金曲线共用 SQLite, 一次导出备份包含所有数据)
+    # 交易记录 (策略=期权买方, 与资金曲线共用 SQLite, 一次导出备份包含所有数据)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS trade_records (
@@ -1319,6 +1493,17 @@ def _db_ensure_schema(conn):
         ("mode", "TEXT NOT NULL DEFAULT 'options'"),
         ("batch", "TEXT"),        # v50.52: 复盘按 (标的, 批次) 归属, 不再按品种共享
     ])
+    # ---- v50.59: 老库策略改名 'abe' → '期权买方'(幂等, 表不存在则跳过) ----
+    for _old, _new in STRATEGY_ALIASES.items():
+        for _tbl in ("records", "trade_records", "trade_pool_snapshots"):
+            try:
+                conn.execute("UPDATE %s SET strategy=? WHERE strategy=?" % _tbl, (_new, _old))
+            except sqlite3.OperationalError:
+                pass
+    try:
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _calc_record_metrics(initial_equity, end_equity, cash_flow):
@@ -1364,8 +1549,9 @@ def fund_list_records(strategy=None):
 
 
 def fund_upsert(strategy, year, month, initial_equity, end_equity, cash_flow, note, cash=0):
+    strategy = norm_strategy(strategy)      # v50.59: 老备份里的 'abe' 自动认成「期权买方」
     if strategy not in FUND_STRATEGIES:
-        raise ValueError("未知策略: %s (支持: %s)" % (strategy, FUND_STRATEGIES))
+        raise ValueError("未知策略: %s (支持: %s)" % (strategy, "、".join(FUND_STRATEGIES)))
     if not (1 <= month <= 12):
         raise ValueError("月份必须 1-12")
     initial_equity = float(initial_equity)
@@ -1496,7 +1682,7 @@ def fund_yearly_summary(strategy):
 
 def fund_combined_summary():
     """汇总: 各策略按月合并, 缺失月份用最近月末权益延续
-    例: abe 8月 月末70k, 9月无记录 → 9月 abe 视为延续(月初/月末=70k, 出金=0)
+    例: 期权买方 8月 月末70k, 9月无记录 → 9月视为延续(月初/月末=70k, 出金=0)
     再与其他策略当月数据相加, 得汇总月初/月末/出入金
     """
     all_records = fund_list_records()
@@ -1577,7 +1763,7 @@ def fund_withdrawal_summary():
             "SELECT cash_flow FROM records WHERE strategy=?", (strategy,)
         ).fetchall()
         result[strategy] = round(sum(max(float(r[0] or 0), 0.0) for r in rows), 2)
-    result["combined"] = round(result.get(FUND_STRATEGIES[0], 0) + result.get(FUND_STRATEGIES[1], 0), 2)
+    result["combined"] = round(sum(result.get(s, 0.0) for s in FUND_STRATEGIES), 2)
     return result
 
 
@@ -1592,12 +1778,12 @@ def fund_export_backup():
     """
     return {
         "app": "期货开仓计算器",
-        "backup_version": 3,
+        "backup_version": 4,          # v50.59: 交易记录含第三种模式 dual(期权双买)
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "records": fund_list_records(),
         "trades": trade_list_records(),
-        "trade_pools": trade_pool_list(mode="options") + trade_pool_list(mode="futures"),
-        "trade_reviews": trade_review_list("options") + trade_review_list("futures"),
+        "trade_pools": [p for m in TRADE_MODES for p in trade_pool_list(mode=m)],
+        "trade_reviews": [r for m in TRADE_MODES for r in trade_review_list(m)],
     }
 
 def fund_import_backup(payload):
@@ -1623,9 +1809,9 @@ def fund_import_backup(payload):
             cash_flow = float(r.get("cash_flow") or 0)
             cash = float(r.get("cash") or 0)
             note = str(r.get("note") or "")
-            fund_upsert(r.get("strategy", "abe"), year, month, initial_equity,
+            fund_upsert(r.get("strategy", STRATEGY_OPTIONS_BUY), year, month, initial_equity,
                         end_equity, cash_flow, note, cash=cash)
-            strategies.add(r.get("strategy", "abe"))
+            strategies.add(norm_strategy(r.get("strategy"), STRATEGY_OPTIONS_BUY))
             imported += 1
     if isinstance(payload.get("trades"), list):
         for r in payload["trades"]:
@@ -1679,9 +1865,9 @@ def fund_combined_dashboard():
 
 
 # ===========================================================================
-# 期权交易记录 (abe 策略) — 与资金曲线共用 funds.db, 一次导出含所有数据
+# 交易记录 (期权买方 / 期权双买 / 期货 三种模式) — 与资金曲线共用 funds.db, 一次导出含所有数据
 # ===========================================================================
-TRADE_STRATEGY_DEFAULT = "abe"
+TRADE_STRATEGY_DEFAULT = STRATEGY_OPTIONS_BUY
 ALLOWED_CALL_PUT = ("C", "P")
 ALLOWED_DIRECTION = ("buy", "sell")
 ALLOWED_OP_TYPE = ("open", "close")
@@ -1843,7 +2029,7 @@ def detect_call_put(c):
 def _mode_arg(v):
     """解析 mode 参数: 只认 options/futures, 其余一律回退 options(老前端不带该参数时行为不变)"""
     m = (v[0] if isinstance(v, (list, tuple)) and v else v) or "options"
-    return m if m in ("options", "futures") else "options"
+    return m if m in TRADE_MODES else TRADE_MODE_DEFAULT
 
 
 def _trade_record_to_dict(r):
@@ -1905,18 +2091,19 @@ def trade_upsert(payload):
     if payload["direction"] not in ALLOWED_DIRECTION:
         raise ValueError("direction 必须为 buy / sell")
 
-    strategy = TRADE_STRATEGY_DEFAULT   # 固定 abe(自定义策略 UI 已撤除)
+    strategy = TRADE_STRATEGY_DEFAULT   # 固定「期权买方」(自定义策略 UI 已撤除)
 
     # 合约代码归一化(品种小写 + C/P 大写), 避免同一合约因大小写不同被当成两个
     payload["contract"] = normalize_contract(payload.get("contract"))
     # 批次号(v50.47): 空串=默认批次; 主页按 (标的, 批次) 分组 → 同品种不同批次各自成一条记录
     #   ⚠ 必须在平仓校验之前归一, 校验 SQL 要用它把可平量限定在同批次内
     payload["batch"] = (payload.get("batch") or "").strip()
-    # 模式: options 期权(默认, 老数据行为不变) / futures 期货; 两套记录互不可见
+    # 模式(v50.59): options 期权买方 / dual 期权双买 / futures 期货; 三套记录互不可见
+    #   缺省回退 options(老数据行为不变)
     #   ⚠ 必须提前到这里(v50.50): 下面的平仓校验 SQL 也要按 mode 过滤;
     #     放在校验之后的话 payload["mode"] 还是 None → IFNULL(mode,'options')=NULL 恒不匹配 → 可平量恒为 0
-    if payload.get("mode") not in ("options", "futures"):
-        payload["mode"] = "options"
+    if payload.get("mode") not in TRADE_MODES:
+        payload["mode"] = TRADE_MODE_DEFAULT
     _dup_id = payload.get("id")
 
     # 平仓数量校验: 不可超过开仓剩余(按合约大小写不敏感匹配)
@@ -2261,7 +2448,7 @@ def trade_pool_upsert(payload):
     contracts = [normalize_contract(c) for c in contracts]
     cs = json.dumps(contracts, ensure_ascii=False)
     note = payload.get("note") or ""
-    mode = payload.get("mode") if payload.get("mode") in ("options", "futures") else "options"
+    mode = payload.get("mode") if payload.get("mode") in TRADE_MODES else TRADE_MODE_DEFAULT
     rec_id = payload.get("id")
     if rec_id:
         existing = db.execute("SELECT snapshot_date FROM trade_pool_snapshots WHERE id=?", (rec_id,)).fetchone()
@@ -2328,7 +2515,7 @@ def trade_review_upsert(payload):
     """新增/更新复盘笔记。不传 review_at → 默认当前时间。"""
     db = _fund_db()
     now = datetime.now().isoformat(timespec="seconds")
-    mode = payload.get("mode") if payload.get("mode") in ("options", "futures") else "options"
+    mode = payload.get("mode") if payload.get("mode") in TRADE_MODES else TRADE_MODE_DEFAULT
     content = (payload.get("content") or "").strip()
     if not content:
         raise ValueError("复盘内容不能为空")
@@ -2372,7 +2559,7 @@ def trade_review_import_record(r):
     now = datetime.now().isoformat(timespec="seconds")
     row = {
         "id": r.get("id"),
-        "mode": r.get("mode") if r.get("mode") in ("options", "futures") else "options",
+        "mode": r.get("mode") if r.get("mode") in TRADE_MODES else TRADE_MODE_DEFAULT,
         "underlying": (r.get("underlying") or "").strip(),
         "review_at": (r.get("review_at") or "").strip() or now,
         "content": content,
@@ -2426,7 +2613,7 @@ def trade_import_record(r):
         "note": r.get("note") or "",
         "created_at": r.get("created_at") or now,
         "updated_at": r.get("updated_at") or now,
-        "mode": r.get("mode") if r.get("mode") in ("options", "futures") else "options",
+        "mode": r.get("mode") if r.get("mode") in TRADE_MODES else TRADE_MODE_DEFAULT,
         "init_stop": r.get("init_stop"),
         "init_target": r.get("init_target"),
         "calc_json": r.get("calc_json") or None,
@@ -2466,7 +2653,7 @@ def trade_pool_import_record(r):
         "created_at": r.get("created_at") or now,
     }
     # ⚠ 必须带上 mode(v50.50): 老备份没这个键 → 回退 options, 与导入前的默认行为一致
-    row["mode"] = r.get("mode") if r.get("mode") in ("options", "futures") else "options"
+    row["mode"] = r.get("mode") if r.get("mode") in TRADE_MODES else TRADE_MODE_DEFAULT
     cols = ("id", "strategy", "snapshot_date", "contracts", "note", "created_at", "mode")
     db = _fund_db()
     if row["id"] is None:
@@ -2704,6 +2891,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = calc_futures(params)
             elif path == "/api/calc/options":
                 result = calc_options(params)
+            elif path == "/api/calc/dual":
+                result = calc_dual(params)
             elif path == "/api/funds/records":
                 action = params.get("action", "upsert")
                 if action == "delete":
@@ -3251,6 +3440,21 @@ select{cursor:pointer;appearance:none;
 .rung .rp b{color:var(--bad);font-weight:600}
 
 /* 最近方案 (期货, 最多3组) */
+/* 期权双买(v50.59): 两列参数行 + 三列表单(行权价/delta/每手权利金) */
+.dual-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end}
+.dual-leg{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:4px}
+.dual-leg>div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.dual-leg .k{font-size:var(--fz-micro);color:var(--sub)}
+.dual-leg input{margin:0}
+.dual-target-tbl{width:100%;border-collapse:collapse;font-size:var(--fz-td)}
+.dual-target-tbl th{text-align:right;font-weight:600;color:var(--sub);font-size:var(--fz-micro);
+  padding:6px 8px;border-bottom:1px solid var(--border)}
+.dual-target-tbl th:first-child{text-align:left}
+.dual-target-tbl td{text-align:right;padding:7px 8px;border-bottom:1px solid var(--border);
+  font-variant-numeric:tabular-nums}
+.dual-target-tbl td:first-child{text-align:left;color:var(--sub)}
+.dual-target-tbl tr:last-child td{border-bottom:0}
+.dual-target-tbl .big{font-weight:700;color:var(--text)}
 .plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
   border-radius:10px;padding:10px 14px;line-height:1.6}
 .plans-item{display:flex;align-items:center;gap:12px;background:var(--panel2);
@@ -3381,7 +3585,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .trades-layout{display:block;position:relative}
 /* 期货/期权模式切换: 带 .opt-only 的元素只在期权模式显示(v50.39) */
 [data-tm="futures"] .opt-only{display:none !important}
-[data-tm="options"] .fut-only{display:none !important}
+[data-tm="options"] .fut-only,
+[data-tm="dual"] .fut-only{display:none !important}
 /* 复盘笔记 */
 .review-item{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:8px}
 .review-item .rv-t{font-size:11.5px;color:var(--sub);display:flex;align-items:center;gap:8px;margin-bottom:4px}
@@ -3704,9 +3909,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 <div class="app-shell">
   <aside class="side" id="mainTabs">
     <div class="maintab active" data-tab="calc"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="var(--mk-main)" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="var(--mk-main)"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="var(--mk-main)"/></svg></span><span class="mt">开仓计算</span><small>期货 · 期权</small></div>
-    <div class="maintab" data-tab="trades"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="48" height="11" rx="3" fill="var(--mk-main)"/><rect x="26" y="53" width="30" height="11" rx="3" fill="var(--mk-acc)"/></svg></span><span class="mt">交易记录</span><small>期权模式</small></div>
+    <div class="maintab" data-tab="trades"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="48" height="11" rx="3" fill="var(--mk-main)"/><rect x="26" y="53" width="30" height="11" rx="3" fill="var(--mk-acc)"/></svg></span><span class="mt">交易记录</span><small>期权买方</small></div>
     <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>期货模式</small></div>
-    <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>abe · 威科夫</small></div>
+    <div class="maintab" data-tab="tradesDual"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="22" y="36" width="26" height="11" rx="3" fill="var(--mk-main)"/><rect x="52" y="36" width="26" height="11" rx="3" fill="var(--mk-acc)"/><rect x="22" y="53" width="56" height="11" rx="3" fill="var(--mk-base)" opacity=".55"/></svg></span><span class="mt">交易记录</span><small>期权双买</small></div>
+    <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>多策略</small></div>
     <div class="side-extras">
       <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记 + 计算器最近方案）">⬆</button>
       <button class="side-btn" id="btnImport" title="导入备份（合并资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记 + 计算器最近方案）">⬇</button>
@@ -3742,7 +3948,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <div id="calcArea">
     <div class="modes">
       <div class="mode active" data-mode="futures">期货模式<small>风险额度 0.5%~3% 可选 · 盈亏比决策</small></div>
-      <div class="mode" data-mode="options">期权模式<small>风险额度 0.5%~3% 可选 · 权利金占用</small></div>
+      <div class="mode" data-mode="options">期权买方<small>风险额度 0.5%~3% 可选 · 权利金占用</small></div>
+      <div class="mode" data-mode="dual">期权双买<small>两腿 delta 中性 · 翻倍止盈目标</small></div>
     </div>
 
   <div class="grid">
@@ -3867,6 +4074,56 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </div>
         <div class="tip">开仓金额 = 权益 × 所选百分比。<b>开仓价 = 1 手期权价格（已含合约乘数）</b>，手数 = 预算 ÷ 每手价格，按权利金全额占用资金。</div>
       </div>
+
+      <!-- ===== 期权双买(v50.59): 同时买入 call 与 put, 两腿 delta 中性 ===== -->
+      <div id="dualFields" class="hidden">
+        <label>开仓标的（搜索 / 选常用）</label>
+        <div class="searchbox" style="display:flex;gap:6px;align-items:stretch">
+          <input id="cSearchD" placeholder="搜索代码/名称，如 lc / 碳酸锂" autocomplete="off" style="flex:1">
+          <button class="btn xs ghost" id="favD" title="把当前选中的标的加入常用">★ 设为常用</button>
+          <div class="slist hidden" id="cListD" style="left:0;right:0"></div>
+        </div>
+        <div class="freq" id="freqD"><div class="tip" style="margin:2px 0 6px">常用：暂未设置，先在搜索框选好标的后点「★ 设为常用」</div></div>
+        <div class="quote hidden" id="quoteD" title="行情来自新浪财经，约20秒延迟，与交易软件可能存在细微差异">
+          <span class="qname" id="qNameD">—</span>
+          <span class="qprice" id="qPriceD">—</span>
+          <span class="qchg" id="qChgD"></span>
+          <button class="qref" id="qRefD">刷新</button>
+        </div>
+
+        <div class="dual-row">
+          <div>
+            <label>合约年月</label>
+            <input id="dualMonth" placeholder="如 2611" maxlength="4" inputmode="numeric">
+          </div>
+          <div>
+            <label>风险额度（占权益）</label>
+            <select id="riskAmountD">
+              <option value="0.5">0.5%</option>
+              <option value="1">1%</option>
+              <option value="1.5">1.5%</option>
+              <option value="2">2%</option>
+              <option value="3" selected>3%</option>
+            </select>
+          </div>
+        </div>
+        <div class="wanhint" id="riskHintD" style="color:var(--sub)"></div>
+
+        <label>Call 腿（看涨）</label>
+        <div class="dual-leg">
+          <div><span class="k">行权价</span><input id="callStrike" type="number" min="0" step="any" inputmode="decimal" placeholder="144000"></div>
+          <div><span class="k">delta</span><input id="callDelta" type="number" step="0.01" min="0" max="1" inputmode="decimal" placeholder="0.30"></div>
+          <div><span class="k">每手权利金</span><input id="callPremium" type="number" min="0" step="any" inputmode="decimal" placeholder="9800"></div>
+        </div>
+
+        <label>Put 腿（看跌）</label>
+        <div class="dual-leg">
+          <div><span class="k">行权价</span><input id="putStrike" type="number" min="0" step="any" inputmode="decimal" placeholder="120000"></div>
+          <div><span class="k">delta</span><input id="putDelta" type="number" step="0.01" min="-1" max="0" inputmode="decimal" placeholder="-0.30"></div>
+          <div><span class="k">每手权利金</span><input id="putPremium" type="number" min="0" step="any" inputmode="decimal" placeholder="8500"></div>
+        </div>
+        <div class="tip">两腿手数按 <b>delta 中性</b> 配比（call手数 × |call delta| = put手数 × |put delta|），合计权利金不超过预算。<b>止盈目标价位</b> = 持仓总价值涨到 2 / 3 / 4 / 5 倍权利金时，单腿每手权利金要达到的价格。</div>
+      </div>
     </div>
 
     <!-- 结果区 -->
@@ -3957,7 +4214,45 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="tip">期权买入不占用保证金，资金按权利金全额占用。期权乘数请以交易所最新规定为准。</div>
       </div>
 
-      <!-- 最近保存的方案 (期货/期权各自独立, 各最多3组, 一键调出) -->
+      <!-- 期权双买 测算结果(v50.59) -->
+      <div id="resultD" class="hidden">
+        <div class="ratio-strip anim">
+          <span class="l">开仓额度 · 当前风险额度</span>
+          <span class="badge good" id="rIvBadgeD"><span class="ico">◈</span>权益 × 3%</span>
+        </div>
+        <div class="budgetbar anim">
+          <span class="k">可投入开仓金额（预算）</span>
+          <span class="v money" id="rBudgetD">—</span>
+        </div>
+        <div class="hud">
+          <div class="bignum anim">
+            <div class="t">Call 手数</div>
+            <div class="n" id="rQtyCD">—</div>
+            <div class="s">按 delta 中性配比</div>
+          </div>
+          <div class="bignum anim">
+            <div class="t">Put 手数</div>
+            <div class="n" id="rQtyPD">—</div>
+            <div class="s">按 delta 中性配比</div>
+          </div>
+        </div>
+        <div class="budgetbar anim" style="margin-top:14px">
+          <span class="k">两腿权利金合计（占用资金）</span>
+          <span class="v money gold" id="rPremiumD">—</span>
+        </div>
+        <div class="details grid2 anim" id="rDetailD" style="margin-top:12px">
+          <div class="dcell"><span class="k">开仓标的 / 合约</span><span class="v" id="rContractD">—</span></div>
+          <div class="dcell"><span class="k" title="两腿 delta 相加, 越接近 0 越中性">两腿净 delta（越接近 0 越中性）</span><span class="v" id="rDeltaD">—</span></div>
+        </div>
+        <div id="rTargetsD" style="margin-top:14px"></div>
+        <div class="warnbox hidden" id="rWarnD"></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
+          <button class="btn xs cyan" id="btnAddDual" title="把这次测算的 call / put 两条腿一键写入「交易记录：期权双买」">📥 加入记录</button>
+        </div>
+        <div class="tip">双买 = 同时买入 call 与 put。上涨时 put 归零、全靠 call 腿撑；下跌时反过来。目标价位是<b>单腿每手权利金</b>要达到的价，不是标的价。</div>
+      </div>
+
+      <!-- 最近保存的方案 (期货/期权买方/期权双买 各自独立, 各最多10组, 一键调出) -->
       <div id="recentPlans" class="hidden" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:2px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
           <span style="font-size:12.5px;color:var(--sub);letter-spacing:.5px">最近方案 <small style="opacity:.75">（最多保留最近 10 组）</small></span>
@@ -3978,15 +4273,17 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="funds-bar">
       <div class="funds-label">策略</div>
       <div class="seg" id="stratSeg">
-        <button class="active" data-strategy="abe">abe</button>
+        <button class="active" data-strategy="期权买方">期权买方</button>
         <button data-strategy="威科夫">威科夫</button>
+        <button data-strategy="期权双买">期权双买</button>
         <button data-strategy="combined">汇总</button>
       </div>
       <!-- 各策略累计提现(出金) 展示 -->
       <div id="withdrawBox" class="withdraw-box">
         <span class="w-lbl">提现</span>
-        <span class="wchip" id="wdAbe">abe ¥0</span>
+        <span class="wchip" id="wdAbe">期权买方 ¥0</span>
         <span class="wchip" id="wdWk">威科夫 ¥0</span>
+        <span class="wchip" id="wdDual">期权双买 ¥0</span>
         <span class="wchip" id="wdAll">汇总 ¥0</span>
       </div>
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:nowrap">
@@ -3998,7 +4295,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
     <!-- 月度明细表 -->
     <div class="card" style="margin-bottom:18px">
-      <h2 style="display:flex;align-items:center;gap:10px"><span class="dot"></span><span id="monthlyTitle">abe · 月度明细</span>
+      <h2 style="display:flex;align-items:center;gap:10px"><span class="dot"></span><span id="monthlyTitle">期权买方 · 月度明细</span>
         <button class="btn sm" id="btnShowAllFunds" style="margin-left:auto" title="记录较多时默认只显示最近 5 条">显示全部</button>
       </h2>
       <div class="tbl-scroll">
@@ -4022,7 +4319,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
     <!-- 年度汇总表 -->
     <div class="card" style="margin-bottom:18px">
-      <h2><span class="dot"></span><span id="yearlyTitle">abe · 年度汇总</span></h2>
+      <h2><span class="dot"></span><span id="yearlyTitle">期权买方 · 年度汇总</span></h2>
       <div style="overflow-x:auto">
         <table class="tbl" id="tblYearly">
           <thead><tr>
@@ -4043,7 +4340,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <!-- 仪表盘 / 图表区 -->
     <div class="fund-grid">
       <div class="chartbox">
-        <div class="ct"><span class="dot"></span><span id="chartMonthlyTitle">abe · 月收益图</span>
+        <div class="ct"><span class="dot"></span><span id="chartMonthlyTitle">期权买方 · 月收益图</span>
           <button class="btn sm zoombtn" data-zoom="monthly" title="放大查看">⤢ 放大</button></div>
         <div class="legend">
           <span class="lg"><i style="background:#a58ae0"></i>本月末权益（扣掉出入金之后）</span>
@@ -4053,7 +4350,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <canvas id="chartMonthly"></canvas>
       </div>
       <div class="chartbox">
-        <div class="ct"><span class="dot"></span><span id="chartYearlyTitle">abe · 年盈亏分析</span>
+        <div class="ct"><span class="dot"></span><span id="chartYearlyTitle">期权买方 · 年盈亏分析</span>
           <button class="btn sm zoombtn" data-zoom="yearly" title="放大查看">⤢ 放大</button></div>
         <div class="legend">
           <span class="lg"><i style="background:#a58ae0"></i>年末权益</span>
@@ -4104,7 +4401,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           </div>
 
           <div class="card results" style="margin-top:14px">
-            <h2><span class="dot"></span><span id="poolTitle">abe 期权监控池</span></h2>
+            <h2><span class="dot"></span><span id="poolTitle">期权买方监控池</span></h2>
             <div id="poolArea"><div class="tip">暂无监控池快照，点下面按钮新建</div></div>
             <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn xs" id="btnNewPool">➕ 新建监控池快照</button>
@@ -4474,6 +4771,7 @@ function init(){
     CONTRACTS = d.contracts;
     initContractSearch('cSearch','cList','freqF','favF','futures', c => pickContract(c,'F'));
     initContractSearch('cSearchO','cListO','freqO','favO','options', c => pickContract(c,'O'));
+    initContractSearch('cSearchD','cListD','freqD','favD','dual', c => pickContract(c,'D'));
   });
   loadTheme();
   loadSettings();
@@ -4493,6 +4791,7 @@ function init(){
   $('equity').addEventListener('change', _onEqInput);
   $('riskAmount').addEventListener('change', ()=>onRiskChange('futures'));
   $('riskAmountO').addEventListener('change', ()=>onRiskChange('options'));
+$('riskAmountD').addEventListener('change', ()=>onRiskChange('dual'));
   // 存为默认: 权益 / 风险百分比(期货+期权)
   $('btnDefEquity').addEventListener('click', saveDefaultEquity);
   $('btnDefRisk').addEventListener('click', ()=>saveDefaultRisk('futures'));
@@ -4501,6 +4800,7 @@ function init(){
   $('btnClearPrices').addEventListener('click', ()=>clearPrices('F'));
   updateRiskHint('futures');
   updateRiskHint('options');
+  updateRiskHint('dual');
 }
 
 /* ---- 默认值设置: 权益 / 期货风险百分比 (持久化到 config.json) ---- */
@@ -4509,9 +4809,9 @@ function updateRiskHint(mode){
   const eqEl = $('equity');
   if (!eqEl) return;
   const eq = (parseFloat(eqEl.value) || 0) * 10000;   // 万元 → 元
-  const defPct = mode === 'options' ? 3 : 1;
-  const selId = mode === 'options' ? 'riskAmountO' : 'riskAmount';
-  const hintId = mode === 'options' ? 'riskHintO' : 'riskHint';
+  const defPct = mode === 'futures' ? 1 : 3;        // 期货默认 1%, 期权买方/双买默认 3%
+  const selId = mode === 'futures' ? 'riskAmount' : (mode === 'dual' ? 'riskAmountD' : 'riskAmountO');
+  const hintId = mode === 'futures' ? 'riskHint' : (mode === 'dual' ? 'riskHintD' : 'riskHintO');
   const sel = $(selId), hint = $(hintId);
   if (!sel || !hint) return;
   const pct = parseFloat(sel.value);
@@ -4522,10 +4822,11 @@ function updateRiskHint(mode){
 }
 let settingsCache = {futures_default_equity:null, options_default_equity:null, futures_risk_pct:null, options_risk_pct:null, frequent_futures:[], frequent_options:[]};
 /* 期货/期权各自的当前权益输入值(万元, null=未填过) — 两模式互不影响 */
-let equityByMode = {futures:null, options:null};
+let equityByMode = {futures:null, options:null, dual:null};
 /* 取某模式的默认权益(元) */
 function defaultEquityOf(mode){
-  return mode === 'options' ? settingsCache.options_default_equity : settingsCache.futures_default_equity;
+  // 期权双买与期权买方共用「期权默认权益」, 期货用期货的(v50.59)
+  return mode === 'futures' ? settingsCache.futures_default_equity : settingsCache.options_default_equity;
 }
 /* 把当前 equity 输入框的值切到指定模式: 有记忆值用记忆值, 否则用该模式默认值, 都没有则清空 */
 function applyEquityForMode(mode){
@@ -4541,8 +4842,9 @@ function applyEquityForMode(mode){
   if (hint){
     const isDefault = (remembered == null || remembered === '') && def != null;
     if (isDefault){
+      const _ml = mode === 'futures' ? '期货' : (mode === 'dual' ? '期权双买' : '期权买方');
       hint.classList.remove('hidden');
-      hint.innerHTML = '✓ 已自动填入' + (mode==='options'?'期权':'期货') + '默认权益：<b>'
+      hint.innerHTML = '✓ 已自动填入' + _ml + '默认权益：<b>'
         + (def/10000).toLocaleString('en-US',{maximumFractionDigits:2})
         + ' 万元</b>（可点「存为默认」更换）';
     } else {
@@ -4579,23 +4881,23 @@ function saveDefaultEquity(){
   const eqWan = parseFloat($('equity').value);
   if (isNaN(eqWan) || eqWan <= 0) { alert('请先填写有效的权益金额'); return; }
   const eqYuan = eqWan * 10000;   // 万元 → 元(存储)
-  const key = curMode === 'options' ? 'options_default_equity' : 'futures_default_equity';
-  const label = curMode === 'options' ? '期权' : '期货';
+  const key = curMode === 'futures' ? 'futures_default_equity' : 'options_default_equity';
+  const label = curMode === 'futures' ? '期货' : (curMode === 'dual' ? '期权双买（与期权买方共用）' : '期权买方');
   fetchT('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({[key]: eqYuan})}).then(r=>r.json()).then(d=>{
     if(d.ok){
       settingsCache[key] = eqYuan;
       equityByMode[curMode] = null;   // 值已等于默认值 → 不算手动记忆, 让它显示"已自动填入"提示
       applyEquityForMode(curMode);
-      alert('✅ 已把 ' + label + '默认权益保存为：' + eqWan.toLocaleString('en-US',{maximumFractionDigits:2}) + ' 万元（下次打开' + label + '模式自动填入，不影响' + (curMode==='options'?'期货':'期权') + '模式）');
+      alert('✅ 已把 ' + label + '默认权益保存为：' + eqWan.toLocaleString('en-US',{maximumFractionDigits:2}) + ' 万元（下次打开自动填入，不影响期货模式）');
     }
     else alert('保存失败：' + (d.error||''));
   });
 }
 function saveDefaultRisk(mode){
-  const selId = mode === 'options' ? 'riskAmountO' : 'riskAmount';
-  const key = mode === 'options' ? 'options_risk_pct' : 'futures_risk_pct';
-  const label = mode === 'options' ? '期权' : '期货';
+  const selId = mode === 'futures' ? 'riskAmount' : (mode === 'dual' ? 'riskAmountD' : 'riskAmountO');
+  const key = mode === 'futures' ? 'futures_risk_pct' : 'options_risk_pct';
+  const label = mode === 'futures' ? '期货' : (mode === 'dual' ? '期权双买（与期权买方共用）' : '期权买方');
   const pct = parseFloat($(selId).value);
   fetchT('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({[key]: pct})}).then(r=>r.json()).then(d=>{
@@ -4637,7 +4939,7 @@ function bindWanEquity(){
 const _freqRenderers = [];   // 注册所有 freq 渲染器, settings 变化时统一刷新
 function initContractSearch(inputId, listId, freqId, favBtnId, mode, onPick){
   const input = $(inputId), list = $(listId), favBtn = $(favBtnId), freqBox = $(freqId);
-  const mKey = mode==='futures' ? 'F' : 'O';
+  const mKey = mode==='futures' ? 'F' : (mode==='dual' ? 'D' : 'O');   // v50.59: D = 期权双买
   const freqKey = mode==='futures' ? 'frequent_futures' : 'frequent_options';
   let items = [];
 
@@ -4744,9 +5046,11 @@ function pickContract(c, which){
     ['entry','stop','target'].forEach(id=>{ $(id).step = c.tick; });
     updateTickHint();
     loadQuote(c.code, 'F');
-  } else {
+  } else if(which==='O') {
     $('unitO').textContent = '元/手';   // 期权开仓价 = 1手价格(已含合约乘数)
     loadQuote(c.code, 'O');
+  } else {
+    loadQuote(c.code, 'D');            // 期权双买: 只取行情做参考
   }
   onInput();
 }
@@ -4769,12 +5073,18 @@ function updateTickHint(){
 }
 
 /* 主力合约行情 (具体合约, 价格+涨跌幅以昨收为基准; 约20秒延迟; 每10秒自动刷新) */
-const quoteTimers = {F:null, O:null};
+const QUOTE_IDS = {
+  F: ['quoteF', 'qNameF', 'qPriceF', 'qChgF'],
+  O: ['quoteO', 'qNameO', 'qPriceO', 'qChgO'],
+  D: ['quoteD', 'qNameD', 'qPriceD', 'qChgD'],     // v50.59 期权双买
+};
+const quoteTimers = {F:null, O:null, D:null};
 function loadQuote(code, which, silent){
-  const box = which==='F' ? $('quoteF') : $('quoteO');
-  const nameEl = which==='F' ? $('qNameF') : $('qNameO');
-  const priceEl = which==='F' ? $('qPriceF') : $('qPriceO');
-  const chgEl = which==='F' ? $('qChgF') : $('qChgO');
+  const ids = QUOTE_IDS[which] || QUOTE_IDS.O;
+  const box = $(ids[0]);
+  const nameEl = $(ids[1]);
+  const priceEl = $(ids[2]);
+  const chgEl = $(ids[3]);
   clearInterval(quoteTimers[which]);
   if(!silent){
     box.classList.remove('hidden');
@@ -4808,6 +5118,7 @@ function loadQuote(code, which, silent){
 }
 $('qRefF').addEventListener('click',()=>{ if(selCode.F) loadQuote(selCode.F,'F'); });
 $('qRefO').addEventListener('click',()=>{ if(selCode.O) loadQuote(selCode.O,'O'); });
+$('qRefD').addEventListener('click',()=>{ if(selCode.D) loadQuote(selCode.D,'D'); });
 
 /* 模式切换 (期货/期权); 调出方案时也走这里 */
 function setMode(m){
@@ -4817,7 +5128,8 @@ function setMode(m){
   curMode = m;
   $('futuresFields').classList.toggle('hidden', curMode!=='futures');
   $('optionsFields').classList.toggle('hidden', curMode!=='options');
-  if (typeof renderPlans === 'function') renderPlans();   // 最近方案区(期货/期权各一套)
+  $('dualFields').classList.toggle('hidden', curMode!=='dual');
+  if (typeof renderPlans === 'function') renderPlans();   // 最近方案区(三种模式各一套)
   if (typeof applyEquityForMode === 'function') applyEquityForMode(curMode);   // 切到该模式自己的权益
   onInput();
 }
@@ -4895,8 +5207,10 @@ $('exitBtn').addEventListener('click',()=>{
 });
 
 /* 输入事件 */
-['equity','entry','stop','target','marginRate','entryO'].forEach(id=>{
-  $(id).addEventListener('input',onInput);
+['equity','entry','stop','target','marginRate','entryO',
+ 'dualMonth','callStrike','callDelta','callPremium','putStrike','putDelta','putPremium'].forEach(id=>{
+  const el = $(id);
+  if (el) el.addEventListener('input',onInput);
 });
 /* 持仓方向 双按钮: 做多(红) / 做空(青) */
 document.querySelectorAll('#dirSeg button').forEach(b=>{
@@ -4910,7 +5224,115 @@ document.querySelectorAll('#dirSeg button').forEach(b=>{
 
 /* 计算 */
 function onInput(){
-  if(curMode==='futures'){ updateTickHint(); calcFutures(); } else calcOptions();
+  if(curMode==='futures'){ updateTickHint(); calcFutures(); }
+  else if(curMode==='dual'){ calcDual(); }      // v50.59 期权双买
+  else calcOptions();
+}
+
+/* ===================== 期权双买(v50.59) ===================== */
+let lastCalcD = null;          // 最近一次双买测算结果, 供「📥 加入记录」用
+
+function calcDual(){
+  const eq = (parseFloat($('equity').value) || 0) * 10000;   // 万元 → 元
+  if(!selCode.D){ showEmpty('请先选择开仓标的（支持代码 / 中文搜索）'); return; }
+  if(!eq){ showEmpty('请先填写当前总权益'); return; }
+  const month = ($('dualMonth').value || '').trim();
+  const cS = $('callStrike').value, cD = $('callDelta').value, cP = $('callPremium').value;
+  const pS = $('putStrike').value,  pD = $('putDelta').value,  pP = $('putPremium').value;
+  if(!month || cS === '' || cD === '' || cP === '' || pS === '' || pD === '' || pP === ''){
+    showEmpty('请完整填写：合约年月 + 两腿的行权价 / delta / 每手权利金');
+    return;
+  }
+  fetchT('/api/calc/dual',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      equity: eq, code: selCode.D, month: month,
+      risk_percent: $('riskAmountD').value ? parseFloat($('riskAmountD').value) : 3,
+      call_strike: cS, call_delta: cD, call_premium: cP,
+      put_strike: pS,  put_delta: pD,  put_premium: pP,
+    })})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ showError(d.error||'计算失败'); return; }
+      renderD(d);
+    }).catch(()=>showError('应用服务连接已断开：请关闭窗口后重新双击桌面「期货开仓计算器」图标启动。测算在本机完成，无需联网。'));
+}
+
+function renderD(d){
+  lastCalcD = d;
+  $('empty').classList.add('hidden');
+  $('resultF').classList.add('hidden');
+  $('resultO').classList.add('hidden');
+  $('resultD').classList.remove('hidden');
+  const pctTxt = fmtTrim(d.risk_percent != null ? d.risk_percent : (parseFloat($('riskAmountD').value) || 3));
+  const eqWanTxt = fmtTrim(parseFloat($('equity').value) || 0);
+  $('rIvBadgeD').innerHTML = '<span class="ico">◈</span>权益 × ' + pctTxt + '%';
+  $('rBudgetD').innerHTML = fmtMoney(d.budget) + ' <span class="dim" style="font-size:12px">＝ 权益 ' + eqWanTxt + ' 万 × ' + pctTxt + '%</span>';
+  $('rQtyCD').textContent = d.call.qty;
+  $('rQtyPD').textContent = d.put.qty;
+  $('rPremiumD').textContent = fmtMoney(d.total_premium);
+  $('rContractD').textContent = d.contract + '（' + d.code + (d.month ? ' · ' + d.month : '') + '）';
+  $('rDeltaD').innerHTML = '<b>' + fmtTrim(d.net_delta) + '</b>'
+    + (d.delta_gap_pct <= 2
+        ? ' <span style="color:var(--good)">（中性）</span>'
+        : ' <span style="color:var(--sub)">（两腿差 ' + d.delta_gap_pct + '%，取整所致）</span>');
+  /* 目标价位表: 持仓总价值涨到 N 倍权利金时, 单腿每手权利金要到的价 */
+  $('rTargetsD').innerHTML = d.enough_lots ? (
+    '<div class="ratio-strip"><span class="l">止盈目标价位 · 持仓总价值涨到 N 倍权利金</span>'
+    + '<span class="badge" style="opacity:.8">合计 ' + fmtMoney(d.total_premium) + '</span></div>'
+    + '<table class="dual-target-tbl"><thead><tr>'
+    + '<th>目标</th><th>Call 每手目标价</th><th>Put 每手目标价</th></tr></thead><tbody>'
+    + d.targets.map(t =>
+        '<tr><td>' + t.n + '× <span style="opacity:.75">合计 ' + fmtMoney(t.value) + '</span></td>'
+        + '<td class="big">' + fmtMoney(t.call_price) + ' <span style="color:var(--sub);font-size:12px">' + t.call_mult + '×</span></td>'
+        + '<td class="big">' + fmtMoney(t.put_price) + ' <span style="color:var(--sub);font-size:12px">' + t.put_mult + '×</span></td></tr>'
+      ).join('')
+    + '</tbody></table>'
+    + '<div class="tip">价格上行到 Call 目标价就平 call 腿（此时 put 已基本归零），下行到 Put 目标价就平 put 腿。</div>'
+  ) : '';
+  const warn = $('rWarnD');
+  if (!d.enough_lots){
+    warn.classList.remove('hidden');
+    warn.innerHTML = '⚠ ' + (d.message || '按当前预算与权利金，两腿都买不到 1 手，建议不开仓');
+  } else warn.classList.add('hidden');
+}
+
+/* 双买测算 → 交易记录: 两条腿写进同一个批次(主表显示为一条记录) */
+async function addDualToTradeRecord(){
+  if (curMode !== 'dual'){ alert('请先切到开仓计算器的「期权双买」'); return; }
+  const d = lastCalcD;
+  if (!d){ alert('测算结果还没生成，请稍候再点'); return; }
+  if (!d.enough_lots || !d.call.qty || !d.put.qty){
+    alert('当前测算两腿都买不到 1 手（预算不足），无法加入记录');
+    return;
+  }
+  if (!d.call.contract_code || !d.put.contract_code){
+    alert('请先填写合约年月（如 2611）');
+    return;
+  }
+  const batch = newBatch();
+  const today = new Date().toISOString().slice(0, 10);
+  const legs = [
+    { cp: 'C', contract: d.call.contract_code, qty: d.call.qty,
+      prem: d.call.premium_per_lot, total: d.call.premium_total, delta: d.call.delta },
+    { cp: 'P', contract: d.put.contract_code, qty: d.put.qty,
+      prem: d.put.premium_per_lot, total: d.put.premium_total, delta: d.put.delta },
+  ];
+  try {
+    for (const l of legs){
+      const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          mode: 'dual', underlying: d.code, contract: l.contract, batch: batch,
+          op_type: 'open', direction: 'buy', call_put: l.cp, open_date: today,
+          open_price: l.prem, qty: l.qty, premium: l.total, open_delta: l.delta,
+          note: '来自开仓计算器 · ' + d.contract + ' ' + d.month + ' 双买',
+        })});
+      const j = await r.json();
+      if (!j.ok){ alert('加入记录失败：' + (j.error || '未知错误')); return; }
+    }
+    alert('✅ 已加入「交易记录 · 期权双买」\n' + d.contract + ' ' + d.month
+      + ' · Call ' + d.call.qty + ' 手 + Put ' + d.put.qty + ' 手'
+      + '\n权利金合计 ' + fmtMoney(d.total_premium) + '（两条腿归在同一条记录里）');
+    if (typeof TradeUI !== 'undefined' && TradeUI.setMode) TradeUI.setMode('dual');
+  } catch(e){ alert('加入记录失败：' + e); }
 }
 
 function calcFutures(){
@@ -5069,11 +5491,14 @@ const PLAN_KEY = 'oc_futures_plans';
 const PLAN_MAX = 10;
 const PLAN_KEY_O = 'oc_options_plans';   // 期权方案独立存储, 与期货互不挤占
 const PLAN_MAX_O = 10;
+const PLAN_KEY_D = 'oc_dual_plans';      // v50.59: 期权双买方案
+const PLAN_MAX_D = 10;
 let planList = [];
 let planListO = [];
+let planListD = [];
 /* 当前模式对应的方案列表与上限 */
-function activePlans(){ return curMode === 'options' ? planListO : planList; }
-function activePlanMax(){ return curMode === 'options' ? PLAN_MAX_O : PLAN_MAX; }
+function activePlans(){ return curMode === 'options' ? planListO : (curMode === 'dual' ? planListD : planList); }
+function activePlanMax(){ return curMode === 'options' ? PLAN_MAX_O : (curMode === 'dual' ? PLAN_MAX_D : PLAN_MAX); }
 function escHtml(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
@@ -5089,28 +5514,31 @@ function loadPlans(){
   catch(e){ planList = []; }
   try { planListO = JSON.parse(localStorage.getItem(PLAN_KEY_O) || '[]') || []; }
   catch(e){ planListO = []; }
+  try { planListD = JSON.parse(localStorage.getItem(PLAN_KEY_D) || '[]') || []; }
+  catch(e){ planListD = []; }
 }
 function persistPlans(){
-  if (curMode === 'options'){
-    if (planListO.length > PLAN_MAX_O) planListO.length = PLAN_MAX_O;
-    try { localStorage.setItem(PLAN_KEY_O, JSON.stringify(planListO)); } catch(e){}
-  } else {
-    if (planList.length > PLAN_MAX) planList.length = PLAN_MAX;
-    try { localStorage.setItem(PLAN_KEY, JSON.stringify(planList)); } catch(e){}
-  }
+  const save = (list, key, mx) => {
+    if (list.length > mx) list.length = mx;
+    try { localStorage.setItem(key, JSON.stringify(list)); } catch(e){}
+  };
+  if (curMode === 'options')   save(planListO, PLAN_KEY_O, PLAN_MAX_O);
+  else if (curMode === 'dual') save(planListD, PLAN_KEY_D, PLAN_MAX_D);
+  else                         save(planList,  PLAN_KEY,   PLAN_MAX);
   renderPlans();
 }
 /* 备份用: 导出两个模式的「最近方案」(v50.57)
    ⚠ 方案存在 localStorage, 不在后端库里 → 之前备份完全没带它们, 换电脑后方案全丢 */
 function plansSnapshot(){
   loadPlans();
-  return { futures: planList.slice(), options: planListO.slice() };
+  return { futures: planList.slice(), options: planListO.slice(), dual: planListD.slice() };
 }
 /* 备份恢复: 把备份里的方案写回 localStorage 与本进程内存, 返回恢复的组数 */
 function plansRestore(pl){
   if (!pl || typeof pl !== 'object' || Array.isArray(pl)) return 0;
   let n = 0;
-  [[PLAN_KEY, 'futures', PLAN_MAX], [PLAN_KEY_O, 'options', PLAN_MAX_O]].forEach(([key, k, mx]) => {
+  [[PLAN_KEY, 'futures', PLAN_MAX], [PLAN_KEY_O, 'options', PLAN_MAX_O],
+   [PLAN_KEY_D, 'dual', PLAN_MAX_D]].forEach(([key, k, mx]) => {
     const arr = Array.isArray(pl[k]) ? pl[k].filter(x => x && typeof x === 'object') : null;
     if (!arr || !arr.length) return;
     const cut = arr.slice(0, mx);
@@ -5193,19 +5621,34 @@ function renderPlans(){
   const box = $('planList');
   if (!box) return;
   const isOpt = curMode === 'options';
-  $('recentPlans').classList.remove('hidden');          // 期货/期权都显示
+  const isDual = curMode === 'dual';
+  const modeTxt = isDual ? '期权双买' : (isOpt ? '期权买方' : '期货');
+  $('recentPlans').classList.remove('hidden');          // 三种模式都显示
   const btn = $('btnSavePlan');
-  if (btn) btn.title = isOpt
-    ? '把当前期权参数（标的/每手权利金/风险额度/权益）保存为方案，点「调出」一键恢复并重算'
-    : '把当前开仓参数（标的/方向/价格/保证金率/风险额度/权益）保存为方案，点「调出」一键恢复并重算';
+  if (btn) btn.title = isDual
+    ? '把当前双买参数（标的/合约年月/两腿行权价·delta·权利金/风险额度/权益）保存为方案，点「调出」一键恢复并重算'
+    : (isOpt
+      ? '把当前期权参数（标的/每手权利金/风险额度/权益）保存为方案，点「调出」一键恢复并重算'
+      : '把当前开仓参数（标的/方向/价格/保证金率/风险额度/权益）保存为方案，点「调出」一键恢复并重算');
   const list = activePlans();
   const maxN = activePlanMax();
   if (!list.length){
-    box.innerHTML = '<div class="plans-empty">暂无保存方案 — 完成一次' + (isOpt ? '期权' : '期货')
+    box.innerHTML = '<div class="plans-empty">暂无保存方案 — 完成一次' + modeTxt
       + '测算后点「💾 保存当前方案」，这里平铺显示最近 ' + maxN + ' 组，点任意一条「调出」一键恢复并重算。</div>';
     return;
   }
   box.innerHTML = list.map((p,i)=>{
+    if (isDual){
+      return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract)
+        + ' ' + escHtml(p.month || '') + ' C' + escHtml(p.callStrike) + '/P' + escHtml(p.putStrike) + '">' +
+        '<span class="nm">' + escHtml(p.contract) + ' <span class="d long">双买</span> ' + escHtml(p.month || '') + '</span>' +
+        '<span class="meta">C ' + escHtml(p.callStrike) + ' / P ' + escHtml(p.putStrike)
+        + ' · ' + escHtml(p.qtyC) + 'C + ' + escHtml(p.qtyP) + 'P · 权利金 ' + escHtml(p.premiumTotal)
+        + ' · 风险 ' + escHtml(p.riskPct) + '%' + (p.eqWan ? ' · 权益 ' + escHtml(p.eqWan) + '万' : '') + '</span>' +
+        '<span class="del" data-del="1" title="删除这条方案">✕</span>' +
+        '<span class="go">调出</span>' +
+      '</div>';
+    }
     if (isOpt){
       return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' 权利金 ' + escHtml(p.entry) + '">' +
         '<span class="nm">' + escHtml(p.contract) + ' <span class="d long">买</span> ' + escHtml(p.entry) + '</span>' +
@@ -5226,6 +5669,35 @@ function renderPlans(){
   }).join('');
 }
 function saveCurrentPlan(){
+  /* 期权双买(v50.59): 保存 标的 / 合约年月 / 两腿(行权价·delta·每手权利金) / 风险额度 / 权益 */
+  if (curMode === 'dual'){
+    if (!selCode.D){ alert('请先选择开仓标的'); return; }
+    const eqWanD = parseFloat($('equity').value);
+    const month = ($('dualMonth').value || '').trim();
+    const cS = parseFloat($('callStrike').value), cD = parseFloat($('callDelta').value), cP = parseFloat($('callPremium').value);
+    const pS = parseFloat($('putStrike').value), pD = parseFloat($('putDelta').value), pP = parseFloat($('putPremium').value);
+    if (!(eqWanD > 0 && month && cS > 0 && cD > 0 && cP > 0 && pS > 0 && pD < 0 && pP > 0)){
+      alert('请先完整填写：总权益、合约年月、两腿的行权价 / delta / 每手权利金，再保存方案');
+      return;
+    }
+    const cd = CONTRACTS.find(x=>x.code.toLowerCase() === String(selCode.D).toLowerCase())
+      || {name: selCode.D, code: selCode.D};
+    const sigD = [String(cd.code).toLowerCase(), month, cS, pS].join('|');
+    planListD = planListD.filter(x =>
+      [String(x.code).toLowerCase(), x.month, parseFloat(x.callStrike), parseFloat(x.putStrike)].join('|') !== sigD);
+    planListD.unshift({
+      code: cd.code, contract: cd.name, month: month,
+      callStrike: fmtTrim(cS), callDelta: fmtTrim(cD), callPremium: fmtTrim(cP),
+      putStrike: fmtTrim(pS), putDelta: fmtTrim(pD), putPremium: fmtTrim(pP),
+      riskPct: fmtTrim(parseFloat($('riskAmountD').value) || 3),
+      eqWan: fmtTrim(eqWanD),
+      qtyC: (lastCalcD && lastCalcD.call) ? lastCalcD.call.qty : '',
+      qtyP: (lastCalcD && lastCalcD.put) ? lastCalcD.put.qty : '',
+      premiumTotal: (lastCalcD ? fmtTrim(lastCalcD.total_premium) : ''),
+    });
+    persistPlans();
+    return;
+  }
   /* 期权模式: 保存 标的 / 每手权利金 / 风险额度 / 权益 */
   if (curMode === 'options'){
     if (!selCode.O){ alert('请先选择开仓标的'); return; }
@@ -5295,6 +5767,24 @@ function recallPlan(p){
     onInput();
     return;
   }
+  if (curMode === 'dual'){
+    if (!c){ alert('当前品种表中找不到 ' + p.code + '，请重新搜索选择标的'); return; }
+    setMode('dual');
+    $('cSearchD').value = c.name + ' ' + c.code + ' · ' + c.exchange;
+    pickContract(c, 'D');
+    $('dualMonth').value = p.month || '';
+    $('callStrike').value = p.callStrike || ''; $('callDelta').value = p.callDelta || ''; $('callPremium').value = p.callPremium || '';
+    $('putStrike').value = p.putStrike || '';   $('putDelta').value = p.putDelta || '';   $('putPremium').value = p.putPremium || '';
+    const wantD = Number(p.riskPct);
+    if ([0.5, 1, 1.5, 2, 3].indexOf(wantD) >= 0) $('riskAmountD').value = String(wantD);
+    if (p.eqWan){                                          // 恢复该方案当时的总权益
+      equityByMode.dual = p.eqWan;
+      $('equity').value = p.eqWan;
+      bindWanEquity();
+    }
+    onInput();
+    return;
+  }
   if (!c){ alert('当前品种表中找不到 ' + p.code + '，请重新搜索选择标的'); return; }
   setMode('futures');                                   // 切回期货模式(也会刷新方案区)
   $('cSearch').value = c.name + ' ' + c.code + ' · ' + c.exchange;   // 同步搜索框显示
@@ -5327,6 +5817,8 @@ renderPlans();
 $('btnSavePlan').addEventListener('click', saveCurrentPlan);
 const _btnAttr = $('btnAddToTrade');
 if (_btnAttr) _btnAttr.addEventListener('click', addToTradeRecord);
+const _btnAddD = $('btnAddDual');
+if (_btnAddD) _btnAddD.addEventListener('click', addDualToTradeRecord);
 $('planList').addEventListener('click', e=>{
   const it = e.target.closest('.plans-item');
   if (!it || it.dataset.idx === undefined) return;
@@ -5431,19 +5923,20 @@ const TradeUI = {
   },
   contractFilter: '',   // 详情操作记录合约筛选(空=全部)
   MAX: 10,
-  mode: 'options',      // 'options' 期权模式 / 'futures' 期货模式(两个 tab 共用同一套界面)
+  mode: 'options',      // 'options' 期权买方 / 'dual' 期权双买 / 'futures' 期货(三个 tab 共用同一套界面)
 
   /* 切模式: 只改状态与文案, 数据由 refresh() 拉 */
   setMode(m){
-    const nm = (m === 'futures') ? 'futures' : 'options';
+    const nm = (m === 'futures') ? 'futures' : (m === 'dual' ? 'dual' : 'options');
     const changed = (this.mode !== nm);
     this.mode = nm;
     const isFut = nm === 'futures';
     const lay = document.querySelector('.trades-layout'); if (lay) lay.dataset.tm = nm;
     const md = $('tradeModalBg') && $('tradeModalBg').querySelector('.modal');
     if (md) md.dataset.tm = nm;
-    if ($('mainTableTitle')) $('mainTableTitle').textContent = isFut ? '期货交易' : '期权交易';
-    if ($('poolTitle')) $('poolTitle').textContent = isFut ? '期货模式监控池' : 'abe 期权监控池';
+    const isDual = nm === 'dual';
+    if ($('mainTableTitle')) $('mainTableTitle').textContent = isFut ? '期货交易' : (isDual ? '期权双买' : '期权买方');
+    if ($('poolTitle')) $('poolTitle').textContent = isFut ? '期货模式监控池' : (isDual ? '期权双买监控池' : '期权买方监控池');
     document.querySelectorAll('.th-prem').forEach(el => { el.textContent = isFut ? '保证金' : '权利金'; });
     const pl = document.querySelector('.th-prem-lbl');
     if (pl) pl.textContent = isFut ? '保证金(元)' : '权利金(元)';
@@ -6609,7 +7102,7 @@ const valueLabelPlugin = {
 };
 
 const FundUI = {
-  strategy: 'abe',          // 当前选中策略: abe / 威科夫 / combined
+  strategy: '期权买方',      // 当前选中策略: 期权买方 / 威科夫 / 期权双买 / combined(汇总)
   monthly: [],
   yearly: [],
   chartMonthly: null,
@@ -6627,21 +7120,25 @@ const FundUI = {
         localStorage.setItem('oc-last-tab', tab);
         $('calcArea').classList.toggle('hidden', tab !== 'calc');
         $('fundsArea').classList.toggle('hidden', tab !== 'funds');
-        const isTradeTab = (tab === 'trades' || tab === 'tradesFut');
+        const isTradeTab = (tab === 'trades' || tab === 'tradesDual' || tab === 'tradesFut');
         $('tradesArea').classList.toggle('hidden', !isTradeTab);
         // 两个交易记录 tab 共用同一套界面, 靠 mode 切换字段与标签
-        if (isTradeTab && typeof TradeUI !== 'undefined') TradeUI.setMode(tab === 'tradesFut' ? 'futures' : 'options');
+        if (isTradeTab && typeof TradeUI !== 'undefined') {
+          TradeUI.setMode(tab === 'tradesFut' ? 'futures' : (tab === 'tradesDual' ? 'dual' : 'options'));
+        }
         // header 标题随 tab 联动
         const titles = {
           calc:   {t:'期货开仓计算器', s:'风控仓位计算 · 盈亏比决策 · 保证金测算'},
-          trades:    {t:'交易记录：期权模式', s:'期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
+          trades:    {t:'交易记录：期权买方', s:'期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
+          tradesDual:{t:'交易记录：期权双买', s:'call + put 两腿同批次记录 · 逐笔盈亏 · 复盘'},
           tradesFut: {t:'交易记录：期货模式', s:'期货开平仓逐笔记录 · 持仓汇总 · 复盘笔记'},
-          funds:  {t:'资金曲线',        s:'abe · 威科夫 多策略记录'}
+          funds:  {t:'资金曲线',        s:'期权买方 · 威科夫 · 期权双买 多策略记录'}
         };
         // header logo 跟随当前 tab, 与左侧栏图标保持一致
         const logos = {
           calc:   '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="10" width="48" height="56" rx="10" fill="none" stroke="#7FA8CC" stroke-width="8"/><rect x="35" y="18" width="30" height="11" rx="3" fill="#E8B255"/><rect x="34" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="34" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="34" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/><rect x="53" y="49" width="13" height="13" rx="1.5" fill="#7FA8CC"/></svg>',
           trades:    '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="48" height="11" rx="3" fill="#7FA8CC"/><rect x="26" y="53" width="30" height="11" rx="3" fill="#E8B255"/></svg>',
+          tradesDual:'<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="22" y="36" width="26" height="11" rx="3" fill="#7FA8CC"/><rect x="52" y="36" width="26" height="11" rx="3" fill="#E8B255"/><rect x="22" y="53" width="56" height="11" rx="3" fill="#7FA8CC" opacity=".55"/></svg>',
           tradesFut: '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="30" height="11" rx="3" fill="#E8B255"/><rect x="26" y="53" width="48" height="11" rx="3" fill="#7FA8CC"/></svg>',
           funds:  '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="#7FA8CC" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="#E8B255"/></svg>'
         };
@@ -7013,7 +7510,7 @@ const FundUI = {
   initModal(){
     const close = ()=>$('modalBg').classList.add('hidden');
     $('btnAddRecord').addEventListener('click', ()=>{
-      if (this.strategy === 'combined') { alert('汇总视图为自动计算结果，请在 abe / 威科夫 下录入'); return; }
+      if (this.strategy === 'combined') { alert('汇总视图为自动计算结果，请在 期权买方 / 威科夫 / 期权双买 下录入'); return; }
       this.openModal(null);
     });
     $('btnCancel').addEventListener('click', close);
@@ -7085,7 +7582,7 @@ const FundUI = {
   },
 
   async saveRecord(){
-    const strategy = this.strategy === 'combined' ? 'abe' : this.strategy; // 不可写入汇总
+    const strategy = this.strategy === 'combined' ? '期权买方' : this.strategy; // 不可写入汇总
     const year = parseInt($('fldYear').value);
     const month = parseInt($('fldMonth').value);
     const initial_equity = parseFloat($('fldInit').value);
@@ -7173,8 +7670,9 @@ const FundUI = {
       const d = await r.json();
       if (!d.ok) return;
       const fmt = v => '¥' + Math.round(v).toLocaleString('en-US');
-      $('wdAbe').innerHTML = 'abe <b>' + fmt(d.abe || 0) + '</b>';
+      $('wdAbe').innerHTML = '期权买方 <b>' + fmt(d['期权买方'] || 0) + '</b>';
       $('wdWk').innerHTML = '威科夫 <b>' + fmt(d['威科夫'] || 0) + '</b>';
+      if ($('wdDual')) $('wdDual').innerHTML = '期权双买 <b>' + fmt(d['期权双买'] || 0) + '</b>';
       $('wdAll').innerHTML = '汇总 <b>' + fmt(d.combined || 0) + '</b>';
     } catch (e) { /* 静默 */ }
   },

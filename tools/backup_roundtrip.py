@@ -94,11 +94,23 @@ try:
                           capture_output=True, text=True)
     check('演示数据灌入 A 库', 'SEED DONE' in seed.stdout, seed.stdout[-200:] if 'SEED DONE' not in seed.stdout else '')
 
+    # v50.59: 补一条「期权双买」记录(两条腿同批次) + dual 监控池 + dual 复盘, 验证第三种模式也进备份
+    _b = 'B20261007000001dd'
+    for _cp, _ct, _pr in (('C', 'lc2611-C-144000', 9800), ('P', 'lc2611-P-120000', 8500)):
+        post('/api/trades/upsert', {'mode': 'dual', 'underlying': 'lc', 'contract': _ct, 'batch': _b,
+                                    'op_type': 'open', 'direction': 'buy', 'call_put': _cp,
+                                    'open_date': '2026-10-07', 'open_price': _pr, 'qty': 1, 'premium': _pr}, BASE_A)
+    post('/api/trades/pool/upsert', {'mode': 'dual', 'snapshot_date': '2026-10-07',
+                                     'contracts': ['lc2611-C-144000', 'lc2611-P-120000']}, BASE_A)
+    post('/api/trades/review/upsert', {'mode': 'dual', 'underlying': 'lc', 'batch': _b,
+                                       'review_at': '2026-10-07T10:00', 'content': '双买这条的复盘'}, BASE_A)
+
     # ---------- 2) A 导出(模拟前端: 附上 localStorage 里的最近方案) ----------
     exp = get('/api/funds/export', BASE_A)
     assert exp.get('ok'), exp.get('error')
     exp['plans'] = {'futures': [{'name': '沪铜 多头 72150', 'code': 'cu', 'entry': 72150}],
-                    'options': [{'name': '碳酸锂 买入 9800', 'code': 'lc', 'entry': 9800}]}
+                    'options': [{'name': '碳酸锂 买入 9800', 'code': 'lc', 'entry': 9800}],
+                    'dual': [{'name': '碳酸锂 双买 2611', 'code': 'lc', 'month': '2611'}]}
     src = {k: len(exp.get(k) or []) for k in ('records', 'trades', 'trade_pools', 'trade_reviews')}
     src_fut = len([x for x in exp['trades'] if (x.get('mode') or 'options') == 'futures'])
     src_opt = len([x for x in exp['trades'] if (x.get('mode') or 'options') == 'options'])
@@ -139,6 +151,27 @@ try:
     check('期货复盘', len(rv_f) == exp_rv_f, '%d/%d' % (len(rv_f), exp_rv_f))
     check('期权复盘', len(rv_o) == exp_rv_o, '%d/%d' % (len(rv_o), exp_rv_o))
 
+    # ---- v50.59: 第三种模式(期权双买) ----
+    gd = get('/api/trades/groups?mode=dual', BASE_B).get('groups') or []
+    exp_d = len(set((x['underlying'], x.get('batch')) for x in exp['trades'] if x.get('mode') == 'dual'))
+    pd_ = get('/api/trades/pool?mode=dual', BASE_B)
+    n_pd = len(pd_.get('snapshots') or pd_.get('pools') or [])
+    exp_pd = len([x for x in exp['trade_pools'] if x.get('mode') == 'dual'])
+    rv_d = get('/api/trades/reviews?mode=dual', BASE_B).get('reviews') or []
+    exp_rv_d = len([x for x in exp['trade_reviews'] if x.get('mode') == 'dual'])
+    check('期权双买交易记录', len(gd) == exp_d and exp_d >= 1, '%d/%d' % (len(gd), exp_d))
+    check('期权双买监控池', n_pd == exp_pd and exp_pd >= 1, '%d/%d' % (n_pd, exp_pd))
+    check('期权双买复盘', len(rv_d) == exp_rv_d and exp_rv_d >= 1, '%d/%d' % (len(rv_d), exp_rv_d))
+    if exp_d:
+        _u, _bb = 'lc', 'B20261007000001dd'
+        _dd = get('/api/trades/detail?mode=dual&underlying=%s&batch=%s' % (_u, _bb), BASE_B)
+        check('期权双买详情: 两条腿都在', len(_dd.get('holdings') or []) == 2,
+              str(len(_dd.get('holdings') or [])))
+
+    # ---- v50.59: 策略改名后老备份兼容(abe → 期权买方) ----
+    _st = set(x['strategy'] for x in rec)
+    check('资金曲线策略名为新名(期权买方)', '期权买方' in _st and 'abe' not in _st, str(sorted(_st)))
+
     # 期货那条详情: 测算快照 / 初次止损止盈 / 开仓价 都要在
     cu = [x for x in exp['trades'] if x.get('mode') == 'futures' and x.get('underlying') == 'cu']
     if cu:
@@ -154,7 +187,7 @@ try:
 
     # 方案(前端层, 这里只验证备份文件里带着)
     pl = exp.get('plans') or {}
-    check('备份文件含最近方案(两模式)',
+    check('备份文件含最近方案(三模式)',
           len(pl.get('futures') or []) == 1 and len(pl.get('options') or []) == 1)
 finally:
     for port in (PORT_A, PORT_B):

@@ -300,7 +300,7 @@ async function main() {
   // 侧边栏导入导出按钮存在
   const sideBtns = await evalJs(ws, `JSON.stringify({ex: !!document.getElementById('btnExport'), im: !!document.getElementById('btnImport'), tabs: document.querySelectorAll('#mainTabs .maintab').length})`);
   const sb = JSON.parse(sideBtns);
-  check('侧边栏导出/导入按钮 + 4个tab(含交易记录:期货模式)', sb.ex === true && sb.im === true && sb.tabs === 4, sideBtns);
+  check('侧边栏导出/导入按钮 + 5个tab(计算器/期权买方/期货/期权双买/资金曲线)', sb.ex === true && sb.im === true && sb.tabs === 5, sideBtns);
   // 箭头方向: 导出 ⬆(出去) / 导入 ⬇(进来)
   const arrowDir = await evalJs(ws, `JSON.stringify({ex: document.getElementById('btnExport').textContent.trim(), im: document.getElementById('btnImport').textContent.trim()})`);
   const ad = JSON.parse(arrowDir);
@@ -483,7 +483,7 @@ async function main() {
     const d = await fetch('/api/trades/detail?underlying=e2e3jd100').then(r=>r.json());
     return d.operations ? d.operations[0].strategy : null;
   })()`);
-  check('后端固定 abe(忽略传入 strategy)', customIgnored === 'abe', 'got=' + customIgnored);
+  check('后端固定「期权买方」(忽略传入 strategy)', customIgnored === '期权买方', 'got=' + customIgnored);
   // 5. 平仓数量超额仍被拒绝
   const overClose = await evalJs(ws, `(async () => {
     const r = await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
@@ -1951,6 +1951,121 @@ async function main() {
   check('方案删除(v50.58): 确认框点取消则不删', dp.afterCancel === 1 && dp.keepLen === 1,
         'afterCancel=' + dp.afterCancel);
 
+  // ===== v50.59: 计算器三模式 / 期权双买测算+加入记录 / 交易记录第三套 =====
+  const v59Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const wipe = async (mode, u) => {
+      const g = await (await fetch('/api/trades/groups?mode=' + mode)).json();
+      for (const it of (g.groups || [])) {
+        if (String(it.underlying) !== u) continue;
+        const d = await (await fetch('/api/trades/detail?mode=' + mode + '&underlying=' + u
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+    };
+    const U = 'e2edual59';
+    await wipe('dual', U);
+    localStorage.removeItem('oc_dual_plans');
+
+    // 1) 计算器切到「期权双买」: 字段容器正确切换
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();
+    await w(500);
+    const modeBtns = [...document.querySelectorAll('.mode')].map(b => b.dataset.mode);
+    document.querySelector('.mode[data-mode="dual"]').click();
+    await w(400);
+    const dualShown = !document.getElementById('dualFields').classList.contains('hidden');
+    const optHidden = document.getElementById('optionsFields').classList.contains('hidden');
+    const futHidden = document.getElementById('futuresFields').classList.contains('hidden');
+
+    // 2) 填参数 → 测算
+    const eq = document.getElementById('equity'); eq.value = '90'; eq.dispatchEvent(new Event('input'));
+    const inp = document.getElementById('cSearchD');
+    inp.value = 'lc'; inp.dispatchEvent(new Event('input'));
+    inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+    await w(700);
+    document.getElementById('dualMonth').value = '2611';
+    document.getElementById('callStrike').value = '144000';
+    document.getElementById('callDelta').value = '0.3';
+    document.getElementById('callPremium').value = '9800';
+    document.getElementById('putStrike').value = '120000';
+    document.getElementById('putDelta').value = '-0.3';
+    document.getElementById('putPremium').value = '8500';
+    onInput();
+    await w(1000);
+    const shown = !document.getElementById('resultD').classList.contains('hidden');
+    const qC = document.getElementById('rQtyCD').textContent.trim();
+    const qP = document.getElementById('rQtyPD').textContent.trim();
+    const premTxt = document.getElementById('rPremiumD').textContent.trim();
+    const deltaTxt = document.getElementById('rDeltaD').textContent.trim();
+    const tgtRows = document.querySelectorAll('#rTargetsD tbody tr').length;
+    const tgt2 = (document.querySelector('#rTargetsD tbody tr:nth-child(1) td:nth-child(2)') || {}).textContent || '';
+
+    // 3) 保存方案(双买独立存储)
+    saveCurrentPlan();
+    await w(400);
+    const plansD = JSON.parse(localStorage.getItem('oc_dual_plans') || '[]');
+    const plansO = JSON.parse(localStorage.getItem('oc_options_plans') || '[]');
+
+    // 4) 一键加入记录 → 两条腿同批次
+    const origAlert = window.alert; let alertTxt = '';
+    window.alert = m => { alertTxt += String(m) + ';'; };
+    await addDualToTradeRecord();
+    await w(1200);
+    window.alert = origAlert;
+    const g = await (await fetch('/api/trades/groups?mode=dual')).json();
+    const grp = (g.groups || []).find(x => String(x.underlying) === U || String(x.underlying) === 'lc');
+    let legs = [], futGroups = 0, optGroups = 0;
+    if (grp) {
+      const d = await (await fetch('/api/trades/detail?mode=dual&underlying=' + grp.underlying
+        + '&batch=' + encodeURIComponent(grp.batch || ''))).json();
+      legs = (d.holdings || []).map(h => h.contract);
+    }
+    futGroups = ((await (await fetch('/api/trades/groups?mode=futures')).json()).groups || [])
+      .filter(x => String(x.underlying) === 'lc').length;
+    optGroups = ((await (await fetch('/api/trades/groups?mode=options')).json()).groups || [])
+      .filter(x => String(x.underlying) === 'lc').length;
+
+    // 5) 交易记录第三套 tab
+    document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]').click();
+    await w(1200);
+    const layTm = document.querySelector('.trades-layout').dataset.tm;
+    const mainTitle = (document.getElementById('mainTableTitle') || {}).textContent || '';
+    const futColHidden = (() => {
+      const el = document.querySelector('#tradesArea .fut-only');
+      return el ? getComputedStyle(el).display === 'none' : true;
+    })();
+
+    await wipe('dual', 'lc');
+    localStorage.removeItem('oc_dual_plans');
+    return JSON.stringify({modeBtns, dualShown, optHidden, futHidden, shown,
+                           qC, qP, premTxt, deltaTxt, tgtRows, tgt2,
+                           plansD: plansD.length, plansO: plansO.length,
+                           alertHas: /已加入/.test(alertTxt), legs,
+                           futGroups, optGroups, layTm, mainTitle, futColHidden});
+  })()`);
+  const v59 = JSON.parse(v59Run);
+  check('三模式(v50.59): 计算器模式按钮为 期货/期权买方/期权双买',
+        JSON.stringify(v59.modeBtns) === JSON.stringify(['futures', 'options', 'dual']), v59Run);
+  check('三模式(v50.59): 切到双买后只显示双买字段', v59.dualShown && v59.optHidden && v59.futHidden, v59Run);
+  check('双买测算(v50.59): 结果卡显示两腿手数与权利金合计',
+        v59.shown && v59.qC === '1' && v59.qP === '1' && /18,300/.test(v59.premTxt),
+        'qC=' + v59.qC + ' qP=' + v59.qP + ' prem=' + v59.premTxt);
+  check('双买测算(v50.59): 显示净 delta 与「中性」标记',
+        /0/.test(v59.deltaTxt) && /中性/.test(v59.deltaTxt), v59.deltaTxt);
+  check('双买测算(v50.59): 输出 2/3/4/5 四档目标价位',
+        v59.tgtRows === 4 && /36,600/.test(v59.tgt2), v59.tgt2);
+  check('双买方案(v50.59): 存进独立的 oc_dual_plans, 不挤占期权买方',
+        v59.plansD === 1 && v59.plansO === 0, 'dual=' + v59.plansD + ' opt=' + v59.plansO);
+  check('双买加入记录(v50.59): 两条腿写进同一条记录', v59.alertHas && v59.legs.length === 2,
+        JSON.stringify(v59.legs));
+  check('双买记录隔离(v50.59): 不出现在期货/期权买方列表',
+        v59.futGroups === 0 && v59.optGroups === 0, 'fut=' + v59.futGroups + ' opt=' + v59.optGroups);
+  check('交易记录第三套(v50.59): tab 切到 dual + 标题 + 隐藏期货专属列',
+        v59.layTm === 'dual' && v59.mainTitle === '期权双买' && v59.futColHidden === true,
+        'tm=' + v59.layTm + ' title=' + v59.mainTitle + ' futHidden=' + v59.futColHidden);
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
@@ -2210,10 +2325,10 @@ async function main() {
     return out;
   })()`);
 
-  check('侧栏: 交易记录小字已去掉冒号',
-        v541.sideSmall.length === 4 && !v541.sideHasColon, JSON.stringify(v541.sideSmall));
-  check('侧栏: 小字内容为 期货 · 期权 / 期权模式 / 期货模式 / abe · 威科夫',
-        JSON.stringify(v541.sideSmall) === JSON.stringify(['期货 · 期权','期权模式','期货模式','abe · 威科夫']),
+  check('侧栏: 五个 tab 小字已去掉冒号',
+        v541.sideSmall.length === 5 && !v541.sideHasColon, JSON.stringify(v541.sideSmall));
+  check('侧栏: 小字内容为 期货 · 期权 / 期权买方 / 期货模式 / 期权双买 / 多策略',
+        JSON.stringify(v541.sideSmall) === JSON.stringify(['期货 · 期权','期权买方','期货模式','期权双买','多策略']),
         JSON.stringify(v541.sideSmall));
   check('测算结果: 期货明细改为两列网格',
         v541.fGrid && v541.fCols === 2 && v541.fPerRow === 2,

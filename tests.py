@@ -229,8 +229,8 @@ _conn.commit()
 _conn.close()
 
 # 月度公式测试
-fund_upsert("abe", 2025, 11, 100000, 105000, 5000, "11月", cash=12000)
-r = fund_list_records("abe")[0]
+fund_upsert("期权买方", 2025, 11, 100000, 105000, 5000, "11月", cash=12000)
+r = fund_list_records("期权买方")[0]
 check("月初=100000", r["initial_equity"] == 100000, str(r))
 check("月末=105000", r["end_equity"] == 105000, str(r))
 check("出金=5000(正)", r["cash_flow"] == 5000, str(r))
@@ -239,19 +239,19 @@ check("月盈亏 = 月末-月初+出金 = 10000", r["monthly_pnl"] == 10000, str
 check("月收益率 = 10000/100000 = 10%", abs(r["month_return_rate"] - 0.10) < 1e-9, str(r))
 
 # 月度更新 (upsert)
-fund_upsert("abe", 2025, 11, 100000, 110000, 5000, "11月改")
-r = fund_list_records("abe")[0]
-check("upsert 后更新(覆盖)", len(fund_list_records("abe")) == 1 and r["end_equity"] == 110000, str(r))
+fund_upsert("期权买方", 2025, 11, 100000, 110000, 5000, "11月改")
+r = fund_list_records("期权买方")[0]
+check("upsert 后更新(覆盖)", len(fund_list_records("期权买方")) == 1 and r["end_equity"] == 110000, str(r))
 check("upsert 后重新计算月盈亏", r["monthly_pnl"] == 15000, str(r))
 
 # 负出入金(=入金)
-fund_upsert("abe", 2025, 12, 110000, 105000, -10000, "12月入金")
-r12 = [x for x in fund_list_records("abe") if x["month"] == 12][0]
+fund_upsert("期权买方", 2025, 12, 110000, 105000, -10000, "12月入金")
+r12 = [x for x in fund_list_records("期权买方") if x["month"] == 12][0]
 check("入金-10000(出金为正)", r12["cash_flow"] == -10000)
 check("月盈亏 = 105000-110000+(-10000) = -15000", r12["monthly_pnl"] == -15000)
 
 # 年度汇总
-y = fund_yearly_summary("abe")
+y = fund_yearly_summary("期权买方")
 check("只有 2025 这 1 个年度", len(y) == 1 and y[0]["year"] == 2025)
 y0 = y[0]
 check("年初 = 1月月初 = 100000", y0["initial_equity"] == 100000)
@@ -261,8 +261,8 @@ check("年度盈亏 = 105000 - 100000 + (-5000) = 0", y0["yearly_pnl"] == 0)
 check("年化收益率 = 0/100000 = 0", abs(y0["annualized_return_rate"]) < 1e-9)
 
 # 跨年汇总
-fund_upsert("abe", 2026, 1, 105000, 120000, 0, "")
-y2 = fund_yearly_summary("abe")
+fund_upsert("期权买方", 2026, 1, 105000, 120000, 0, "")
+y2 = fund_yearly_summary("期权买方")
 check("跨年后出现 2025+2026 共 2 条", len(y2) == 2)
 y2026 = [x for x in y2 if x["year"] == 2026][0]
 check("2026 年初 = 105000", y2026["initial_equity"] == 105000)
@@ -278,13 +278,13 @@ combined = fund_combined_summary()
 c_jan = [x for x in combined if x["year"] == 2026 and x["month"] == 1][0]
 check("汇总 2026/1: 月初=105000+50000=155000", c_jan["initial_equity"] == 155000)
 check("汇总 2026/1: 月末=120000+55000=175000", c_jan["end_equity"] == 175000)
-check("汇总包含两个策略", set(c_jan["strategies"]) == {"abe", "威科夫"})
+check("汇总包含两个策略", set(c_jan["strategies"]) == {"期权买方", "威科夫"})
 
 # 汇总缺失延续测试: abe 8月月末延续到 9月 (用户截图 case)
 # 清空重置场景: abe 8月(60000->70000)、威科夫 8月(50000->60000)、威科夫 9月(60000->50000)
 _conn = sqlite3.connect(_main_mod.FUND_DB_PATH)
 _conn.execute("DELETE FROM records"); _conn.commit(); _conn.close()
-fund_upsert("abe", 2025, 8, 60000, 70000, 1000, "")
+fund_upsert("期权买方", 2025, 8, 60000, 70000, 1000, "")
 fund_upsert("威科夫", 2025, 8, 50000, 60000, 10000, "")
 fund_upsert("威科夫", 2025, 9, 60000, 50000, 0, "")
 combined2 = fund_combined_summary()
@@ -299,13 +299,13 @@ check("汇总9月: abe延续(月初=abe 8月月末70000+威科夫60000)=130000",
 check("汇总9月: 月末=abe延续70000+威科夫50000=120000", c_sep["end_equity"] == 120000)
 check("汇总9月: 盈亏=-10000", c_sep["monthly_pnl"] == -10000)
 check("汇总9月: 收益率=-7.69%(修正后)", abs(c_sep["month_return_rate"] - (-0.0769)) < 0.001)
-check("汇总9月: 参与=[威科夫], 延续=[abe]", set(c_sep["strategies"]) == {"威科夫"} and "abe" in c_sep["carried_strategies"])
+check("汇总9月: 参与=[威科夫], 延续=[abe]", set(c_sep["strategies"]) == {"威科夫"} and "期权买方" in c_sep["carried_strategies"])
 
 # 删除 (延续测试后数据库中 abe 只有 2025/8 一条)
-fund_delete("abe", 2025, 8)
-abe_after = [x for x in fund_list_records("abe") if x["year"] == 2025 and x["month"] == 8]
+fund_delete("期权买方", 2025, 8)
+abe_after = [x for x in fund_list_records("期权买方") if x["year"] == 2025 and x["month"] == 8]
 check("删除成功", len(abe_after) == 0)
-check("abe 剩 0 条", len(fund_list_records("abe")) == 0)
+check("abe 剩 0 条", len(fund_list_records("期权买方")) == 0)
 
 # 错误策略
 try:
@@ -316,7 +316,7 @@ except ValueError:
 
 # 错误月份
 try:
-    fund_upsert("abe", 2026, 13, 0, 0, 0, "")
+    fund_upsert("期权买方", 2026, 13, 0, 0, 0, "")
     check("月份>12 被拒绝", False)
 except ValueError:
     check("月份>12 被拒绝", True)
@@ -332,7 +332,7 @@ _conn3 = sqlite3.connect(_main_mod.FUND_DB_PATH)
 for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
-fund_upsert("abe", 2025, 8, 60000, 70000, 1000, "8月")
+fund_upsert("期权买方", 2025, 8, 60000, 70000, 1000, "8月")
 fund_upsert("威科夫", 2025, 9, 60000, 50000, 0, "9月")
 
 backup = fund_export_backup()
@@ -346,10 +346,10 @@ for t in ("records", "trade_records", "trade_pool_snapshots"):
 _conn3.commit(); _conn3.close()
 n, strategies = fund_import_backup(backup)
 check("导入条数 = 2", n == 2)
-check("导入策略 = [abe, 威科夫]", set(strategies) == {"abe", "威科夫"})
+check("导入策略 = [abe, 威科夫]", set(strategies) == {"期权买方", "威科夫"})
 restored = fund_list_records()
-check("导入后数据完整", len(restored) == 2 and restored[0]["end_equity"] == 70000)
-check("导入重算盈亏(abe 8月=70000-60000+1000=11000)", [r for r in restored if r["strategy"]=="abe"][0]["monthly_pnl"] == 11000)
+check("导入后数据完整", len(restored) == 2 and any(r["strategy"] == "期权买方" and r["end_equity"] == 70000 for r in restored), str([(r["strategy"], r["year"], r["month"], r["end_equity"]) for r in restored]))
+check("导入重算盈亏(abe 8月=70000-60000+1000=11000)", [r for r in restored if r["strategy"]=="期权买方"][0]["monthly_pnl"] == 11000)
 
 # 合并导入: 已有数据时导入新增
 fund_upsert("威科夫", 2025, 10, 50000, 55000, 0, "10月")
@@ -363,7 +363,7 @@ try:
 except ValueError:
     check("无 records 字段被拒绝", True)
 try:
-    fund_import_backup({"records": [{"strategy": "abe"}]})
+    fund_import_backup({"records": [{"strategy": "期权买方"}]})
     check("缺必要字段被拒绝", False)
 except ValueError:
     check("缺必要字段被拒绝", True)
@@ -507,7 +507,7 @@ check("fund_clear_all 不动 trade_pool_snapshots", len(trade_pool_list()) == be
 
 # 9. 平仓数量校验: 超过剩余被拒绝
 try:
-    trade_upsert({'strategy':'abe','underlying':'fu2611','contract':'fu2611C3000',
+    trade_upsert({'strategy':'期权买方','underlying':'fu2611','contract':'fu2611C3000',
                   'op_type':'close','direction':'buy','close_date':'2026-08-25',
                   'close_qty':99,'open_date':'2026-08-25','qty':99,'premium':0})
     check("平仓数量超额被拒绝", False)
@@ -661,7 +661,7 @@ check("期权监控池不出现在 futures 模式", not any(x['id'] == _po for x
 _rv = trade_review_upsert({'mode': 'futures', 'underlying': _mu, 'review_at': '2026-09-16T10:00',
                            'content': 'v50.50 复盘导入测试'})
 _exp = fund_export_backup()
-check("导出 backup_version=3", _exp.get('backup_version') == 3, str(_exp.get('backup_version')))
+check("导出 backup_version=4(v50.59 含双买模式)", _exp.get('backup_version') == 4, str(_exp.get('backup_version')))
 check("导出含 futures 监控池(之前只导 options)", any(x['id'] == _pf for x in _exp['trade_pools']),
       str([(x['id'], x.get('mode')) for x in _exp['trade_pools']]))
 check("导出监控池带 mode 字段", all('mode' in x for x in _exp['trade_pools']))
@@ -787,6 +787,105 @@ check("期权复盘导入保留 mode=options",
       str(trade_review_list('options', _ou, _ob)))
 trade_review_delete(_of)
 trade_review_delete(_ff)
+
+# 9b7. v50.59: 策略改名 abe → 期权买方 + 期权双买策略 + 双买测算
+print("\n== 策略改名与期权双买 (v50.59) ==")
+from main import (norm_strategy, calc_dual, FUND_STRATEGIES, STRATEGY_OPTIONS_BUY,
+                  STRATEGY_DUAL_BUY, TRADE_MODES)
+
+check("策略列表 = 期权买方 / 威科夫 / 期权双买",
+      FUND_STRATEGIES == ["期权买方", "威科夫", "期权双买"], str(FUND_STRATEGIES))
+check("旧名 abe 自动归一为「期权买方」", norm_strategy("abe") == STRATEGY_OPTIONS_BUY)
+check("未知策略名原样返回(调用方再判)", norm_strategy("随便") == "随便")
+check("交易模式三值", TRADE_MODES == ("options", "dual", "futures"), str(TRADE_MODES))
+
+# 老库里的 abe 记录: 迁移在 _fund_db() 初始化时完成 → 现在应查得到「期权买方」
+_old = fund_list_records("abe")          # 兼容: 传旧名也能查到(内部归一)
+check("传旧名也能查到记录(向后兼容)", isinstance(_old, list), str(len(_old)))
+
+# 老备份导入: strategy 写 abe 的条目要落到「期权买方」
+_n = fund_import_backup({"records": [{"strategy": "abe", "year": 2031, "month": 1,
+                                      "initial_equity": 1000, "end_equity": 1100}]})
+_r = [x for x in fund_list_records("期权买方") if x["year"] == 2031 and x["month"] == 1]
+check("老备份(abe) 导入后落在「期权买方」下",
+      len(_r) == 1 and _r[0]["strategy"] == STRATEGY_OPTIONS_BUY, str(_r[:1]))
+fund_delete(STRATEGY_OPTIONS_BUY, 2031, 1)
+
+# 双买算法: 对称两腿
+_d1 = calc_dual({'equity': 900000, 'code': 'lc', 'month': '2611', 'risk_percent': 3,
+                 'call_strike': 144000, 'call_delta': 0.30, 'call_premium': 9800,
+                 'put_strike': 120000, 'put_delta': -0.30, 'put_premium': 8500})
+check("双买: 预算 = 权益×3% = 27000", _d1["budget"] == 27000, str(_d1["budget"]))
+check("双买: 对称 delta → 两腿手数相同", _d1["call"]["qty"] == _d1["put"]["qty"] == 1,
+      "%s / %s" % (_d1["call"]["qty"], _d1["put"]["qty"]))
+check("双买: 净 delta ≈ 0", abs(_d1["net_delta"]) < 1e-9, str(_d1["net_delta"]))
+check("双买: 权利金合计 = 9800+8500", _d1["total_premium"] == 18300, str(_d1["total_premium"]))
+check("双买: 不超预算", _d1["total_premium"] <= _d1["budget"], '')
+check("双买: 合约代码带月份与 C/P",
+      _d1["call"]["contract_code"] == "lc2611-C-144000"
+      and _d1["put"]["contract_code"] == "lc2611-P-120000",
+      _d1["call"]["contract_code"] + ' / ' + _d1["put"]["contract_code"])
+# 止盈目标: 2 倍权利金 → 单腿每手目标价 = 2×合计 ÷ 该腿手数
+_t2 = _d1["targets"][0]
+check("双买: 2 倍目标 = 2×总权利金", _t2["n"] == 2 and _t2["value"] == 36600, str(_t2))
+check("双买: call 每手目标价 = 2×合计 ÷ call 手数", _t2["call_price"] == 36600, str(_t2["call_price"]))
+check("双买: put 每手目标价 = 2×合计 ÷ put 手数", _t2["put_price"] == 36600, str(_t2["put_price"]))
+check("双买: 输出 2/3/4/5 四档", [t["n"] for t in _d1["targets"]] == [2, 3, 4, 5], '')
+
+# 非对称 delta: call 手数应少于 put (call delta 更大)
+_d2 = calc_dual({'equity': 1000000, 'code': 'cu', 'month': '2611', 'risk_percent': 3,
+                 'call_strike': 72000, 'call_delta': 0.30, 'call_premium': 2000,
+                 'put_strike': 68000, 'put_delta': -0.25, 'put_premium': 1800})
+check("双买: delta 不对称时 call 手数 < put 手数", _d2["call"]["qty"] < _d2["put"]["qty"],
+      "%s / %s" % (_d2["call"]["qty"], _d2["put"]["qty"]))
+check("双买: 取整后两腿 delta 仍接近中性(差 <5%)", _d2["delta_gap_pct"] < 5,
+      str(_d2["delta_gap_pct"]))
+
+# 预算不足 → 两腿都不开
+_d3 = calc_dual({'equity': 100000, 'code': 'lc', 'month': '2611', 'risk_percent': 3,
+                 'call_strike': 144000, 'call_delta': 0.3, 'call_premium': 9800,
+                 'put_strike': 120000, 'put_delta': -0.3, 'put_premium': 8500})
+check("双买: 预算装不下 1 组 → 两腿都不开", _d3["enough_lots"] is False
+      and _d3["call"]["qty"] == 0 and _d3["put"]["qty"] == 0, str(_d3["message"]))
+check("双买: 不开仓时给提示文案", bool(_d3["message"]), '')
+
+for _bad, _desc in [
+    ({'equity': 900000, 'code': 'lc', 'call_strike': 144000, 'call_delta': -0.3,
+      'call_premium': 9800, 'put_strike': 120000, 'put_delta': -0.3, 'put_premium': 8500},
+     "call delta 为负被拒"),
+    ({'equity': 900000, 'code': 'lc', 'call_strike': 144000, 'call_delta': 0.3,
+      'call_premium': 9800, 'put_strike': 120000, 'put_delta': 0.3, 'put_premium': 8500},
+     "put delta 为正被拒"),
+    ({'equity': 900000, 'code': 'lc', 'call_strike': 0, 'call_delta': 0.3,
+      'call_premium': 9800, 'put_strike': 120000, 'put_delta': -0.3, 'put_premium': 8500},
+     "行权价 0 被拒"),
+    ({'equity': 900000, 'code': '不存在的品种', 'call_strike': 1, 'call_delta': 0.3,
+      'call_premium': 9800, 'put_strike': 1, 'put_delta': -0.3, 'put_premium': 8500},
+     "未知品种被拒"),
+]:
+    try:
+        calc_dual(_bad)
+        check("双买: " + _desc, False, '未拒绝')
+    except ValueError:
+        check("双买: " + _desc, True)
+
+# 双买记录: mode=dual 与 options/futures 互相隔离
+_du = "e2edual59"
+_bd = "B20260923000001dd"
+for _cp, _ct in (("C", "lc2611-C-144000"), ("P", "lc2611-P-120000")):
+    trade_upsert({'mode': 'dual', 'underlying': _du, 'contract': _ct, 'batch': _bd,
+                  'op_type': 'open', 'direction': 'buy', 'call_put': _cp,
+                  'open_date': '2026-09-23', 'open_price': 9800, 'qty': 1, 'premium': 9800})
+_gd = trade_groups(mode="dual")
+_go = trade_groups(mode="options")
+check("双买记录能写入并查到", any(g["underlying"] == _du for g in _gd))
+check("双买记录不出现在期权买方列表", not any(g["underlying"] == _du for g in _go))
+_dd = trade_detail(_du, mode="dual", batch=_bd)
+check("双买详情: 两条腿都在持仓里", len(_dd["holdings"]) == 2, str(len(_dd["holdings"])))
+_del = trade_detail(_du, mode="dual", batch=_bd)
+for _op in _del["operations"]:
+    trade_delete(_op["id"])
+check("双买记录已清理", not any(g["underlying"] == _du for g in trade_groups(mode="dual")))
 
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
@@ -959,7 +1058,7 @@ _src_dir = _os.path.dirname(_ms.FUND_DB_PATH)
 _dst_dir = _os.path.join(_td, "moved")
 _os.makedirs(_dst_dir, exist_ok=True)
 # 造数据: 资金曲线 1 条 + 交易记录 2 条 + 监控池 1 条
-fund_upsert("abe", 2030, 1, 1000, 1100, 0, "迁移测试")
+fund_upsert("期权买方", 2030, 1, 1000, 1100, 0, "迁移测试")
 trade_upsert({'underlying':'mvsafe','contract':'cu2610C80000','op_type':'open','direction':'buy',
               'open_date':'2026-08-01','call_put':'C','open_price':100,'qty':2,'premium':200})
 trade_upsert({'underlying':'mvsafe','contract':'cu2610C80000','op_type':'close','direction':'sell',
@@ -1010,7 +1109,7 @@ check("fs_list_dirs 非法路径自动回退", fs_list_dirs("Z:\\不存在的\\�
 # 备份恢复: 造一份带标记数据的备份, 再改库, 再恢复回来
 _rs_snap = fund_auto_backup("恢复测试", force=True)
 check("恢复测试: 先产生一份快照", bool(_rs_snap) and os.path.exists(_rs_snap), str(_rs_snap))
-fund_upsert("abe", 2040, 1, 100, 200, 0, "恢复测试标记")
+fund_upsert("期权买方", 2040, 1, 100, 200, 0, "恢复测试标记")
 check("恢复测试: 写入标记记录", len([r for r in fund_list_records() if r['year'] == 2040]) == 1)
 _rs_name = os.path.basename(_rs_snap)
 _cnt = fund_restore_backup(_rs_name)
