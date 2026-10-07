@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5064            # 与 README 版本号 v50.64 对齐(数值比较用于单实例接管)
+APP_VERSION = 5065            # 与 README 版本号 v50.65 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -4920,16 +4920,26 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 const $ = id => document.getElementById(id);
 let CONTRACTS = [];
 let curMode = 'futures';
-const selCode = {F: null, O: null};   // 当前选中的标的代码
-const lastPicked = {F: null, O: null}; // 上次真正选中的品种(用于"切换品种→自动清空价格"判断)
+const selCode = {F: null, O: null, D: null};   // 当前选中的标的代码
+const lastPicked = {F: null, O: null, D: null}; // 上次真正选中的品种(用于"切换品种→自动清空价格"判断)
 let dirF = 'long';                     // 期货持仓方向(做多红/做空青 双按钮)
 
-/* 清空价格输入: 期货=开仓/止损/止盈价, 期权=开仓价(每手权利金); 供手动按钮与切换品种共用 */
+/* 清空价格/开仓参数: 期货=开仓/止损/止盈价, 期权买方=开仓价(每手权利金),
+   期权双买=两腿 4 组参数 + 合约年月 + IV(一个品种的期权链参数换到别的品种就作废);
+   供手动按钮与「切换品种自动清空」共用 */
 function clearPrices(which){
   if (which === 'F'){
     ['entry','stop','target'].forEach(id=>{ $(id).value=''; });
   } else if (which === 'O'){
     $('entryO').value='';
+  } else if (which === 'D'){
+    // ⚠ 双买(v50.65): 换品种必须清干净 —— 否则旧品种的行权价/delta/权利金会当成新品种的参数算，
+    //   连 IV 一起清是因为 IV 是随记录入库的(留档旧品种的 IV 会污染新品种的复盘)
+    ['dualMonth','callStrike','callDelta','callPrice','callPremium',
+     'putStrike','putDelta','putPrice','putPremium',
+     'dualIv','dualIvPct'].forEach(id=>{ const el=$(id); if(el) el.value=''; });
+    updateDualLegUI();            // 乘数提示要跟着新标的刷新(否则还显示上个品种的乘数)
+    clearCalcCache('dual');       // 旧测算结果作废, 免得「切走再切回双买」又把旧结果翻出来
   }
   updateTickHint();
   onInput();
@@ -5468,6 +5478,16 @@ function hideAllResults(){
   });
 }
 
+/* ---- 作废某个模式的测算缓存(v50.65) ----
+   缓存只该保存「当前参数算出来的有效结果」。输入被清空 / 参数被改到算不出来时,
+   必须一起作废, 否则「切走再切回这个模式」会走 restoreResultForMode 把旧结果翻出来,
+   表现为「输入框是空的, 下面却挂着上一次的结果」 */
+function clearCalcCache(mode){
+  if (mode === 'futures') lastCalcF = null;
+  else if (mode === 'options') lastCalcO = null;
+  else if (mode === 'dual') lastCalcD = null;
+}
+
 /* ---- 双买: 期权价格(单价) ⇄ 每手权利金 双向换算 ----
    期权价格 = 行情里的单吨/单点报价; 每手权利金 = 期权价格 × 期权乘数
    ⚠ 乘数取当前所选标的的 opt_mult(缺省=mult), 没选标的时按 1 处理 */
@@ -5781,11 +5801,13 @@ function renderO(d){
 
 function showEmpty(msg){
   hideAllResults();
+  clearCalcCache(curMode);   // v50.65: 参数不全 → 该模式的旧缓存同时作废, 免得切走再切回翻出旧结果
   $('empty').classList.remove('hidden');
   $('empty').textContent = msg;
 }
 function showError(msg){
   hideAllResults();
+  clearCalcCache(curMode);   // v50.65: 同上
   $('empty').classList.remove('hidden');
   $('empty').innerHTML = '<span style="color:var(--bad)">⚠ '+msg+'</span>';
 }

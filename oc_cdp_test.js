@@ -2461,6 +2461,84 @@ async function main() {
   check('止盈价测算(v50.63): 从计算器「加入记录」来的记录同样有止盈价测算',
         v63.cRows === 4 && /2×/.test(v63.cTxt) && /36,600/.test(v63.cTxt), v63.cTxt);
 
+  // ===== v50.65: 双买换品种 → 开仓参数与测算结果一起清空 =====
+  const v65Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const shown = id => !q(id).classList.contains('hidden');
+    const choose = (inputId, code) => {
+      const el = q(inputId);
+      el.value = code; el.dispatchEvent(new Event('input'));
+      el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
+    };
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(500);
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(500);
+    choose('cSearchD', 'lc'); await w(900);
+    // 填满一套参数
+    q('equity').value = '90'; q('equity').dispatchEvent(new Event('input'));
+    q('dualMonth').value = '2611';
+    q('callStrike').value = '144000'; q('callDelta').value = '0.3000';
+    q('callPrice').value = '9800'; q('callPrice').dispatchEvent(new Event('input'));
+    q('putStrike').value = '120000'; q('putDelta').value = '-0.3000';
+    q('putPrice').value = '8500'; q('putPrice').dispatchEvent(new Event('input'));
+    q('dualIv').value = '32.5'; q('dualIvPct').value = '92';
+    onInput(); await w(1300);
+    const beforeShown = shown('resultD');
+    const beforeQty = q('rQtyCD').textContent.trim();
+    const hintLC = (q('callLegHint') || {}).textContent || '';
+    // 同品种重选 → 不能清空(避免误伤)
+    choose('cSearchD', 'lc'); await w(800);
+    const sameKeep = {price: q('callPrice').value, strike: q('callStrike').value,
+                      iv: q('dualIv').value, shown: shown('resultD')};
+    // 换品种 → 开仓参数 + 结果一起清
+    choose('cSearchD', 'rb'); await w(1500);
+    const ids = ['dualMonth','callStrike','callDelta','callPrice','callPremium',
+                 'putStrike','putDelta','putPrice','putPremium','dualIv','dualIvPct'];
+    const leftOver = ids.filter(id => (q(id).value || '') !== '');
+    const after = {d: shown('resultD'), empty: shown('empty')};
+    const hintRB = (q('callLegHint') || {}).textContent || '';
+    // 切走再切回双买 → 不能把清空前的旧结果翻出来
+    document.querySelector('.mode[data-mode="futures"]').click(); await w(500);
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(800);
+    const backStale = {d: shown('resultD'), empty: shown('empty')};
+    const caches = {D: !!lastCalcD, O: !!lastCalcO, F: !!lastCalcF};
+    // ---- 期货同理: 手动清空价格后切走再切回, 不能翻出旧结果 ----
+    document.querySelector('.mode[data-mode="futures"]').click(); await w(500);
+    choose('cSearch', 'rb'); await w(800);
+    q('equity').value = '50'; q('equity').dispatchEvent(new Event('input'));
+    q('entry').value = '3200'; q('stop').value = '3100'; q('target').value = '3450';
+    onInput(); await w(1200);
+    const futBefore = shown('resultF');
+    q('btnClearPrices').click(); await w(700);
+    const futAfterClear = {f: shown('resultF'), empty: shown('empty')};
+    document.querySelector('.mode[data-mode="options"]').click(); await w(500);
+    document.querySelector('.mode[data-mode="futures"]').click(); await w(800);
+    const futBack = {f: shown('resultF'), empty: shown('empty')};
+    return JSON.stringify({beforeShown, beforeQty, hintLC, sameKeep, leftOver, after, hintRB,
+                           backStale, caches, futBefore, futAfterClear, futBack});
+  })()`);
+  const v65 = JSON.parse(v65Run);
+  check('双买换品种(v50.65): 先算出一条结果(前置条件)',
+        v65.beforeShown === true && parseFloat(v65.beforeQty) > 0, v65Run.slice(0, 200));
+  check('双买换品种(v50.65): 同品种重选不清空(不该误伤)',
+        v65.sameKeep.price === '9800' && v65.sameKeep.strike === '144000'
+        && v65.sameKeep.iv === '32.5' && v65.sameKeep.shown === true, JSON.stringify(v65.sameKeep));
+  check('双买换品种(v50.65): 换了品种 → 合约年月/两腿4组参数/IV 全部清空',
+        v65.leftOver.length === 0, '残留=' + JSON.stringify(v65.leftOver));
+  check('双买换品种(v50.65): 测算结果同时清掉并回到空态',
+        v65.after.d === false && v65.after.empty === true, JSON.stringify(v65.after));
+  check('双买换品种(v50.65): 两腿提示里的乘数跟着新标的刷新',
+        v65.hintLC.indexOf('乘数 1 ') >= 0 && v65.hintRB.indexOf('乘数 10 ') >= 0,
+        'lc=' + v65.hintLC.slice(0, 26) + ' | rb=' + v65.hintRB.slice(0, 26));
+  check('双买换品种(v50.65): 切走再切回双买, 不会翻出刚清掉的旧结果',
+        v65.backStale.d === false && v65.backStale.empty === true, JSON.stringify(v65.backStale));
+  check('双买换品种(v50.65): 该模式测算缓存已作废(不留旧值)',
+        v65.caches.D === false, JSON.stringify(v65.caches));
+  check('结果缓存(v50.65): 期货清空价格后切走再切回, 不再翻出旧结果(同一套修法)',
+        v65.futBefore === true && v65.futAfterClear.f === false && v65.futAfterClear.empty === true
+        && v65.futBack.f === false && v65.futBack.empty === true,
+        JSON.stringify({before: v65.futBefore, cleared: v65.futAfterClear, back: v65.futBack}));
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
