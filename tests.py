@@ -967,6 +967,53 @@ check("目标 delta(v50.62): 编辑(界面已无该字段)后历史值保留",
 for _o in trade_detail(_tu2, mode="options", batch=_tb2)["operations"]:
     trade_delete(_o["id"])
 
+# v50.63: 双买详情自带「止盈价测算」—— 持仓优先, 平完退回开仓记录; 非双买不算
+_dt_u, _dt_b = "e2edt63", "B20261007000003dt"
+for _cp, _ct, _pp, _q in (("C", "lc2611-C-144000", 9800, 2), ("P", "lc2611-P-120000", 8500, 3)):
+    trade_upsert({'mode': 'dual', 'underlying': _dt_u, 'contract': _ct, 'batch': _dt_b,
+                  'op_type': 'open', 'direction': 'buy', 'call_put': _cp,
+                  'open_date': '2026-10-07', 'open_price': _pp, 'qty': _q, 'premium': _pp * _q})
+_dd63 = trade_detail(_dt_u, mode="dual", batch=_dt_b)
+_t63 = _dd63["dual_targets"]
+check("止盈价测算(v50.63): 双买详情返回 dual_targets",
+      bool(_t63) and _t63["source"] == "holdings", str(_t63 and _t63.get("source")))
+check("止盈价测算(v50.63): 总权利金 = 各腿权利金之和",
+      _t63["total_premium"] == 2 * 9800 + 3 * 8500, str(_t63["total_premium"]))
+check("止盈价测算(v50.63): 手数按腿汇总(C 2 / P 3)",
+      _t63["call_qty"] == 2 and _t63["put_qty"] == 3,
+      "%s / %s" % (_t63["call_qty"], _t63["put_qty"]))
+_t2_63 = _t63["targets"][0]
+check("止盈价测算(v50.63): 2 倍 = 2×总权利金, Call 每手目标 = 合计 ÷ call 手数",
+      _t2_63["n"] == 2 and _t2_63["value"] == 90200 and _t2_63["call_price"] == 45100,
+      str(_t2_63))
+check("止盈价测算(v50.63): Put 每手目标 = 合计 ÷ put 手数",
+      abs(_t2_63["put_price"] - 90200 / 3) < 0.01, str(_t2_63["put_price"]))
+check("止盈价测算(v50.63): 输出 2/3/4/5 四档",
+      [x["n"] for x in _t63["targets"]] == [2, 3, 4, 5], '')
+check("止盈价测算(v50.63): 期权买方模式不返回该字段",
+      trade_detail(_dt_u, mode="options", batch=_dt_b)["dual_targets"] is None, '')
+# 部分平仓 → 按剩余持仓算(权利金按 FIFO 扣减)
+trade_upsert({'mode': 'dual', 'underlying': _dt_u, 'contract': 'lc2611-C-144000', 'batch': _dt_b,
+              'op_type': 'close', 'direction': 'buy', 'call_put': 'C', 'close_date': '2026-10-08',
+              'close_qty': 1, 'close_price': 12000, 'pnl': 2200})
+_tp = trade_detail(_dt_u, mode="dual", batch=_dt_b)["dual_targets"]
+check("止盈价测算(v50.63): 部分平仓后按剩余持仓(1C/3P, 权利金扣掉已平那手)",
+      _tp["source"] == "holdings" and _tp["call_qty"] == 1 and _tp["put_qty"] == 3
+      and _tp["total_premium"] == 9800 + 25500, str(_tp["total_premium"]))
+# 全部平掉 → 退回开仓记录
+trade_upsert({'mode': 'dual', 'underlying': _dt_u, 'contract': 'lc2611-C-144000', 'batch': _dt_b,
+              'op_type': 'close', 'direction': 'buy', 'call_put': 'C', 'close_date': '2026-10-09',
+              'close_qty': 1, 'close_price': 12000, 'pnl': 2200})
+trade_upsert({'mode': 'dual', 'underlying': _dt_u, 'contract': 'lc2611-P-120000', 'batch': _dt_b,
+              'op_type': 'close', 'direction': 'buy', 'call_put': 'P', 'close_date': '2026-10-09',
+              'close_qty': 3, 'close_price': 4000, 'pnl': -13500})
+_tc = trade_detail(_dt_u, mode="dual", batch=_dt_b)["dual_targets"]
+check("止盈价测算(v50.63): 全平后退回开仓记录回算",
+      _tc["source"] == "open" and _tc["total_premium"] == 45100 and _tc["targets"][0]["value"] == 90200,
+      "%s / %s" % (_tc["source"], _tc["total_premium"]))
+for _o in trade_detail(_dt_u, mode="dual", batch=_dt_b)["operations"]:
+    trade_delete(_o["id"])
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings

@@ -2368,6 +2368,87 @@ async function main() {
         && v62.premSum === 2 * 9800 + 3 * 8500 && v62.ivIn === 31.25,
         JSON.stringify(v62.legs) + ' prem=' + v62.premSum + ' iv=' + v62.ivIn);
 
+  // ===== v50.63: 双买详情「止盈价测算」(持仓汇总上方, 计算器来的 / 手动新建的都有) =====
+  const v63Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const tab = t => document.querySelector('#mainTabs .maintab[data-tab="' + t + '"]').click();
+    const box = () => q('tdDualTargets');
+    const boxTxt = () => ((box() || {}).textContent || '').replace(/\\s+/g, ' ').trim();
+    const boxRows = () => box() ? box().querySelectorAll('tbody tr').length : 0;
+    const wipeDual = async () => {
+      const g = await (await fetch('/api/trades/groups?mode=dual')).json();
+      for (const it of (g.groups || [])) {
+        const d = await (await fetch('/api/trades/detail?mode=dual&underlying=' + it.underlying
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) {
+          await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+        }
+      }
+    };
+
+    // ---- A) 手动新建(两腿弹窗) → 详情出现止盈价测算, 且在「当前持仓」标题上方 ----
+    tab('tradesDual'); await w(1000);
+    q('btnNewOpen').click(); await w(400);
+    q('dmUnderlying').value = 'lc'; q('dmUnderlying').dispatchEvent(new Event('input'));
+    q('dmMonth').value = '2611';
+    q('dmCallStrike').value = '144000'; q('dmCallDelta').value = '0.3';
+    q('dmPutStrike').value = '120000'; q('dmPutDelta').value = '-0.3';
+    q('dmCallPrice').value = '9800'; q('dmCallPrice').dispatchEvent(new Event('input'));
+    q('dmPutPrice').value = '8500'; q('dmPutPrice').dispatchEvent(new Event('input'));
+    q('dmCallQty').value = '2'; q('dmCallQty').dispatchEvent(new Event('input'));
+    q('dmPutQty').value = '3'; q('dmPutQty').dispatchEvent(new Event('input'));
+    await w(250);
+    await TradeUI.submitDualModal();
+    await w(1900);
+    const mRows = boxRows();
+    const mTxt = boxTxt();
+    const mCall = box() && box().querySelector('tbody tr td:nth-child(2)')
+      ? box().querySelector('tbody tr td:nth-child(2)').textContent.trim() : '';
+    const aboveHoldings = (() => {
+      if (!box() || !box().parentElement) return false;
+      const h3 = [...box().parentElement.querySelectorAll('h3')].find(h => /当前持仓/.test(h.textContent));
+      if (!h3) return false;
+      return !!(box().compareDocumentPosition(h3) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })();
+    // 期权买方模式下这块必须隐藏
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+    await w(1200);
+    const hiddenInOptions = !box() || box().offsetParent === null;
+    await wipeDual();
+
+    // ---- B) 从计算器「加入记录」来的 → 同样有止盈价测算 ----
+    tab('calc'); await w(500);
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(400);
+    const el = q('cSearchD'); el.value = 'lc'; el.dispatchEvent(new Event('input'));
+    el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); await w(800);
+    q('equity').value = '90'; q('equity').dispatchEvent(new Event('input'));
+    q('dualMonth').value = '2611';
+    q('callStrike').value = '144000'; q('callDelta').value = '0.3000';
+    q('callPrice').value = '9800'; q('callPrice').dispatchEvent(new Event('input'));
+    q('putStrike').value = '120000'; q('putDelta').value = '-0.3000';
+    q('putPrice').value = '8500'; q('putPrice').dispatchEvent(new Event('input'));
+    q('dualIv').value = '32.5'; q('dualIv').dispatchEvent(new Event('input'));
+    await w(1100);
+    await addDualToTradeRecord();
+    await w(2000);
+    const cRows = boxRows();
+    const cTxt = boxTxt();
+    await wipeDual();
+    localStorage.removeItem('oc_dual_plans');
+    return JSON.stringify({mRows, mTxt: mTxt.slice(0, 160), mCall, aboveHoldings, hiddenInOptions,
+                           cRows, cTxt: cTxt.slice(0, 160)});
+  })()`);
+  const v63 = JSON.parse(v63Run);
+  check('止盈价测算(v50.63): 手动新建的双买记录, 详情里出现 4 档止盈目标价',
+        v63.mRows === 4 && /2×/.test(v63.mTxt) && /Call 目标价/.test(v63.mTxt), v63.mTxt);
+  check('止盈价测算(v50.63): 数值口径 = 2×总权利金 ÷ 该腿手数(2C/3P → Call 每手 45,100)',
+        /45,100/.test(v63.mCall), v63.mCall);
+  check('止盈价测算(v50.63): 位置在「当前持仓」标题上方', v63.aboveHoldings === true, String(v63.aboveHoldings));
+  check('止盈价测算(v50.63): 期权买方模式不显示这一块', v63.hiddenInOptions === true, String(v63.hiddenInOptions));
+  check('止盈价测算(v50.63): 从计算器「加入记录」来的记录同样有止盈价测算',
+        v63.cRows === 4 && /2×/.test(v63.cTxt) && /36,600/.test(v63.cTxt), v63.cTxt);
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
