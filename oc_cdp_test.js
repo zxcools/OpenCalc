@@ -2256,6 +2256,118 @@ async function main() {
         JSON.stringify({meta: v61.metaHasIv, iv: v61.apiIv, pct: v61.apiIvPct}));
   check('双买 IV 保真(v50.61): 编辑开仓(不传 IV)后 IV 不丢', v61.keepIv === 32.5, 'iv=' + v61.keepIv);
 
+  // ===== v50.62: delta 自动负号/4 位小数 · 操作表去掉「目标」· 双买主表新建开仓(两腿) · 模式框文字放大 =====
+  const v62Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const tab = t => document.querySelector('#mainTabs .maintab[data-tab="' + t + '"]').click();
+    const money = v => Number(v || 0);
+
+    // ---- A) 计算器: put delta 自动带负号 + delta 4 位小数 ----
+    tab('calc'); await w(450);
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(400);
+    const pdl = q('putDelta');
+    pdl.value = '0.3'; pdl.dispatchEvent(new Event('input')); await w(250);
+    const putAutoNeg = pdl.value;
+    pdl.dispatchEvent(new Event('blur')); await w(150);
+    const putBlur = pdl.value;
+    const cdl = q('callDelta');
+    cdl.value = '0.3'; cdl.dispatchEvent(new Event('blur')); await w(150);
+    const callBlur = cdl.value;
+
+    // 填完整 → 结果卡净 delta 也应是 4 位小数
+    const el = q('cSearchD'); el.value = 'lc'; el.dispatchEvent(new Event('input'));
+    el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); await w(800);
+    q('equity').value = '90'; q('equity').dispatchEvent(new Event('input'));
+    q('dualMonth').value = '2611';
+    q('callStrike').value = '144000'; q('callDelta').value = '0.3000';
+    q('callPrice').value = '9800'; q('callPrice').dispatchEvent(new Event('input'));
+    q('putStrike').value = '120000'; q('putDelta').value = '-0.3000';
+    q('putPrice').value = '8500'; q('putPrice').dispatchEvent(new Event('input'));
+    await w(1000);
+    const netDeltaTxt = q('rDeltaD').textContent.trim();
+
+    // ---- B) 模式选择框: 文字放大但仍是一行 ----
+    const modeFs = parseFloat(getComputedStyle(document.querySelector('.mode')).fontSize);
+    const modeSmallFs = parseFloat(getComputedStyle(document.querySelector('.mode small')).fontSize);
+    const modeTops = [...document.querySelectorAll('.modes > .mode')]
+      .map(m => Math.round(m.getBoundingClientRect().top));
+
+    // ---- C) 双买主表「新建开仓」= 一次两条腿 ----
+    tab('tradesDual'); await w(1000);
+    q('btnNewOpen').click(); await w(500);
+    const dlg = q('dualModalBg');
+    const dlgShown = !!dlg && !dlg.classList.contains('hidden');
+    const hasLegFields = !!(q('dmCallPrice') && q('dmPutPrice') && q('dmCallQty') && q('dmPutQty')
+                            && q('dmIv') && q('dmIvPct'));
+    const noTargetInDlg = !q('dmTargetDelta');
+    q('dmUnderlying').value = 'lc'; q('dmUnderlying').dispatchEvent(new Event('input'));
+    q('dmMonth').value = '2611';
+    q('dmCallStrike').value = '144000'; q('dmCallDelta').value = '0.3';
+    q('dmPutStrike').value = '120000'; q('dmPutDelta').value = '0.3';
+    q('dmPutDelta').dispatchEvent(new Event('input'));   // 故意填正数 → 应自动取负
+    q('dmCallPrice').value = '9800'; q('dmCallPrice').dispatchEvent(new Event('input'));
+    q('dmPutPrice').value = '8500'; q('dmPutPrice').dispatchEvent(new Event('input'));
+    q('dmCallQty').value = '2'; q('dmCallQty').dispatchEvent(new Event('input'));
+    q('dmPutQty').value = '3'; q('dmPutQty').dispatchEvent(new Event('input'));
+    q('dmIv').value = '31.25'; q('dmIvPct').value = '88';
+    await w(250);
+    const hintTxt = q('dmHint').textContent.replace(/\\s+/g, ' ').trim();
+    const dlgPutDelta = q('dmPutDelta').value;
+    const savedOk = await TradeUI.submitDualModal();
+    await w(1600);
+    const gd = await (await fetch('/api/trades/groups?mode=dual')).json();
+    const grp = (gd.groups || []).find(x => String(x.underlying) === 'lc');
+    let legs = [], ivIn = null, premSum = 0, opNames = [], deltaCell = '';
+    if (grp) {
+      const bq = 'mode=dual&underlying=lc&batch=' + encodeURIComponent(grp.batch || '');
+      const dd = await (await fetch('/api/trades/detail?' + bq)).json();
+      legs = (dd.operations || []).filter(o => o.op_type === 'open')
+        .map(o => ({c: o.contract, q: o.qty, p: o.open_price, d: o.open_delta}));
+      ivIn = dd.iv;
+      premSum = (dd.holdings || []).reduce((s, h) => s + money(h.premium), 0);
+      // 详情操作表: 表头不该再有「目标」, delta 显示 4 位小数
+      const opsTbl = [...document.querySelectorAll('#tradeDetailPanel table.tbl')][1];
+      opNames = [...opsTbl.tHead.rows[0].children].filter(c => c.offsetParent !== null)
+        .map(c => c.textContent.trim());
+      const row = opsTbl.tBodies[0].rows[0];
+      deltaCell = row ? (row.children[3] || {}).textContent.trim() : '';
+      for (const op of (dd.operations || [])) {
+        await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+      }
+    }
+    return JSON.stringify({putAutoNeg, putBlur, callBlur, netDeltaTxt,
+                           modeFs, modeSmallFs, modeTopOne: new Set(modeTops).size === 1,
+                           dlgShown, hasLegFields, noTargetInDlg, hintTxt, dlgPutDelta,
+                           savedOk, legs, ivIn, premSum, opNames, deltaCell});
+  })()`);
+  const v62 = JSON.parse(v62Run);
+  check('delta 负号(v50.62): 计算器 put delta 填正数自动带上「-」',
+        v62.putAutoNeg === '-0.3' && v62.putBlur === '-0.3000',
+        'input=' + v62.putAutoNeg + ' blur=' + v62.putBlur);
+  check('delta 小数位(v50.62): delta 统一保留 4 位小数',
+        v62.callBlur === '0.3000' && /^-?\d+\.\d{4}/.test(v62.netDeltaTxt),
+        'call=' + v62.callBlur + ' net=' + v62.netDeltaTxt);
+  check('模式选择框(v50.62): 文字放大(主 15.5px / 副 11.5px)但仍一行',
+        v62.modeFs >= 15 && v62.modeSmallFs >= 11 && v62.modeTopOne === true,
+        'fs=' + v62.modeFs + '/' + v62.modeSmallFs + ' oneRow=' + v62.modeTopOne);
+  check('操作表(v50.62): 详情里已去掉「目标」列',
+        v62.opNames.indexOf('目标') < 0 && v62.opNames.indexOf('delta') >= 0,
+        JSON.stringify(v62.opNames));
+  check('操作表(v50.62): delta 列显示 4 位小数', /^-?\d+\.\d{4}$/.test(v62.deltaCell), v62.deltaCell);
+  check('双买新建开仓(v50.62): 主表按钮打开两腿弹窗(含 IV / 手数, 无目标 delta)',
+        v62.dlgShown === true && v62.hasLegFields === true && v62.noTargetInDlg === true,
+        JSON.stringify({shown: v62.dlgShown, legs: v62.hasLegFields, noTarget: v62.noTargetInDlg}));
+  check('双买新建开仓(v50.62): 弹窗提示按期权价格算权利金',
+        /乘数/.test(v62.hintTxt) && /合计/.test(v62.hintTxt), v62.hintTxt.slice(0, 120));
+  check('双买新建开仓(v50.62): put delta 填正数自动取负', v62.dlgPutDelta === '-0.3', v62.dlgPutDelta);
+  check('双买新建开仓(v50.62): 一次写入两条腿(手数/权利金/IV 都对)',
+        v62.savedOk === true && v62.legs.length === 2
+        && v62.legs.some(l => l.c === 'lc2611-C-144000' && l.q === 2 && l.p === 9800)
+        && v62.legs.some(l => l.c === 'lc2611-P-120000' && l.q === 3 && l.p === 8500 && l.d === -0.3)
+        && v62.premSum === 2 * 9800 + 3 * 8500 && v62.ivIn === 31.25,
+        JSON.stringify(v62.legs) + ' prem=' + v62.premSum + ' iv=' + v62.ivIn);
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

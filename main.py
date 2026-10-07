@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5061            # 与 README 版本号 v50.61 对齐(数值比较用于单实例接管)
+APP_VERSION = 5062            # 与 README 版本号 v50.62 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -2199,6 +2199,11 @@ def trade_upsert(payload):
         if _old_iv is not None:
             payload["iv"] = _old_iv["iv"]
             payload["iv_pct"] = _old_iv["iv_pct"]
+    # ⚠ v50.62: 「目标 delta」输入框已从界面去掉 → 编辑时同样保留历史值(显式传才覆盖)
+    if rec_id and payload.get("target_delta") is None:
+        _old_td = db.execute("SELECT target_delta FROM trade_records WHERE id=?", (rec_id,)).fetchone()
+        if _old_td is not None and _old_td["target_delta"] is not None:
+            payload["target_delta"] = _old_td["target_delta"]
     vals = [payload.get(f) for f in fields]
     if rec_id:
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
@@ -3335,13 +3340,13 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .iconbtn.pinned{background:linear-gradient(135deg,#f5b942,#d98a1f);color:#fff;border-color:transparent;
   box-shadow:0 6px 16px rgba(217,138,31,.4)}
 
-/* 模式切换 (v50.60: 三个模式排一行, 尺寸收小) */
+/* 模式切换 (v50.61: 三个模式排一行; v50.62: 文字放大但仍保持一行) */
 .modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;background:var(--panel);
   border:1px solid var(--border);border-radius:14px;padding:5px;margin-bottom:22px}
-.mode{padding:9px 8px;text-align:center;border-radius:10px;cursor:pointer;font-weight:600;
-  color:var(--sub);transition:all .28s;user-select:none;font-size:13.5px;position:relative;
+.mode{padding:11px 8px;text-align:center;border-radius:10px;cursor:pointer;font-weight:600;
+  color:var(--sub);transition:all .28s;user-select:none;font-size:15.5px;position:relative;
   line-height:1.3;min-width:0}
-.mode small{display:block;font-weight:400;font-size:10.5px;margin-top:1px;opacity:.75;
+.mode small{display:block;font-weight:400;font-size:11.5px;margin-top:2px;opacity:.75;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mode.active{background:linear-gradient(135deg,#a78bfa,#7c3aed);color:#fff;
   box-shadow:0 8px 20px rgba(139,92,246,.4)}
@@ -3907,7 +3912,8 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .modalbg{position:fixed;inset:0;background:var(--modal-mask);z-index:999;
   display:flex;align-items:center;justify-content:center;animation:pop .18s ease}
 .modal{background:var(--panel);border:1px solid var(--border);border-radius:18px;
-  padding:22px 24px;width:min(480px,90vw);box-shadow:var(--shadow);animation:pop .25s cubic-bezier(.16,1,.3,1)}
+  padding:22px 24px;width:min(480px,90vw);max-height:92vh;overflow:auto;
+  box-shadow:var(--shadow);animation:pop .25s cubic-bezier(.16,1,.3,1)}
 .modal h3{margin-bottom:16px;font-size:16px;display:flex;align-items:center;gap:8px}
 .modal .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .modal .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
@@ -4495,7 +4501,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               <table class="tbl trades-tbl">
                 <thead><tr>
                   <th>合约</th><th>日期</th><th>操作</th>
-                  <th class="opt-only">delta</th><th class="opt-only">目标</th><th class="opt-only">看涨看跌</th>
+                  <th class="opt-only">delta</th><th class="opt-only">看涨看跌</th>
                   <th>方向</th><th>数量</th><th>价格</th><th class="th-prem">权利金</th>
                   <th>平仓盈亏</th><th>状态</th><th>备注</th><th>操作</th>
                 </tr></thead>
@@ -4667,10 +4673,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </label>
 
         <label class="opt-only">开仓 delta
-          <input id="tmOpenDelta" type="number" step="0.01" min="0" max="1" placeholder="0.19">
-        </label>
-        <label class="opt-only">目标 delta
-          <input id="tmTargetDelta" type="number" step="0.01" min="0" max="1" placeholder="0.45">
+          <input id="tmOpenDelta" type="number" step="0.0001" min="0" max="1" placeholder="0.1900">
         </label>
         <label class="fut-only" id="tmInitStopWrap">初次止损价
           <input id="tmInitStop" type="number" step="0.0001" min="0" placeholder="3450">
@@ -4710,6 +4713,45 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="modal-actions">
         <button class="btn" id="tmCancel">取消</button>
         <button class="btn primary" id="tmSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 期权双买 · 新建开仓 弹窗(v50.62): 一次把 call / put 两条腿都填上, 权利金按开仓价自动算 -->
+  <div class="modalbg hidden" id="dualModalBg">
+    <div class="modal" style="width:min(720px,94vw)">
+      <h3><span class="dot"></span>新建开仓 · 期权双买</h3>
+      <div class="formgrid">
+        <label><span class="req">开仓标的 <i>*</i></span>
+          <input id="dmUnderlying" type="text" placeholder="品种代码，如 lc / cu">
+        </label>
+        <label><span class="req">合约年月 <i>*</i></span>
+          <input id="dmMonth" type="text" maxlength="4" inputmode="numeric" placeholder="如 2611">
+        </label>
+        <label><span class="req">开仓日期 <i>*</i></span>
+          <input id="dmOpenDate" type="date">
+        </label>
+        <label>当前 IV（%）<input id="dmIv" type="number" step="any" min="0" placeholder="如 32.5"></label>
+        <label>当前 IV 百分位（%）<input id="dmIvPct" type="number" step="any" min="0" max="100" placeholder="如 92"></label>
+        <label class="full" style="margin-top:2px"><span style="font-size:12.5px;color:var(--accent2);font-weight:600">Call 腿（看涨）</span></label>
+        <label><span class="req">行权价 <i>*</i></span><input id="dmCallStrike" type="number" step="any" min="0" placeholder="144000"></label>
+        <label><span class="req">delta <i>*</i></span><input id="dmCallDelta" type="number" step="0.0001" min="0" max="1" placeholder="0.3000"></label>
+        <label><span class="req">期权价格 <i>*</i></span><input id="dmCallPrice" type="number" step="any" min="0" placeholder="9800"></label>
+        <label><span class="req">手数 <i>*</i></span><input id="dmCallQty" type="number" step="1" min="1" placeholder="1"></label>
+        <label class="full" style="margin-top:2px"><span style="font-size:12.5px;color:var(--accent2);font-weight:600">Put 腿（看跌）</span></label>
+        <label><span class="req">行权价 <i>*</i></span><input id="dmPutStrike" type="number" step="any" min="0" placeholder="120000"></label>
+        <label><span class="req">delta <i>*</i></span><input id="dmPutDelta" type="number" step="0.0001" min="-1" max="0" placeholder="-0.3000"></label>
+        <label><span class="req">期权价格 <i>*</i></span><input id="dmPutPrice" type="number" step="any" min="0" placeholder="8500"></label>
+        <label><span class="req">手数 <i>*</i></span><input id="dmPutQty" type="number" step="1" min="1" placeholder="1"></label>
+        <label class="full">备注
+          <input id="dmNote" type="text" placeholder="可选">
+        </label>
+      </div>
+      <div class="tip" id="dmHint" style="margin-top:10px"></div>
+      <div id="dmError" style="color:#ff8484;font-size:12px;min-height:18px;margin-top:6px"></div>
+      <div class="modal-actions">
+        <button class="btn" id="dmCancel">取消</button>
+        <button class="btn primary" id="dmSave">保存（两条腿一起写入）</button>
       </div>
     </div>
   </div>
@@ -4806,6 +4848,12 @@ const fmtTrim = v => {
   return n.toFixed(2).replace(/\.?0+$/, '');
 };
 
+/* delta 统一保留 4 位小数(v50.62): 0.3 → 0.3000; 空/非法 → '' */
+const fmtDelta4 = v => {
+  if (v === '' || v === null || v === undefined) return '';
+  const n = Number(v);
+  return isFinite(n) ? n.toFixed(4) : '';
+};
 /* fetch 带超时(默认8秒), 避免行情网络慢时界面卡住 */
 function fetchT(url, opts, ms){
   const ctrl = new AbortController();
@@ -5265,9 +5313,20 @@ $('exitBtn').addEventListener('click',()=>{
 
 /* 输入事件 */
 ['equity','entry','stop','target','marginRate','entryO',
- 'dualMonth','callStrike','callDelta','putStrike','putDelta','dualIv','dualIvPct'].forEach(id=>{
+ 'dualMonth','callStrike','callDelta','putStrike','dualIv','dualIvPct'].forEach(id=>{
   const el = $(id);
   if (el) el.addEventListener('input',onInput);
+});
+/* 双买 delta(v50.62): put 一边输就自动带负号(免得后端报「put delta 必须小于 0」); 失焦统一 4 位小数 */
+[['putDelta', false], ['callDelta', true]].forEach(([id, canBePositive])=>{
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener('input', ()=>{
+    const v = String(el.value || '');
+    if (!canBePositive && v && v.charAt(0) !== '-') el.value = '-' + v;
+    onInput();
+  });
+  el.addEventListener('blur', ()=>{ el.value = fmtDelta4(el.value); });
 });
 /* 双买: 期权价格 / 每手权利金 联动(v50.60) —— 改哪个都自动补另一个, 再重算 */
 [['callPrice','callPremium'],['putPrice','putPremium']].forEach(([pid, mid])=>{
@@ -5394,7 +5453,7 @@ function renderD(d){
   $('rQtyPD').textContent = d.put.qty;
   $('rPremiumD').textContent = fmtMoney(d.total_premium);
   $('rContractD').textContent = d.contract + '（' + d.code + (d.month ? ' · ' + d.month : '') + '）';
-  $('rDeltaD').innerHTML = '<b>' + fmtTrim(d.net_delta) + '</b>'
+  $('rDeltaD').innerHTML = '<b>' + Number(d.net_delta).toFixed(4) + '</b>'
     + (d.delta_gap_pct <= 2
         ? ' <span style="color:var(--good)">（中性）</span>'
         : ' <span style="color:var(--sub)">（两腿差 ' + d.delta_gap_pct + '%，取整所致）</span>');
@@ -5928,6 +5987,8 @@ function recallPlan(p){
     $('dualIv').value = p.iv || ''; $('dualIvPct').value = p.ivPct || '';   // v50.61
     if (p.callPrice) $('callPrice').value = p.callPrice;                     // v50.60 期权价格
     if (p.putPrice)  $('putPrice').value = p.putPrice;
+    $('callDelta').value = fmtDelta4(p.callDelta);                           // v50.62 delta 统一 4 位
+    $('putDelta').value = fmtDelta4(p.putDelta);
     updateDualLegUI();
     const wantD = Number(p.riskPct);
     if ([0.5, 1, 1.5, 2, 3].indexOf(wantD) >= 0) $('riskAmountD').value = String(wantD);
@@ -6182,7 +6243,11 @@ const TradeUI = {
       if (e.key === 'Escape') $('tradesSearchClear').click();
     });
     $('btnShowAllTrades').addEventListener('click', () => { this.showAll = !this.showAll; this.renderMain(); });
-    $('btnNewOpen').addEventListener('click', () => this.openEditModal('open'));
+    $('btnNewOpen').addEventListener('click', () => {
+      // v50.62: 期权双买在主表「新建开仓」一次开两条腿 → 走专用弹窗
+      if (this.mode === 'dual'){ this.openNewDualModal(); return; }
+      this.openEditModal('open');
+    });
     $('btnNewPool').addEventListener('click', () => this.openPoolModal());
     $('btnPoolHistory').addEventListener('click', () => this.togglePoolHistory());
     const _rv = $('btnNewReview');
@@ -6197,6 +6262,27 @@ const TradeUI = {
     if (_at) _at.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); this.submitReview(); } });
     $('tdClose').addEventListener('click', () => this.closeDetail());
     $('tdNewOpen').addEventListener('click', () => this.openEditModal('open', { underlying: this.detail ? this.detail.underlying : '', fromDetail: true }));
+
+    /* 期权双买弹窗(v50.62): 取消 / 保存 / 遮罩关闭 / 输入即刷新权利金提示 */
+    if ($('dmCancel')) $('dmCancel').addEventListener('click', () => this.closeDualModal());
+    if ($('dmSave')) $('dmSave').addEventListener('click', () => this.submitDualModal());
+    if ($('dualModalBg')) $('dualModalBg').addEventListener('click', e => {
+      if (e.target === $('dualModalBg')) this.closeDualModal();
+    });
+    ['dmUnderlying','dmCallPrice','dmPutPrice','dmCallQty','dmPutQty'].forEach(id => {
+      const el = $(id);
+      if (el) el.addEventListener('input', () => this.syncDualModalHint());
+    });
+    const _dmPd = $('dmPutDelta');     // put delta 自动带负号 + 失焦 4 位小数
+    if (_dmPd){
+      _dmPd.addEventListener('input', () => {
+        const v = String(_dmPd.value || '');
+        if (v && v.charAt(0) !== '-') _dmPd.value = '-' + v;
+      });
+      _dmPd.addEventListener('blur', () => { _dmPd.value = fmtDelta4(_dmPd.value); });
+    }
+    const _dmCd = $('dmCallDelta');
+    if (_dmCd) _dmCd.addEventListener('blur', () => { _dmCd.value = fmtDelta4(_dmCd.value); });
     // 操作记录合约筛选
     $('tdContractFilter').addEventListener('change', e => {
       this.contractFilter = e.target.value;
@@ -6673,7 +6759,7 @@ const TradeUI = {
       ? d.operations.filter(o => this.normalizeContract(o.contract).toUpperCase() === _f)
       : d.operations;
     if (!ops.length){
-      ob.innerHTML = '<tr><td colspan="' + (this.isFut() ? 10 : 14) + '" style="text-align:center;padding:14px;color:var(--sub)">' +
+      ob.innerHTML = '<tr><td colspan="' + (this.isFut() ? 10 : 13) + '" style="text-align:center;padding:14px;color:var(--sub)">' +
         (d.operations.length ? '该合约无操作记录' : '暂无操作记录') + '</td></tr>';
       return;
     }
@@ -6693,8 +6779,7 @@ const TradeUI = {
         <td><b>${escHtml(o.contract)}</b></td>
         <td>${this.fmtDate(dt)}</td>
         <td><span class="tag ${opTag}">${opTxt}</span></td>
-        <td class="opt-only">${o.open_delta!=null ? o.open_delta : '—'}</td>
-        <td class="opt-only">${o.target_delta!=null ? o.target_delta : '—'}</td>
+        <td class="opt-only">${fmtDelta4(o.open_delta) || '—'}</td>
         <td class="opt-only"><span class="tag ${o.call_put==='P'?'short':(o.call_put==='C'?'long':'')}">${o.call_put==='P'?'看跌':(o.call_put==='C'?'看涨':'—')}</span></td>
         <td><span class="tag ${o.direction==='buy'?'buy':'sell'}">${this.dirTxt(o.direction)}</span></td>
         <td>${qtyTxt}</td>
@@ -6834,13 +6919,104 @@ const TradeUI = {
     return (preset && preset.batch) || '';
   },
 
+  /* ---------- 期权双买 · 新建开仓弹窗(v50.62): 一次填两条腿, 权利金按开仓价自动算 ---------- */
+  openNewDualModal(){
+    const bg = $('dualModalBg');
+    if (!bg) return;
+    ['dmUnderlying','dmMonth','dmCallStrike','dmCallDelta','dmCallPrice','dmCallQty',
+     'dmPutStrike','dmPutDelta','dmPutPrice','dmPutQty','dmIv','dmIvPct','dmNote']
+      .forEach(id=>{ const el = $(id); if (el) el.value = ''; });
+    $('dmOpenDate').value = new Date().toISOString().slice(0, 10);
+    $('dmError').textContent = '';
+    this.syncDualModalHint();
+    bg.classList.remove('hidden');
+    setTimeout(()=>{ const el = $('dmUnderlying'); if (el) el.focus(); }, 60);
+  },
+  closeDualModal(){ const bg = $('dualModalBg'); if (bg) bg.classList.add('hidden'); },
+  /* 期权乘数按标的查表(与计算器同一口径) */
+  dualModalMult(){
+    const u = String(($('dmUnderlying') || {}).value || '').trim().toLowerCase();
+    const m = u.match(/^([a-z]+)/);
+    const code = m ? m[1] : u;
+    const c = CONTRACTS.find(x => String(x.code).toLowerCase() === code);
+    return (c && (c.opt_mult || c.mult)) || 1;
+  },
+  syncDualModalHint(){
+    const box = $('dmHint');
+    if (!box) return;
+    const mult = this.dualModalMult();
+    const num = id => parseFloat(($(id) || {}).value);
+    const int = id => parseInt((($(id) || {}).value) || '0', 10) || 0;
+    const money = v => '¥' + Number(v || 0).toLocaleString('en-US',{maximumFractionDigits:2});
+    const cP = (num('dmCallPrice') > 0 ? num('dmCallPrice') : 0) * mult;
+    const pP = (num('dmPutPrice')  > 0 ? num('dmPutPrice')  : 0) * mult;
+    const qC = int('dmCallQty'), qP = int('dmPutQty');
+    box.innerHTML = '期权乘数 <b>' + mult + '</b>　每手权利金 = 期权价格 × ' + mult
+      + '　→　Call ' + money(cP) + ' × ' + qC + ' 手 + Put ' + money(pP) + ' × ' + qP + ' 手'
+      + '　合计 <b>' + money(cP * qC + pP * qP) + '</b>（手数由你决定，软件不按 delta 配比）';
+  },
+  async submitDualModal(){
+    const err = $('dmError');
+    const u = String(($('dmUnderlying') || {}).value || '').trim();
+    const month = String(($('dmMonth') || {}).value || '').replace(/\D/g, '');
+    const date = $('dmOpenDate').value;
+    const num = id => parseFloat($(id).value);
+    const int = id => parseInt($(id).value || '0', 10) || 0;
+    if (!u) return err.textContent = '请填写开仓标的（品种代码，如 lc）', false;
+    if (!/^\d{3,4}$/.test(month)) return err.textContent = '请填写合约年月（3~4 位数字，如 2611）', false;
+    if (!date) return err.textContent = '请填写开仓日期', false;
+    if (!(num('dmCallStrike') > 0) || !(num('dmPutStrike') > 0)) return err.textContent = '请填写两腿的行权价', false;
+    // delta: call 取正、put 自动取负(填正数也帮你加上 -)
+    let cD = num('dmCallDelta'), pD = num('dmPutDelta');
+    if (!isFinite(cD)) return err.textContent = '请填写 Call delta', false;
+    if (!isFinite(pD)) return err.textContent = '请填写 Put delta', false;
+    if (cD < 0){ cD = Math.abs(cD); $('dmCallDelta').value = fmtDelta4(cD); }
+    if (pD > 0){ pD = -pD; $('dmPutDelta').value = fmtDelta4(pD); }
+    if (Math.abs(cD) > 1 || Math.abs(pD) > 1) return err.textContent = 'delta 的绝对值不能大于 1', false;
+    if (!(num('dmCallPrice') > 0) || !(num('dmPutPrice') > 0)) return err.textContent = '请填写两腿的期权价格', false;
+    if (!(int('dmCallQty') > 0) || !(int('dmPutQty') > 0)) return err.textContent = '请填写两腿的手数（>0）', false;
+
+    const mult = this.dualModalMult();
+    const batch = newBatch();
+    const iv = num('dmIv'), ivPct = num('dmIvPct');
+    const ivOk = isFinite(iv) && iv > 0;
+    const ivPctOk = isFinite(ivPct);
+    const ivNote = ivOk ? (' · IV ' + fmtTrim(iv) + '%' + (ivPctOk ? '（百分位 ' + fmtTrim(ivPct) + '%）' : '')) : '';
+    const legs = [
+      { cp: 'C', strike: num('dmCallStrike'), delta: cD, price: num('dmCallPrice'), qty: int('dmCallQty') },
+      { cp: 'P', strike: num('dmPutStrike'),  delta: pD, price: num('dmPutPrice'),  qty: int('dmPutQty')  },
+    ];
+    try {
+      for (const l of legs){
+        const contract = u + month + '-' + l.cp + '-' + fmtTrim(l.strike);
+        const prem = l.price * mult;                       // 每手权利金 = 期权价格 × 乘数
+        const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            mode: 'dual', underlying: u, contract: contract, batch: batch,
+            op_type: 'open', direction: 'buy', call_put: l.cp, open_date: date,
+            open_price: prem, qty: l.qty, premium: prem * l.qty,
+            open_delta: l.delta,
+            iv: ivOk ? iv : null, iv_pct: ivPctOk ? ivPct : null,
+            note: (($('dmNote').value || '').trim() || ('手动新建 · 双买 ' + u + month + ' 两腿' + ivNote)),
+          })});
+        const j = await r.json();
+        if (!j.ok){ err.textContent = '保存失败：' + (j.error || '未知错误'); return false; }
+      }
+    } catch(e){ err.textContent = '保存失败：' + e; return false; }
+    this.closeDualModal();
+    this.setMode('dual');
+    await this.refresh();
+    await this.loadDetail(u, batch);
+    return true;
+  },
+
   /* ---------- 新建/编辑 开仓/平仓 弹框 (统一 modal) ---------- */
   openEditModal(type, preset){
     preset = preset || {};
     const bg = $('tradeModalBg');
     if (!bg) return;
     // 重置
-    ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta','tmTargetDelta',
+    ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta',
      'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote',
      'tmInitStop','tmInitTarget'].forEach(id=>{ const el=$(id); if (el) el.value=''; });
     $('tmCallPut').value = preset.call_put || '';
@@ -6954,7 +7130,6 @@ const TradeUI = {
     // 字段显示: 开仓需要 open_date/qty/premium/open_price; 平仓需要 close_date/close_qty/close_price/pnl
     document.getElementById('tmOpenDate').parentElement.style.display = isOpen ? '' : 'none';
     document.getElementById('tmOpenDelta').parentElement.style.display = isOpen ? '' : 'none';
-    document.getElementById('tmTargetDelta').parentElement.style.display = isOpen ? '' : 'none';
     document.getElementById('tmOpenPrice').parentElement.style.display = isOpen ? '' : 'none';
     document.getElementById('tmQty').parentElement.style.display = isOpen ? '' : 'none';
     document.getElementById('tmPremium').parentElement.style.display = isOpen ? '' : 'none';
@@ -6973,8 +7148,7 @@ const TradeUI = {
       else if (contractEl.dataset.contractSelect){ /* 平仓 select 设 value */ contractEl.value = preset.contract || ''; }
       $('tmOpenDate').value = preset.open_date || '';
       $('tmCloseDate').value = preset.close_date || '';
-      $('tmOpenDelta').value = preset.open_delta != null ? preset.open_delta : '';
-      $('tmTargetDelta').value = preset.target_delta != null ? preset.target_delta : '';
+      $('tmOpenDelta').value = preset.open_delta != null ? fmtDelta4(preset.open_delta) : '';
       $('tmOpenPrice').value = preset.open_price != null ? preset.open_price : '';
       $('tmClosePrice').value = preset.close_price != null ? preset.close_price : '';
       $('tmQty').value = preset.qty || '';
@@ -6993,10 +7167,9 @@ const TradeUI = {
       else $('tmCloseDate').value = today;
       // 开仓默认 contract = underlying (用户可改); 期货不预填 —— 标的≠合约, 预填会让人以为填好了(v50.44)
       if (isOpen && preset.underlying && !this.isFut()) $('tmContract').value = preset.underlying;
-      // 行内+开仓默认 delta 0.3, 目标 0.45
+      // 行内+开仓默认 delta 0.3 (v50.62: 目标 delta 字段已去掉)
       if (isOpen && preset.underlying){
-        $('tmOpenDelta').value = '0.3';
-        $('tmTargetDelta').value = '0.45';
+        $('tmOpenDelta').value = '0.3000';
       }
     }
     $('tmUnderlying').readOnly = preset.id ? true : (preset.underlying ? true : false);
@@ -7107,7 +7280,7 @@ const TradeUI = {
       contract: TradeUI.normalizeContract(contractVal),
       open_date: $('tmOpenDate').value,
       open_delta: $('tmOpenDelta').value === '' ? null : parseFloat($('tmOpenDelta').value),
-      target_delta: $('tmTargetDelta').value === '' ? null : parseFloat($('tmTargetDelta').value),
+      target_delta: null,        // v50.62: 「目标 delta」字段已去掉, 老数据仍保留在库里
       call_put: $('tmCallPut').value,
       direction: $('tmDirection').value,
       open_price: $('tmOpenPrice').value === '' ? null : parseFloat($('tmOpenPrice').value),

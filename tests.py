@@ -947,6 +947,26 @@ check("IV(v50.61): 导入后 iv / iv_pct 原样恢复",
 for _o in _get_iv:
     trade_delete(_o["id"])
 
+# v50.62: 「目标 delta」从界面去掉 → 编辑开仓(不传该字段)必须保留历史值, 不能抹掉
+_tu2 = "e2etd62"
+_tb2 = "B20261007000002td"
+trade_upsert({'mode': 'options', 'underlying': _tu2, 'contract': 'lc2611-C-144000', 'batch': _tb2,
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'C', 'open_date': '2026-10-07',
+              'open_price': 9800, 'qty': 1, 'premium': 9800, 'open_delta': 0.3, 'target_delta': 0.45})
+_td62 = trade_detail(_tu2, mode="options", batch=_tb2)
+_td_op = [x for x in _td62["operations"] if x["op_type"] == "open"][0]
+check("目标 delta(v50.62): 老记录里的值能读出来", _td_op["target_delta"] == 0.45, str(_td_op.get("target_delta")))
+trade_upsert({'id': _td_op["id"], 'mode': 'options', 'underlying': _tu2, 'contract': _td_op["contract"],
+              'batch': _tb2, 'op_type': 'open', 'direction': 'buy', 'call_put': 'C',
+              'open_date': '2026-10-07', 'open_price': 9800, 'qty': 2, 'premium': 19600,
+              'open_delta': 0.3, 'target_delta': None})
+_td_after = [x for x in trade_detail(_tu2, mode="options", batch=_tb2)["operations"] if x["op_type"] == "open"][0]
+check("目标 delta(v50.62): 编辑(界面已无该字段)后历史值保留",
+      _td_after["target_delta"] == 0.45 and _td_after["qty"] == 2,
+      "target=%s qty=%s" % (_td_after["target_delta"], _td_after["qty"]))
+for _o in trade_detail(_tu2, mode="options", batch=_tb2)["operations"]:
+    trade_delete(_o["id"])
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings
