@@ -832,6 +832,28 @@ check("双买: call 每手目标价 = 2×合计 ÷ call 手数", _t2["call_price
 check("双买: put 每手目标价 = 2×合计 ÷ put 手数", _t2["put_price"] == 36600, str(_t2["put_price"]))
 check("双买: 输出 2/3/4/5 四档", [t["n"] for t in _d1["targets"]] == [2, 3, 4, 5], '')
 
+# v50.60: 期权价格口径 —— 单价 = 每手权利金 ÷ 期权乘数; 止盈目标价按同一口径给出
+check("双买: 每手权利金换算成期权价格(lc 乘数 1)",
+      _d1["call"]["price_per_unit"] == 9800 and _d1["put"]["price_per_unit"] == 8500,
+      "%s / %s" % (_d1["call"]["price_per_unit"], _d1["put"]["price_per_unit"]))
+check("双买: 目标价按期权价格口径输出",
+      _t2["call_price_unit"] == 36600 and _t2["put_price_unit"] == 36600,
+      "%s / %s" % (_t2["call_price_unit"], _t2["put_price_unit"]))
+_d4 = calc_dual({'equity': 1000000, 'code': 'cu', 'month': '2611', 'risk_percent': 3,
+                 'call_strike': 72000, 'call_delta': 0.3, 'call_premium': 2000,
+                 'put_strike': 68000, 'put_delta': -0.3, 'put_premium': 1800})
+_m4 = _d4["opt_mult"]
+check("双买: 乘数≠1 时单价 = 每手权利金 ÷ 期权乘数(cu 乘数 %s)" % _m4,
+      _m4 > 1 and abs(_d4["call"]["price_per_unit"] - 2000.0 / _m4) < 1e-6
+      and abs(_d4["put"]["price_per_unit"] - 1800.0 / _m4) < 1e-6,
+      "call %s / put %s" % (_d4["call"]["price_per_unit"], _d4["put"]["price_per_unit"]))
+check("双买: 目标价 × 乘数 = 该腿每手目标权利金",
+      abs(_d4["targets"][0]["call_price_unit"] * _m4 - _d4["targets"][0]["call_price"]) < 0.01
+      and abs(_d4["targets"][0]["put_price_unit"] * _m4 - _d4["targets"][0]["put_price"]) < 0.01,
+      "%s×%s=%s vs %s" % (_d4["targets"][0]["call_price_unit"], _m4,
+                          _d4["targets"][0]["call_price_unit"] * _m4,
+                          _d4["targets"][0]["call_price"]))
+
 # 非对称 delta: call 手数应少于 put (call delta 更大)
 _d2 = calc_dual({'equity': 1000000, 'code': 'cu', 'month': '2611', 'risk_percent': 3,
                  'call_strike': 72000, 'call_delta': 0.30, 'call_premium': 2000,
@@ -886,6 +908,44 @@ _del = trade_detail(_du, mode="dual", batch=_bd)
 for _op in _del["operations"]:
     trade_delete(_op["id"])
 check("双买记录已清理", not any(g["underlying"] == _du for g in trade_groups(mode="dual")))
+
+# v50.61: 开仓时的 IV / IV 百分位 —— 存得下、详情读得到、编辑不丢、备份带得走
+_iu = "e2eiv61"
+_ib = "B20261007000001iv"
+for _cp, _ct in (("C", "lc2611-C-144000"), ("P", "lc2611-P-120000")):
+    trade_upsert({'mode': 'dual', 'underlying': _iu, 'contract': _ct, 'batch': _ib,
+                  'op_type': 'open', 'direction': 'buy', 'call_put': _cp,
+                  'open_date': '2026-10-07', 'open_price': 9800, 'qty': 1, 'premium': 9800,
+                  'iv': 32.5, 'iv_pct': 92})
+_idd = trade_detail(_iu, mode="dual", batch=_ib)
+check("IV(v50.61): 双买详情返回开仓时的 IV / IV 百分位",
+      _idd["iv"] == 32.5 and _idd["iv_pct"] == 92,
+      "iv=%s pct=%s" % (_idd["iv"], _idd["iv_pct"]))
+_ione = [_o for _o in _idd["operations"] if _o["op_type"] == "open"][0]
+check("IV(v50.61): 操作记录本身也带 IV", _ione["iv"] == 32.5 and _ione["iv_pct"] == 92,
+      "iv=%s" % _ione.get("iv"))
+# 编辑(改手数)不带 iv → 必须保留原值, 不能被抹掉
+trade_upsert({'id': _ione["id"], 'mode': 'dual', 'underlying': _iu, 'contract': _ione["contract"],
+              'batch': _ib, 'op_type': 'open', 'direction': 'buy', 'call_put': 'C',
+              'open_date': '2026-10-07', 'open_price': 9800, 'qty': 2, 'premium': 19600})
+_iafter = [_o for _o in trade_detail(_iu, mode="dual", batch=_ib)["operations"] if _o["op_type"] == "open"][0]
+check("IV(v50.61): 编辑开仓(不传 IV)后原 IV 保留",
+      _iafter["iv"] == 32.5 and _iafter["iv_pct"] == 92 and _iafter["qty"] == 2,
+      "iv=%s qty=%s" % (_iafter["iv"], _iafter["qty"]))
+# 备份往返: 导出含 iv/iv_pct, 导入后不丢
+_exp_iv = fund_export_backup()
+_ivrow = [x for x in _exp_iv["trades"] if x.get("iv") == 32.5]
+check("IV(v50.61): 备份导出含 iv / iv_pct", len(_ivrow) >= 1 and _ivrow[0]["iv_pct"] == 92,
+      "rows=%d" % len(_ivrow))
+for _o in trade_detail(_iu, mode="dual", batch=_ib)["operations"]:
+    trade_delete(_o["id"])
+_imp_iv = trade_import_record(dict(_ivrow[0]))
+_get_iv = [_o for _o in trade_detail(_iu, mode="dual", batch=_ib)["operations"]]
+check("IV(v50.61): 导入后 iv / iv_pct 原样恢复",
+      len(_get_iv) == 1 and _get_iv[0]["iv"] == 32.5 and _get_iv[0]["iv_pct"] == 92,
+      str([(x.get("iv"), x.get("iv_pct")) for x in _get_iv]))
+for _o in _get_iv:
+    trade_delete(_o["id"])
 
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")

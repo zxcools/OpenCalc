@@ -99,7 +99,8 @@ try:
     for _cp, _ct, _pr in (('C', 'lc2611-C-144000', 9800), ('P', 'lc2611-P-120000', 8500)):
         post('/api/trades/upsert', {'mode': 'dual', 'underlying': 'lc', 'contract': _ct, 'batch': _b,
                                     'op_type': 'open', 'direction': 'buy', 'call_put': _cp,
-                                    'open_date': '2026-10-07', 'open_price': _pr, 'qty': 1, 'premium': _pr}, BASE_A)
+                                    'open_date': '2026-10-07', 'open_price': _pr, 'qty': 1, 'premium': _pr,
+                                    'iv': 32.5, 'iv_pct': 92}, BASE_A)   # v50.61 开仓时的 IV
     post('/api/trades/pool/upsert', {'mode': 'dual', 'snapshot_date': '2026-10-07',
                                      'contracts': ['lc2611-C-144000', 'lc2611-P-120000']}, BASE_A)
     post('/api/trades/review/upsert', {'mode': 'dual', 'underlying': 'lc', 'batch': _b,
@@ -167,6 +168,9 @@ try:
         _dd = get('/api/trades/detail?mode=dual&underlying=%s&batch=%s' % (_u, _bb), BASE_B)
         check('期权双买详情: 两条腿都在', len(_dd.get('holdings') or []) == 2,
               str(len(_dd.get('holdings') or [])))
+        # v50.61: 开仓时的 IV / IV 百分位也要跟着备份走
+        check('期权双买 IV / IV 百分位', _dd.get('iv') == 32.5 and _dd.get('iv_pct') == 92,
+              'iv=%s pct=%s' % (_dd.get('iv'), _dd.get('iv_pct')))
 
     # ---- v50.59: 策略改名后老备份兼容(abe → 期权买方) ----
     _st = set(x['strategy'] for x in rec)
