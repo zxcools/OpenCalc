@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5065            # 与 README 版本号 v50.65 对齐(数值比较用于单实例接管)
+APP_VERSION = 5066            # 与 README 版本号 v50.66 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3340,6 +3340,12 @@ HTML = r"""<!DOCTYPE html>
   --fz-stat:22px;     /* 交易统计卡片大数字(v50.53) */
   --fz-dt-n:15px;     /* 双买止盈表: 目标倍数 N(v50.64) */
   --fz-dt-px:23px;    /* 双买止盈表: 目标价大数字 */
+  /* v50.66: Call / Put 身份色 —— 计算器两腿、结果手数卡、止盈目标表、交易记录止盈表共用一套
+     口径与「做多红 / 做空青」一致: Call(看涨)红, Put(看跌)青 */
+  --cp-call:#ff8484; --cp-put:#46d6ea;
+  --cp-call-bg:rgba(255,132,132,.13); --cp-put-bg:rgba(70,214,234,.13);
+  --cp-call-bg2:rgba(255,132,132,.045); --cp-put-bg2:rgba(70,214,234,.045);
+  --cp-call-line:rgba(255,132,132,.42); --cp-put-line:rgba(70,214,234,.42);
 }
 body.fz-sm{
   --fz-th:12.5px; --fz-td:13.5px; --fz-td2:13px; --fz-tag:12px;
@@ -3372,6 +3378,11 @@ body.fz-lg{
   --glow2:rgba(170,215,160,.16);  /* 背景左下光晕 */
   --chart-grid:rgba(90,130,100,.14); --chart-tick:#54685a;  /* 图表网格/刻度(浅底深字) */
   --chart-stroke:rgba(50,80,58,.65); --chart-label:#ffffff;   /* 数值标签: 深绿描边+白字(浅色柱顶) */
+  /* v50.66: Call / Put 身份色(浅色主题用深一档, 否则浅底上发飘看不清) */
+  --cp-call:#d64545; --cp-put:#0e7c93;
+  --cp-call-bg:rgba(214,69,69,.11); --cp-put-bg:rgba(14,124,147,.11);
+  --cp-call-bg2:rgba(214,69,69,.05); --cp-put-bg2:rgba(14,124,147,.05);
+  --cp-call-line:rgba(214,69,69,.4); --cp-put-line:rgba(14,124,147,.4);
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{
@@ -3558,6 +3569,37 @@ select{cursor:pointer;appearance:none;
 .dual-leg .k .u{opacity:.72;font-weight:400;margin-left:3px}
 .dual-leg input{margin:0}
 .dual-leg-hint{font-size:var(--fz-micro);color:var(--sub);opacity:.85;margin:0 0 8px}
+
+/* ===== v50.66: Call / Put 用「颜色 + 标签」把两腿分开 =====
+   Call(看涨)=红, Put(看跌)=青, 跟做多/做空一个口径; 三处共用:
+   ① 计算器开仓参数的两腿卡片 ② 测算结果的手数卡 ③ 止盈目标价位表的两列 */
+.cp-badge{display:inline-block;font-size:var(--fz-micro);font-weight:800;letter-spacing:.6px;
+  padding:2px 9px;border-radius:6px;line-height:1.5}
+.cp-badge.call{background:var(--cp-call-bg);color:var(--cp-call)}
+.cp-badge.put{background:var(--cp-put-bg);color:var(--cp-put)}
+/* 两腿参数卡片: 左侧色条 + 同色描边/浅底, 一眼分得开 */
+.leg-card{position:relative;border:1px solid var(--border);border-radius:12px;
+  padding:11px 13px 9px 16px;margin-bottom:10px}
+.leg-card.call{border-color:var(--cp-call-line);background:var(--cp-call-bg2)}
+.leg-card.put{border-color:var(--cp-put-line);background:var(--cp-put-bg2)}
+.leg-card::before{content:'';position:absolute;left:0;top:11px;bottom:11px;width:3px;border-radius:0 3px 3px 0}
+.leg-card.call::before{background:var(--cp-call)}
+.leg-card.put::before{background:var(--cp-put)}
+.leg-card .leg-hd{display:flex;align-items:center;gap:8px;margin-bottom:9px;flex-wrap:wrap}
+.leg-card .leg-name{font-size:var(--fz-lbl);font-weight:600;color:var(--text)}
+.leg-card .leg-sub{font-size:var(--fz-small);color:var(--sub);font-weight:400}
+.leg-card .dual-leg{margin-bottom:0}
+.leg-card .dual-leg-hint{margin:8px 0 0}
+/* 测算结果的两张手数卡: 边框 + 数字都跟腿走色 */
+.bignum.cp-call{border-color:var(--cp-call-line)}
+.bignum.cp-put{border-color:var(--cp-put-line)}
+.bignum.cp-call::before{background:radial-gradient(160px 90px at 50% -10%,var(--cp-call-bg),transparent 70%)}
+.bignum.cp-put::before{background:radial-gradient(160px 90px at 50% -10%,var(--cp-put-bg),transparent 70%)}
+.bignum.cp-call .t{color:var(--cp-call);font-weight:700}
+.bignum.cp-put .t{color:var(--cp-put);font-weight:700}
+.bignum.cp-call .n{background:none;-webkit-text-fill-color:var(--cp-call);color:var(--cp-call)}
+.bignum.cp-put .n{background:none;-webkit-text-fill-color:var(--cp-put);color:var(--cp-put)}
+
 /* ===== 期权双买「止盈目标价位」(v50.64) =====
    原来是一张裸表, 目标价和别的明细一个字号 → 用户反馈「不明显」。
    改成: 独立卡片 + 大号配色价格 + N 倍胶囊, 目的是一眼看到「涨到多少该平腿」 */
@@ -3583,15 +3625,19 @@ select{cursor:pointer;appearance:none;
 .dual-target-tbl .dt-n .dt-val{display:block;font-size:var(--fz-small);color:var(--sub);margin-top:5px}
 .dual-target-tbl .dt-px{display:inline-block;font-size:var(--fz-dt-px);font-weight:800;letter-spacing:.2px;
   font-variant-numeric:tabular-nums;line-height:1.12}
-.dual-target-tbl .big.call .dt-px{color:#ff8484}
-.dual-target-tbl .big.put .dt-px{color:#46d6ea}
+.dual-target-tbl .big.call .dt-px{color:var(--cp-call)}
+.dual-target-tbl .big.put .dt-px{color:var(--cp-put)}
 .dual-target-tbl .dt-mult{font-size:var(--fz-small);color:var(--sub);font-weight:400;margin-left:6px}
 .dual-target-tbl .dt-per{display:block;font-size:var(--fz-small);color:var(--sub);font-weight:400;margin-top:4px}
 [data-theme="light"] .dual-target-tbl{background:#eef4e8}
 [data-theme="light"] .dual-target-tbl th{background:rgba(60,90,60,.05)}
 [data-theme="light"] .dual-target-tbl .dt-n b{background:rgba(122,86,190,.16);color:#6b46b8}
-[data-theme="light"] .dual-target-tbl .big.call .dt-px{color:#d64545}
-[data-theme="light"] .dual-target-tbl .big.put .dt-px{color:#0e7c93}
+/* ⚠ v50.66: 两列的身份色规则必须放在上面那条 [data-theme=light] th 规则**之后**
+   (选择器权重相同, 靠源码顺序取胜), 否则浅色主题下表头底纹会被覆盖掉 */
+.dual-target-tbl th.cp-call{color:var(--cp-call);background:var(--cp-call-bg);font-weight:700}
+.dual-target-tbl th.cp-put{color:var(--cp-put);background:var(--cp-put-bg);font-weight:700}
+.dual-target-tbl td.cp-call{background:var(--cp-call-bg2)}
+.dual-target-tbl td.cp-put{background:var(--cp-put-bg2)}
 .plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
   border-radius:10px;padding:10px 14px;line-height:1.6}
 .plans-item{display:flex;align-items:center;gap:12px;background:var(--panel2);
@@ -4256,23 +4302,30 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           </div>
         </div>
 
-        <label>Call 腿（看涨）</label>
-        <div class="dual-leg">
-          <div><span class="k">行权价</span><input id="callStrike" type="number" min="0" step="any" inputmode="decimal" placeholder="144000"></div>
-          <div><span class="k">delta</span><input id="callDelta" type="number" step="0.01" min="0" max="1" inputmode="decimal" placeholder="0.30"></div>
-          <div><span class="k">期权价格<span class="u" id="callPriceUnit"></span></span><input id="callPrice" type="number" min="0" step="any" inputmode="decimal" placeholder="9800"></div>
-          <div><span class="k">每手权利金<span class="u">自动</span></span><input id="callPremium" type="number" min="0" step="any" inputmode="decimal" placeholder="9800"></div>
+        <!-- v50.66: 两腿拆成两张带颜色的卡片(Call 红 / Put 青), 避免看串行 -->
+        <div class="leg-card call">
+          <div class="leg-hd"><span class="cp-badge call">CALL</span><span class="leg-name">看涨腿</span>
+            <span class="leg-sub">买入 · 标的涨则赚</span></div>
+          <div class="dual-leg">
+            <div><span class="k">行权价</span><input id="callStrike" type="number" min="0" step="any" inputmode="decimal" placeholder="144000"></div>
+            <div><span class="k">delta</span><input id="callDelta" type="number" step="0.01" min="0" max="1" inputmode="decimal" placeholder="0.30"></div>
+            <div><span class="k">期权价格<span class="u" id="callPriceUnit"></span></span><input id="callPrice" type="number" min="0" step="any" inputmode="decimal" placeholder="9800"></div>
+            <div><span class="k">每手权利金<span class="u">自动</span></span><input id="callPremium" type="number" min="0" step="any" inputmode="decimal" placeholder="9800"></div>
+          </div>
+          <div class="dual-leg-hint" id="callLegHint">期权价格 = 行情里的单吨/单点报价；每手权利金 = 期权价格 × 期权乘数（两者自动联动）</div>
         </div>
-        <div class="dual-leg-hint" id="callLegHint">期权价格 = 行情里的单吨/单点报价；每手权利金 = 期权价格 × 期权乘数（两者自动联动）</div>
 
-        <label>Put 腿（看跌）</label>
-        <div class="dual-leg">
-          <div><span class="k">行权价</span><input id="putStrike" type="number" min="0" step="any" inputmode="decimal" placeholder="120000"></div>
-          <div><span class="k">delta</span><input id="putDelta" type="number" step="0.01" min="-1" max="0" inputmode="decimal" placeholder="-0.30"></div>
-          <div><span class="k">期权价格<span class="u" id="putPriceUnit"></span></span><input id="putPrice" type="number" min="0" step="any" inputmode="decimal" placeholder="8500"></div>
-          <div><span class="k">每手权利金<span class="u">自动</span></span><input id="putPremium" type="number" min="0" step="any" inputmode="decimal" placeholder="8500"></div>
+        <div class="leg-card put">
+          <div class="leg-hd"><span class="cp-badge put">PUT</span><span class="leg-name">看跌腿</span>
+            <span class="leg-sub">买入 · 标的跌则赚</span></div>
+          <div class="dual-leg">
+            <div><span class="k">行权价</span><input id="putStrike" type="number" min="0" step="any" inputmode="decimal" placeholder="120000"></div>
+            <div><span class="k">delta</span><input id="putDelta" type="number" step="0.01" min="-1" max="0" inputmode="decimal" placeholder="-0.30"></div>
+            <div><span class="k">期权价格<span class="u" id="putPriceUnit"></span></span><input id="putPrice" type="number" min="0" step="any" inputmode="decimal" placeholder="8500"></div>
+            <div><span class="k">每手权利金<span class="u">自动</span></span><input id="putPremium" type="number" min="0" step="any" inputmode="decimal" placeholder="8500"></div>
+          </div>
+          <div class="dual-leg-hint" id="putLegHint">期权价格 = 行情里的单吨/单点报价；每手权利金 = 期权价格 × 期权乘数（两者自动联动）</div>
         </div>
-        <div class="dual-leg-hint" id="putLegHint">期权价格 = 行情里的单吨/单点报价；每手权利金 = 期权价格 × 期权乘数（两者自动联动）</div>
         <div class="tip">两腿手数按 <b>delta 中性</b> 配比（call手数 × |call delta| = put手数 × |put delta|），合计权利金不超过预算。<b>止盈目标价位</b>按<b>期权价格</b>口径给出：持仓总价值涨到 2 / 3 / 4 / 5 倍权利金时，单腿期权价格要涨到的位置。</div>
       </div>
     </div>
@@ -4376,12 +4429,12 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <span class="v money" id="rBudgetD">—</span>
         </div>
         <div class="hud">
-          <div class="bignum anim">
+          <div class="bignum anim cp-call">
             <div class="t">Call 手数</div>
             <div class="n" id="rQtyCD">—</div>
             <div class="s">按 delta 中性配比</div>
           </div>
-          <div class="bignum anim">
+          <div class="bignum anim cp-put">
             <div class="t">Put 手数</div>
             <div class="n" id="rQtyPD">—</div>
             <div class="s">按 delta 中性配比</div>
@@ -4829,12 +4882,12 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </label>
         <label>当前 IV（%）<input id="dmIv" type="number" step="any" min="0" placeholder="如 32.5"></label>
         <label>当前 IV 百分位（%）<input id="dmIvPct" type="number" step="any" min="0" max="100" placeholder="如 92"></label>
-        <label class="full" style="margin-top:2px"><span style="font-size:12.5px;color:var(--accent2);font-weight:600">Call 腿（看涨）</span></label>
+        <label class="full" style="margin-top:2px"><span class="cp-badge call">CALL</span><span style="font-size:12.5px;color:var(--cp-call);font-weight:600;margin-left:6px">看涨腿</span></label>
         <label><span class="req">行权价 <i>*</i></span><input id="dmCallStrike" type="number" step="any" min="0" placeholder="144000"></label>
         <label><span class="req">delta <i>*</i></span><input id="dmCallDelta" type="number" step="0.0001" min="0" max="1" placeholder="0.3000"></label>
         <label><span class="req">期权价格 <i>*</i></span><input id="dmCallPrice" type="number" step="any" min="0" placeholder="9800"></label>
         <label><span class="req">手数 <i>*</i></span><input id="dmCallQty" type="number" step="1" min="1" placeholder="1"></label>
-        <label class="full" style="margin-top:2px"><span style="font-size:12.5px;color:var(--accent2);font-weight:600">Put 腿（看跌）</span></label>
+        <label class="full" style="margin-top:2px"><span class="cp-badge put">PUT</span><span style="font-size:12.5px;color:var(--cp-put);font-weight:600;margin-left:6px">看跌腿</span></label>
         <label><span class="req">行权价 <i>*</i></span><input id="dmPutStrike" type="number" step="any" min="0" placeholder="120000"></label>
         <label><span class="req">delta <i>*</i></span><input id="dmPutDelta" type="number" step="0.0001" min="-1" max="0" placeholder="-0.3000"></label>
         <label><span class="req">期权价格 <i>*</i></span><input id="dmPutPrice" type="number" step="any" min="0" placeholder="8500"></label>
@@ -5582,13 +5635,13 @@ function renderD(d){
     + '<span class="dt-sum">合计 <b id="rTgtSumD">' + fmtMoney(d.total_premium) + '</b></span>'
     + '</div>'
     + '<table class="dual-target-tbl"><thead><tr>'
-    + '<th>目标</th><th>Call 目标价' + _uTxt + '</th><th>Put 目标价' + _uTxt + '</th></tr></thead><tbody>'
+    + '<th>目标</th><th class="cp-call">Call 目标价' + _uTxt + '</th><th class="cp-put">Put 目标价' + _uTxt + '</th></tr></thead><tbody>'
     + d.targets.map(t =>
         '<tr><td class="dt-n"><b>' + t.n + '×</b><span class="dt-val">合计 ' + fmtMoney(t.value) + '</span></td>'
-        + '<td class="big call"><span class="dt-px">¥' + fmt(t.call_price_unit) + '</span>'
+        + '<td class="big call cp-call"><span class="dt-px">¥' + fmt(t.call_price_unit) + '</span>'
         + '<span class="dt-mult">' + t.call_mult + '×</span>'
         + '<span class="dt-per">每手 ' + fmtMoney(t.call_price) + '</span></td>'
-        + '<td class="big put"><span class="dt-px">¥' + fmt(t.put_price_unit) + '</span>'
+        + '<td class="big put cp-put"><span class="dt-px">¥' + fmt(t.put_price_unit) + '</span>'
         + '<span class="dt-mult">' + t.put_mult + '×</span>'
         + '<span class="dt-per">每手 ' + fmtMoney(t.put_price) + '</span></td></tr>'
       ).join('')
@@ -5596,11 +5649,15 @@ function renderD(d){
     + '<div class="tip">目标价与左侧「期权价格」同一口径' + _uTxt + '，可直接照着盘面报价挂单。'
     + '价格上行到 Call 目标价就平 call 腿（此时 put 已基本归零），下行到 Put 目标价就平 put 腿。</div>'
   ) : '';
-  if ($('rPriceD')) $('rPriceD').textContent =
-    (d.call.price_per_unit != null ? '¥' + fmt(d.call.price_per_unit) : '—')
-    + ' / ' + (d.put.price_per_unit != null ? '¥' + fmt(d.put.price_per_unit) : '—');
-  if ($('rPremPerLotD')) $('rPremPerLotD').textContent =
-    fmtMoney(d.call.premium_per_lot) + ' / ' + fmtMoney(d.put.premium_per_lot);
+  /* v50.66: 这两格是「Call / Put」两个值并排, 用腿色区分, 免得看串 */
+  if ($('rPriceD')) $('rPriceD').innerHTML =
+    '<span class="cp-call">' + (d.call.price_per_unit != null ? '¥' + fmt(d.call.price_per_unit) : '—') + '</span>'
+    + ' <span style="opacity:.5">/</span> '
+    + '<span class="cp-put">' + (d.put.price_per_unit != null ? '¥' + fmt(d.put.price_per_unit) : '—') + '</span>';
+  if ($('rPremPerLotD')) $('rPremPerLotD').innerHTML =
+    '<span class="cp-call">' + fmtMoney(d.call.premium_per_lot) + '</span>'
+    + ' <span style="opacity:.5">/</span> '
+    + '<span class="cp-put">' + fmtMoney(d.put.premium_per_lot) + '</span>';
   /* v50.61: IV / IV 百分位来自左侧输入(测算本身不需要它, 只随记录留档) */
   const _ivV = parseFloat($('dualIv').value), _ivPV = parseFloat($('dualIvPct').value);
   if ($('rIvD')) $('rIvD').textContent = (_ivV > 0) ? fmtTrim(_ivV) + '%' : '—';
@@ -6684,13 +6741,13 @@ const TradeUI = {
       + '<span class="dt-title">止盈目标价位<small>持仓总价值涨到 N 倍权利金时，单腿期权价格要到的位置</small></span>'
       + '<span class="dt-sum">合计 <b>' + money(t.total_premium) + '</b> · ' + t.call_qty + 'C / ' + t.put_qty + 'P</span></div>'
       + '<table class="dual-target-tbl"><thead><tr>'
-      + '<th>目标</th><th>Call 目标价' + uTxt + '</th><th>Put 目标价' + uTxt + '</th></tr></thead><tbody>'
+      + '<th>目标</th><th class="cp-call">Call 目标价' + uTxt + '</th><th class="cp-put">Put 目标价' + uTxt + '</th></tr></thead><tbody>'
       + t.targets.map(x =>
           '<tr><td class="dt-n"><b>' + x.n + '×</b><span class="dt-val">合计 ' + money(x.value) + '</span></td>'
-          + '<td class="big call"><span class="dt-px">¥' + fmt(x.call_price_unit) + '</span>'
+          + '<td class="big call cp-call"><span class="dt-px">¥' + fmt(x.call_price_unit) + '</span>'
           + (x.call_mult != null ? '<span class="dt-mult">' + x.call_mult + '×</span>' : '')
           + '<span class="dt-per">每手 ' + money(x.call_price) + '</span></td>'
-          + '<td class="big put"><span class="dt-px">¥' + fmt(x.put_price_unit) + '</span>'
+          + '<td class="big put cp-put"><span class="dt-px">¥' + fmt(x.put_price_unit) + '</span>'
           + (x.put_mult != null ? '<span class="dt-mult">' + x.put_mult + '×</span>' : '')
           + '<span class="dt-per">每手 ' + money(x.put_price) + '</span></td></tr>'
         ).join('')

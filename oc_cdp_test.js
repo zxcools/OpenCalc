@@ -2539,6 +2539,89 @@ async function main() {
         && v65.futBack.f === false && v65.futBack.empty === true,
         JSON.stringify({before: v65.futBefore, cleared: v65.futAfterClear, back: v65.futBack}));
 
+  // ===== v50.66: Call / Put 用颜色分开(计算器两腿卡片 + 结果手数卡 + 止盈表, 交易记录同样) =====
+  const v66Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const tab = t => document.querySelector('#mainTabs .maintab[data-tab="' + t + '"]').click();
+    const cs = el => getComputedStyle(el);
+    const choose = (inputId, code) => { const el = q(inputId);
+      el.value = code; el.dispatchEvent(new Event('input'));
+      el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); };
+    const post = (p) => fetch('/api/trades/upsert', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)});
+
+    tab('calc'); await w(500);
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(500);
+    choose('cSearchD', 'lc'); await w(900);
+    q('equity').value = '90'; q('equity').dispatchEvent(new Event('input'));
+    q('dualMonth').value = '2611';
+    q('callStrike').value = '144000'; q('callDelta').value = '0.3000';
+    q('callPrice').value = '9800'; q('callPrice').dispatchEvent(new Event('input'));
+    q('putStrike').value = '120000'; q('putDelta').value = '-0.3000';
+    q('putPrice').value = '8500'; q('putPrice').dispatchEvent(new Event('input'));
+    onInput(); await w(1300);
+    const badgeC = document.querySelector('#dualFields .leg-card.call .cp-badge');
+    const badgeP = document.querySelector('#dualFields .leg-card.put .cp-badge');
+    const form = {
+      cards: !!document.querySelector('#dualFields .leg-card.call') && !!document.querySelector('#dualFields .leg-card.put'),
+      callColor: badgeC ? cs(badgeC).color : '',
+      putColor: badgeP ? cs(badgeP).color : '',
+    };
+    const nC = document.querySelector('.bignum.cp-call .n'), nP = document.querySelector('.bignum.cp-put .n');
+    const hud = {callColor: nC ? cs(nC).color : '', putColor: nP ? cs(nP).color : ''};
+    const thC = document.querySelector('#rTargetsD th.cp-call'), thP = document.querySelector('#rTargetsD th.cp-put');
+    const tdC = document.querySelector('#rTargetsD td.cp-call'), tdP = document.querySelector('#rTargetsD td.cp-put');
+    const tbl = {
+      callColor: thC ? cs(thC).color : '', putColor: thP ? cs(thP).color : '',
+      callBg: thC ? cs(thC).backgroundColor : '', putBg: thP ? cs(thP).backgroundColor : '',
+      callTdBg: tdC ? cs(tdC).backgroundColor : '', putTdBg: tdP ? cs(tdP).backgroundColor : '',
+    };
+    const dualCss = document.querySelector('#rPriceD') ? q('rPriceD').innerHTML.indexOf('cp-call') >= 0 : false;
+
+    // 交易记录-期权双买详情里的同一张表
+    const B = 'B20261007000666cc';
+    for (const leg of [['C','lc2611-C-144000',9800], ['P','lc2611-P-120000',8500]]) {
+      await post({mode:'dual', underlying:'lc', contract: leg[1], batch: B,
+        op_type:'open', direction:'buy', call_put: leg[0], open_date:'2026-10-07',
+        open_price: leg[2], qty: 1, premium: leg[2]});
+    }
+    tab('tradesDual'); await w(1500);
+    await TradeUI.loadDetail('lc', B); await w(1300);
+    const rThC = document.querySelector('#tdDualTargets th.cp-call');
+    const rThP = document.querySelector('#tdDualTargets th.cp-put');
+    const rec = {hasCall: !!rThC, hasPut: !!rThP,
+                 callColor: rThC ? cs(rThC).color : '', putColor: rThP ? cs(rThP).color : '',
+                 callBg: rThC ? cs(rThC).backgroundColor : ''};
+    TradeUI.closeDetail(); await w(400);
+    const d = await (await fetch('/api/trades/detail?mode=dual&underlying=lc&batch=' + encodeURIComponent(B))).json();
+    for (const op of (d.operations || [])) {
+      await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: op.id})});
+    }
+    return JSON.stringify({form, hud, tbl, dualCss, rec});
+  })()`);
+  const v66 = JSON.parse(v66Run);
+  check('Call/Put 配色(v50.66): 开仓参数拆成两张腿卡片, 颜色分得开',
+        v66.form.cards === true && v66.form.callColor !== v66.form.putColor
+        && v66.form.callColor !== '', JSON.stringify(v66.form));
+  check('Call/Put 配色(v50.66): 结果的手数卡数字按腿上色(Call ≠ Put)',
+        v66.hud.callColor !== v66.hud.putColor && v66.hud.callColor !== '', JSON.stringify(v66.hud));
+  check('Call/Put 配色(v50.66): 止盈目标表两列表头带腿色底纹+文字色',
+        v66.tbl.callColor !== v66.tbl.putColor
+        && v66.tbl.callBg !== v66.tbl.putBg
+        && v66.tbl.callBg !== 'rgba(0, 0, 0, 0)',
+        JSON.stringify(v66.tbl));
+  check('Call/Put 配色(v50.66): 止盈目标表两列正文也有浅底(分量腿)',
+        v66.tbl.callTdBg !== v66.tbl.putTdBg && v66.tbl.callTdBg !== 'rgba(0, 0, 0, 0)',
+        'call=' + v66.tbl.callTdBg + ' put=' + v66.tbl.putTdBg);
+  check('Call/Put 配色(v50.66): 结果里「期权价格 / 每手权利金」两腿值也分色',
+        v66.dualCss === true, String(v66.dualCss));
+  check('Call/Put 配色(v50.66): 交易记录-双买详情的止盈表同样分色(同一套样式)',
+        v66.rec.hasCall === true && v66.rec.hasPut === true
+        && v66.rec.callColor !== v66.rec.putColor && v66.rec.callBg !== 'rgba(0, 0, 0, 0)',
+        JSON.stringify(v66.rec));
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
