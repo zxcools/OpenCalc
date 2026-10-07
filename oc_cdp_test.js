@@ -1671,13 +1671,14 @@ async function main() {
     const inOpt = (o.snapshots || []).some(x => (x.contracts || []).includes('e2epool01'));
     // 页面上的期货监控池卡片也要能看到这个品种
     const shown = document.getElementById('poolArea').textContent.indexOf('e2epool01') >= 0;
+    const dbg = document.getElementById('poolArea').textContent.replace(/\s+/g, ' ').slice(0, 120);
     for (const s of [...(f.snapshots || []), ...(o.snapshots || [])]) {
       if ((s.contracts || []).includes('e2epool01')) {
         await fetch('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({id: s.id})});
       }
     }
-    return JSON.stringify({inFut, inOpt, shown});
+    return JSON.stringify({inFut, inOpt, shown, dbg});
   })()`);
   const pr = JSON.parse(poolRun);
   check('期货监控池(v50.50): 新建后落在期货模式(之前全进期权模式, 表现为「加不上」)',
@@ -1997,7 +1998,12 @@ async function main() {
     const shown = !document.getElementById('resultD').classList.contains('hidden');
     const qC = document.getElementById('rQtyCD').textContent.trim();
     const qP = document.getElementById('rQtyPD').textContent.trim();
-    const premTxt = document.getElementById('rPremiumD').textContent.trim();
+    const premTxt = ((document.getElementById('rTgtSumD') || {}).textContent || '').trim();
+    const noDupPremium = document.getElementById('rPremiumD') === null;   // v50.64: 与止盈目标价位重复, 已删
+    const pxCell = document.querySelector('#rTargetsD tbody tr:nth-child(1) td:nth-child(2) .dt-px');
+    const pxStyle = pxCell ? getComputedStyle(pxCell) : null;
+    const pxBig = pxStyle ? (parseFloat(pxStyle.fontSize) >= 18 && parseInt(pxStyle.fontWeight, 10) >= 700) : false;
+    const pxColored = pxStyle ? (pxStyle.color !== getComputedStyle(document.body).color) : false;
     const deltaTxt = document.getElementById('rDeltaD').textContent.trim();
     const tgtRows = document.querySelectorAll('#rTargetsD tbody tr').length;
     const tgt2 = (document.querySelector('#rTargetsD tbody tr:nth-child(1) td:nth-child(2)') || {}).textContent || '';
@@ -2045,6 +2051,7 @@ async function main() {
     localStorage.removeItem('oc_dual_plans');
     return JSON.stringify({modeBtns, dualShown, optHidden, futHidden, shown,
                            qC, qP, premTxt, deltaTxt, tgtRows, tgt2, dualTargetTxt,
+                           noDupPremium, pxBig, pxColored,
                            plansD: plansD.length, plansO: plansO.length,
                            alertHas: /已加入/.test(alertTxt), jumped, legs,
                            futGroups, optGroups, layTm, mainTitle, futColHidden});
@@ -2056,6 +2063,11 @@ async function main() {
   check('双买测算(v50.59): 结果卡显示两腿手数与权利金合计',
         v59.shown && v59.qC === '1' && v59.qP === '1' && /18,300/.test(v59.premTxt),
         'qC=' + v59.qC + ' qP=' + v59.qP + ' prem=' + v59.premTxt);
+  check('双买UI(v50.64): 去掉与止盈表重复的「两腿权利金合计」条', v59.noDupPremium === true,
+        'rPremiumD 仍存在=' + (v59.noDupPremium === false));
+  check('双买UI(v50.64): 止盈目标价为大号粗体 + 醒目配色(不再与明细同字号)',
+        v59.pxBig === true && v59.pxColored === true,
+        '大号粗体=' + v59.pxBig + ' 配色=' + v59.pxColored);
   check('双买测算(v50.59): 显示净 delta 与「中性」标记',
         /0/.test(v59.deltaTxt) && /中性/.test(v59.deltaTxt), v59.deltaTxt);
   check('双买测算(v50.59): 输出 2/3/4/5 四档目标价位',

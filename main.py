@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5063            # 与 README 版本号 v50.63 对齐(数值比较用于单实例接管)
+APP_VERSION = 5064            # 与 README 版本号 v50.64 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3338,6 +3338,8 @@ HTML = r"""<!DOCTYPE html>
   --fz-rungq:24px;    /* 阶梯止盈价格(原写死 20) */
   --fz-lbh:14.5px;    /* 阶梯止盈标题(原写死 13) */
   --fz-stat:22px;     /* 交易统计卡片大数字(v50.53) */
+  --fz-dt-n:15px;     /* 双买止盈表: 目标倍数 N(v50.64) */
+  --fz-dt-px:23px;    /* 双买止盈表: 目标价大数字 */
 }
 body.fz-sm{
   --fz-th:12.5px; --fz-td:13.5px; --fz-td2:13px; --fz-tag:12px;
@@ -3347,7 +3349,7 @@ body.fz-sm{
   --fz-micro:11px; --fz-small:11.5px; --fz-mid:12px; --fz-fml:11px;
   --fz-legend:11.5px; --fz-chart:11.5px; --fz-chart2:12.5px;
   --fz-calc-k:12px; --fz-calc-v:15.5px; --fz-rungq:21px; --fz-lbh:13.5px;
-  --fz-stat:20px;
+  --fz-stat:20px; --fz-dt-n:14px; --fz-dt-px:20px;
 }
 body.fz-lg{
   --fz-th:15.5px; --fz-td:17px; --fz-td2:16px; --fz-tag:15px;
@@ -3357,7 +3359,7 @@ body.fz-lg{
   --fz-micro:13.5px; --fz-small:14px; --fz-mid:14.5px; --fz-fml:13.5px;
   --fz-legend:14.5px; --fz-chart:15px; --fz-chart2:16px;
   --fz-calc-k:14.5px; --fz-calc-v:19px; --fz-rungq:27px; --fz-lbh:16.5px;
-  --fz-stat:25px;
+  --fz-stat:25px; --fz-dt-n:17px; --fz-dt-px:27px;
 }
 [data-theme="light"]{
   /* 护眼浅色(白天): 豆绿底 + 米绿卡片(明显非纯白) */
@@ -3556,15 +3558,40 @@ select{cursor:pointer;appearance:none;
 .dual-leg .k .u{opacity:.72;font-weight:400;margin-left:3px}
 .dual-leg input{margin:0}
 .dual-leg-hint{font-size:var(--fz-micro);color:var(--sub);opacity:.85;margin:0 0 8px}
-.dual-target-tbl{width:100%;border-collapse:collapse;font-size:var(--fz-td)}
+/* ===== 期权双买「止盈目标价位」(v50.64) =====
+   原来是一张裸表, 目标价和别的明细一个字号 → 用户反馈「不明显」。
+   改成: 独立卡片 + 大号配色价格 + N 倍胶囊, 目的是一眼看到「涨到多少该平腿」 */
+.dt-head{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:0 0 9px}
+.dt-head .dt-ico{font-size:var(--fz-mid);line-height:1}
+.dt-head .dt-title{font-size:var(--fz-lbl);font-weight:700;color:var(--text);letter-spacing:.3px}
+.dt-head .dt-title small{font-weight:400;color:var(--sub);font-size:var(--fz-small);margin-left:7px}
+.dt-head .dt-sum{margin-left:auto;font-size:var(--fz-small);color:var(--sub);background:var(--panel2);
+  border:1px solid var(--border);border-radius:999px;padding:4px 12px;white-space:nowrap}
+.dt-head .dt-sum b{color:var(--gold);font-weight:700}
+.dual-target-tbl{width:100%;border-collapse:separate;border-spacing:0;font-size:var(--fz-td);
+  background:var(--panel2);border:1px solid var(--border);border-radius:12px;overflow:hidden}
 .dual-target-tbl th{text-align:right;font-weight:600;color:var(--sub);font-size:var(--fz-micro);
-  padding:6px 8px;border-bottom:1px solid var(--border)}
+  padding:9px 13px;background:rgba(255,255,255,.035);border-bottom:1px solid var(--border);white-space:nowrap}
 .dual-target-tbl th:first-child{text-align:left}
-.dual-target-tbl td{text-align:right;padding:7px 8px;border-bottom:1px solid var(--border);
-  font-variant-numeric:tabular-nums}
-.dual-target-tbl td:first-child{text-align:left;color:var(--sub)}
-.dual-target-tbl tr:last-child td{border-bottom:0}
+.dual-target-tbl td{text-align:right;padding:11px 13px;border-top:1px dashed var(--border);
+  font-variant-numeric:tabular-nums;vertical-align:middle}
+.dual-target-tbl tbody tr:first-child td{border-top:0}
+.dual-target-tbl td:first-child{text-align:left;color:var(--sub);white-space:nowrap}
 .dual-target-tbl .big{font-weight:700;color:var(--text)}
+.dual-target-tbl .dt-n b{display:inline-block;min-width:32px;padding:2px 9px;border-radius:999px;
+  background:rgba(165,138,224,.2);color:#a58ae0;font-size:var(--fz-dt-n);font-weight:800;text-align:center}
+.dual-target-tbl .dt-n .dt-val{display:block;font-size:var(--fz-small);color:var(--sub);margin-top:5px}
+.dual-target-tbl .dt-px{display:inline-block;font-size:var(--fz-dt-px);font-weight:800;letter-spacing:.2px;
+  font-variant-numeric:tabular-nums;line-height:1.12}
+.dual-target-tbl .big.call .dt-px{color:#ff8484}
+.dual-target-tbl .big.put .dt-px{color:#46d6ea}
+.dual-target-tbl .dt-mult{font-size:var(--fz-small);color:var(--sub);font-weight:400;margin-left:6px}
+.dual-target-tbl .dt-per{display:block;font-size:var(--fz-small);color:var(--sub);font-weight:400;margin-top:4px}
+[data-theme="light"] .dual-target-tbl{background:#eef4e8}
+[data-theme="light"] .dual-target-tbl th{background:rgba(60,90,60,.05)}
+[data-theme="light"] .dual-target-tbl .dt-n b{background:rgba(122,86,190,.16);color:#6b46b8}
+[data-theme="light"] .dual-target-tbl .big.call .dt-px{color:#d64545}
+[data-theme="light"] .dual-target-tbl .big.put .dt-px{color:#0e7c93}
 .plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
   border-radius:10px;padding:10px 14px;line-height:1.6}
 .plans-item{display:flex;align-items:center;gap:12px;background:var(--panel2);
@@ -4360,11 +4387,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="s">按 delta 中性配比</div>
           </div>
         </div>
-        <div class="budgetbar anim" style="margin-top:14px">
-          <span class="k">两腿权利金合计（占用资金）</span>
-          <span class="v money gold" id="rPremiumD">—</span>
-        </div>
-        <div class="details grid2 anim" id="rDetailD" style="margin-top:12px">
+        <div id="rTargetsD" style="margin-top:16px"></div>
+        <div class="details grid2 anim" id="rDetailD" style="margin-top:16px">
           <div class="dcell"><span class="k">开仓标的 / 合约</span><span class="v" id="rContractD">—</span></div>
           <div class="dcell"><span class="k" title="两腿 delta 相加, 越接近 0 越中性">两腿净 delta（越接近 0 越中性）</span><span class="v" id="rDeltaD">—</span></div>
           <div class="dcell"><span class="k">期权价格（Call / Put）</span><span class="v" id="rPriceD">—</span></div>
@@ -4372,7 +4396,6 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="dcell"><span class="k">当前 IV（开仓时）</span><span class="v" id="rIvD">—</span></div>
           <div class="dcell"><span class="k">当前 IV 百分位</span><span class="v" id="rIvPctD">—</span></div>
         </div>
-        <div id="rTargetsD" style="margin-top:14px"></div>
         <div class="warnbox hidden" id="rWarnD"></div>
         <div style="display:flex;align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
           <button class="btn xs cyan" id="btnAddDual" title="把这次测算的 call / put 两条腿一键写入「交易记录：期权双买」">📥 加入记录</button>
@@ -5524,7 +5547,6 @@ function renderD(d){
   $('rBudgetD').innerHTML = fmtMoney(d.budget) + ' <span class="dim" style="font-size:12px">＝ 权益 ' + eqWanTxt + ' 万 × ' + pctTxt + '%</span>';
   $('rQtyCD').textContent = d.call.qty;
   $('rQtyPD').textContent = d.put.qty;
-  $('rPremiumD').textContent = fmtMoney(d.total_premium);
   $('rContractD').textContent = d.contract + '（' + d.code + (d.month ? ' · ' + d.month : '') + '）';
   $('rDeltaD').innerHTML = '<b>' + Number(d.net_delta).toFixed(4) + '</b>'
     + (d.delta_gap_pct <= 2
@@ -5534,16 +5556,21 @@ function renderD(d){
   const _u = (d.unit || '').split('/')[0];
   const _uTxt = _u ? ('（元/' + _u + '）') : '';
   $('rTargetsD').innerHTML = d.enough_lots ? (
-    '<div class="ratio-strip"><span class="l">止盈目标价位 · 持仓总价值涨到 N 倍权利金</span>'
-    + '<span class="badge" style="opacity:.8">合计 ' + fmtMoney(d.total_premium) + '</span></div>'
+    '<div class="dt-head">'
+    + '<span class="dt-ico">🎯</span>'
+    + '<span class="dt-title">止盈目标价位<small>持仓总价值涨到 N 倍权利金时，单腿期权价格要到的位置</small></span>'
+    + '<span class="dt-sum">合计 <b id="rTgtSumD">' + fmtMoney(d.total_premium) + '</b></span>'
+    + '</div>'
     + '<table class="dual-target-tbl"><thead><tr>'
     + '<th>目标</th><th>Call 目标价' + _uTxt + '</th><th>Put 目标价' + _uTxt + '</th></tr></thead><tbody>'
     + d.targets.map(t =>
-        '<tr><td>' + t.n + '× <span style="opacity:.75">合计 ' + fmtMoney(t.value) + '</span></td>'
-        + '<td class="big">¥' + fmt(t.call_price_unit) + ' <span style="color:var(--sub);font-size:12px">' + t.call_mult + '×</span>'
-        + '<div style="color:var(--sub);font-size:11.5px;font-weight:400">每手 ' + fmtMoney(t.call_price) + '</div></td>'
-        + '<td class="big">¥' + fmt(t.put_price_unit) + ' <span style="color:var(--sub);font-size:12px">' + t.put_mult + '×</span>'
-        + '<div style="color:var(--sub);font-size:11.5px;font-weight:400">每手 ' + fmtMoney(t.put_price) + '</div></td></tr>'
+        '<tr><td class="dt-n"><b>' + t.n + '×</b><span class="dt-val">合计 ' + fmtMoney(t.value) + '</span></td>'
+        + '<td class="big call"><span class="dt-px">¥' + fmt(t.call_price_unit) + '</span>'
+        + '<span class="dt-mult">' + t.call_mult + '×</span>'
+        + '<span class="dt-per">每手 ' + fmtMoney(t.call_price) + '</span></td>'
+        + '<td class="big put"><span class="dt-px">¥' + fmt(t.put_price_unit) + '</span>'
+        + '<span class="dt-mult">' + t.put_mult + '×</span>'
+        + '<span class="dt-per">每手 ' + fmtMoney(t.put_price) + '</span></td></tr>'
       ).join('')
     + '</tbody></table>'
     + '<div class="tip">目标价与左侧「期权价格」同一口径' + _uTxt + '，可直接照着盘面报价挂单。'
@@ -6630,17 +6657,20 @@ const TradeUI = {
     const uTxt = u ? ('（元/' + u + '）') : '';
     const money = v => '¥ ' + Number(v || 0).toLocaleString('en-US',{maximumFractionDigits:2});
     box.innerHTML =
-      '<div class="ratio-strip" style="margin-bottom:8px"><span class="l">止盈价测算 · 持仓总价值涨到 N 倍权利金</span>'
-      + '<span class="badge" style="opacity:.8">合计 ' + money(t.total_premium)
-      + ' · ' + t.call_qty + 'C / ' + t.put_qty + 'P</span></div>'
+      '<div class="dt-head">'
+      + '<span class="dt-ico">🎯</span>'
+      + '<span class="dt-title">止盈目标价位<small>持仓总价值涨到 N 倍权利金时，单腿期权价格要到的位置</small></span>'
+      + '<span class="dt-sum">合计 <b>' + money(t.total_premium) + '</b> · ' + t.call_qty + 'C / ' + t.put_qty + 'P</span></div>'
       + '<table class="dual-target-tbl"><thead><tr>'
       + '<th>目标</th><th>Call 目标价' + uTxt + '</th><th>Put 目标价' + uTxt + '</th></tr></thead><tbody>'
       + t.targets.map(x =>
-          '<tr><td>' + x.n + '× <span style="opacity:.75">合计 ' + money(x.value) + '</span></td>'
-          + '<td class="big">¥' + fmt(x.call_price_unit) + ' <span style="color:var(--sub);font-size:12px">' + (x.call_mult != null ? x.call_mult + '×' : '') + '</span>'
-          + '<div style="color:var(--sub);font-size:11.5px;font-weight:400">每手 ' + money(x.call_price) + '</div></td>'
-          + '<td class="big">¥' + fmt(x.put_price_unit) + ' <span style="color:var(--sub);font-size:12px">' + (x.put_mult != null ? x.put_mult + '×' : '') + '</span>'
-          + '<div style="color:var(--sub);font-size:11.5px;font-weight:400">每手 ' + money(x.put_price) + '</div></td></tr>'
+          '<tr><td class="dt-n"><b>' + x.n + '×</b><span class="dt-val">合计 ' + money(x.value) + '</span></td>'
+          + '<td class="big call"><span class="dt-px">¥' + fmt(x.call_price_unit) + '</span>'
+          + (x.call_mult != null ? '<span class="dt-mult">' + x.call_mult + '×</span>' : '')
+          + '<span class="dt-per">每手 ' + money(x.call_price) + '</span></td>'
+          + '<td class="big put"><span class="dt-px">¥' + fmt(x.put_price_unit) + '</span>'
+          + (x.put_mult != null ? '<span class="dt-mult">' + x.put_mult + '×</span>' : '')
+          + '<span class="dt-per">每手 ' + money(x.put_price) + '</span></td></tr>'
         ).join('')
       + '</tbody></table>'
       + '<div class="tip">' + (t.source === 'open'

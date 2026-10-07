@@ -1,5 +1,15 @@
 # tools · 辅助脚本
 
+## check_js.py — 内嵌前端 JS 语法校验
+
+PyInstaller 打包**不校验**内嵌 JS，前端语法写错也能打包成功（用户点开才白屏）。改完前端先跑这个：
+
+```bash
+python tools/check_js.py     # 全过输出 "JS OK"，退出码 0
+```
+
+会把 `main.py` 里所有内嵌 `<script>` 块抽出来交给 `node --check`（外链 `src=` 的跳过）。
+
 ## backup_roundtrip.py — 备份往返验证
 
 确认「换电脑迁移」不丢数据：起两个临时库（源 + 空目标），源库灌演示数据 → 导出 → 导入目标库 →
