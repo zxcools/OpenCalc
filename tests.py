@@ -1014,6 +1014,38 @@ check("止盈价测算(v50.63): 全平后退回开仓记录回算",
 for _o in trade_detail(_dt_u, mode="dual", batch=_dt_b)["operations"]:
     trade_delete(_o["id"])
 
+# v50.67: 双买开仓价口径修正 —— 老数据把「每手权利金」当成了价格(被乘过期权乘数)
+from main import _migrate_dual_open_price, _option_mult
+check("双买乘数(v50.67): _option_mult 按品种取(烧碱 SH = 30)",
+      _option_mult("SH") == 30 and _option_mult("lc") == 1,
+      "SH=%s lc=%s" % (_option_mult("SH"), _option_mult("lc")))
+_mu = "SH"
+trade_upsert({'mode': 'dual', 'underlying': _mu, 'contract': 'SH2612-C-1880', 'batch': 'Bm67a',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'C', 'open_date': '2026-10-08',
+              'open_price': 1260, 'qty': 1, 'premium': 1260})      # 老数据: 42×30
+trade_upsert({'mode': 'dual', 'underlying': _mu, 'contract': 'SH2612-P-1820', 'batch': 'Bm67b',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'P', 'open_date': '2026-10-08',
+              'open_price': 39, 'qty': 1, 'premium': 1170})        # 已是价格口径 → 不该动
+trade_upsert({'mode': 'options', 'underlying': 'lc', 'contract': 'lc2611-C-144000', 'batch': 'Bm67c',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'C', 'open_date': '2026-10-08',
+              'open_price': 9800, 'qty': 1, 'premium': 9800})      # 非双买 → 不该动
+_mig_n = _migrate_dual_open_price(_main_mod._fund_db())
+check("双买价格修正(v50.67): 只改被乘过乘数的那条(改 1 条)",
+      _mig_n == 1, "实际改了 %d 条" % _mig_n)
+check("双买价格修正(v50.67): 开仓价改回期权价格(1260 ÷ 30 = 42)",
+      abs(trade_detail(_mu, mode="dual", batch='Bm67a')["holdings"][0]["open_price"] - 42) < 0.001,
+      str(trade_detail(_mu, mode="dual", batch='Bm67a')["holdings"][0]["open_price"]))
+check("双买价格修正(v50.67): 权利金不受影响(仍是每手 1260)",
+      abs(trade_detail(_mu, mode="dual", batch='Bm67a')["holdings"][0]["premium"] - 1260) < 0.01, '')
+check("双买价格修正(v50.67): 已是价格口径的不动",
+      abs(trade_detail(_mu, mode="dual", batch='Bm67b')["holdings"][0]["open_price"] - 39) < 0.001, '')
+check("双买价格修正(v50.67): 重复执行安全(第二次改 0 条)",
+      _migrate_dual_open_price(_main_mod._fund_db()) == 0, '')
+for _b in ('Bm67a', 'Bm67b', 'Bm67c'):
+    _u = _mu if _b != 'Bm67c' else 'lc'
+    for _o in trade_detail(_u, mode="dual" if _b != 'Bm67c' else "options", batch=_b)["operations"]:
+        trade_delete(_o["id"])
+
 # 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
 print("\n== 风险额度设置校验 ==")
 from main import save_settings

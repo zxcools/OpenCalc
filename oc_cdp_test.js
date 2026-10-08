@@ -2622,6 +2622,90 @@ async function main() {
         && v66.rec.callColor !== v66.rec.putColor && v66.rec.callBg !== 'rgba(0, 0, 0, 0)',
         JSON.stringify(v66.rec));
 
+  // ===== v50.67: 双买开仓价必须存「期权价格」, 不能乘合约乘数 =====
+  //    ⚠ 必须用乘数 > 1 的品种才验得出来(lc 乘数=1, 价格与每手权利金恰好相等, 之前一直看不出来)
+  const v67Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const choose = (inputId, code) => { const el = q(inputId);
+      el.value = code; el.dispatchEvent(new Event('input'));
+      el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); };
+    const wipe = async () => {
+      const g = await (await fetch('/api/trades/groups?mode=dual')).json();
+      for (const it of (g.groups || [])) {
+        const d = await (await fetch('/api/trades/detail?mode=dual&underlying=' + it.underlying
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) {
+          await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({id: op.id})});
+        }
+      }
+    };
+    const legsOf = async (u, b) => {
+      const d = await (await fetch('/api/trades/detail?mode=dual&underlying=' + encodeURIComponent(u)
+        + '&batch=' + encodeURIComponent(b || ''))).json();
+      const out = {};
+      for (const x of (d.holdings || [])) {
+        out[String(x.call_put).toUpperCase()] = {px: x.open_price, q: x.qty,
+                                                 premEach: (x.premium || 0) / (x.qty || 1)};
+      }
+      return out;
+    };
+    await wipe();
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(400);
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(500);
+    choose('cSearchD', 'sh'); await w(900);
+    const picked = selCode.D;
+    const mult = dualOptMult();
+    q('equity').value = '90'; q('equity').dispatchEvent(new Event('input'));
+    q('dualMonth').value = '2612';
+    q('callStrike').value = '1880'; q('callDelta').value = '0.4000';
+    q('callPrice').value = '42'; q('callPrice').dispatchEvent(new Event('input'));
+    q('putStrike').value = '1820'; q('putDelta').value = '-0.3920';
+    q('putPrice').value = '39'; q('putPrice').dispatchEvent(new Event('input'));
+    await w(300);
+    const synced = {cp: q('callPremium').value, pp: q('putPremium').value};
+    onInput(); await w(1300);
+    // A) 计算器「加入记录」
+    await addDualToTradeRecord(); await w(2200);
+    const hA = await legsOf(TradeUI.detail.underlying, TradeUI.detail.batch);
+    // B) 交易记录里的两腿新建弹窗
+    TradeUI.closeDetail(); await w(300);
+    q('btnNewOpen').click(); await w(500);
+    q('dmUnderlying').value = 'sh'; q('dmUnderlying').dispatchEvent(new Event('input'));
+    q('dmMonth').value = '2701';
+    q('dmCallStrike').value = '1900'; q('dmCallDelta').value = '0.35';
+    q('dmCallPrice').value = '50'; q('dmCallPrice').dispatchEvent(new Event('input'));
+    q('dmPutStrike').value = '1800'; q('dmPutDelta').value = '-0.35';
+    q('dmPutPrice').value = '45'; q('dmPutPrice').dispatchEvent(new Event('input'));
+    q('dmCallQty').value = '1'; q('dmCallQty').dispatchEvent(new Event('input'));
+    q('dmPutQty').value = '1'; q('dmPutQty').dispatchEvent(new Event('input'));
+    await w(300);
+    const okB = await TradeUI.submitDualModal(); await w(1900);
+    const hB = await legsOf(TradeUI.detail.underlying, TradeUI.detail.batch);
+    await wipe();
+    return JSON.stringify({picked, mult, synced, hA, hB, okB});
+  })()`);
+  const v67 = JSON.parse(v67Run);
+  check('双买价格口径(v50.67): 选到乘数>1 的品种(烧碱 SH, 乘数 30)',
+        String(v67.picked).toLowerCase() === 'sh' && v67.mult === 30,
+        'code=' + v67.picked + ' mult=' + v67.mult);
+  check('双买价格口径(v50.67): 期权价格 42 → 每手权利金自动 1260(×30)',
+        parseFloat(v67.synced.cp) === 42 * 30 && parseFloat(v67.synced.pp) === 39 * 30,
+        JSON.stringify(v67.synced));
+  check('双买价格口径(v50.67): 计算器加入记录 → 价格存期权价格 42 / 39(没乘乘数)',
+        v67.hA && v67.hA.C && v67.hA.P
+        && Math.abs(v67.hA.C.px - 42) < 0.01 && Math.abs(v67.hA.P.px - 39) < 0.01,
+        JSON.stringify(v67.hA));
+  check('双买价格口径(v50.67): 同一张表里「权利金」仍是每手 1260 / 1170(钱没变)',
+        Math.abs(v67.hA.C.premEach - 1260) < 0.5 && Math.abs(v67.hA.P.premEach - 1170) < 0.5,
+        JSON.stringify(v67.hA));
+  check('双买价格口径(v50.67): 手动两腿弹窗走同一口径(价格 50 / 45, 不乘 30)',
+        v67.hB && v67.hB.C && v67.hB.P
+        && Math.abs(v67.hB.C.px - 50) < 0.01 && Math.abs(v67.hB.P.px - 45) < 0.01
+        && Math.abs(v67.hB.C.premEach - 1500) < 0.5,
+        JSON.stringify(v67.hB));
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

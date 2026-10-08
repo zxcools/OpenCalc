@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5066            # 与 README 版本号 v50.66 对齐(数值比较用于单实例接管)
+APP_VERSION = 5067            # 与 README 版本号 v50.67 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1512,10 +1512,61 @@ def _db_ensure_schema(conn):
                 conn.execute("UPDATE %s SET strategy=? WHERE strategy=?" % _tbl, (_new, _old))
             except sqlite3.OperationalError:
                 pass
+    # ---- v50.67: 双买记录的「开仓价」口径纠正(幂等, 见函数注释) ----
+    _migrate_dual_open_price(conn)
     try:
         conn.commit()
     except Exception:
         pass
+
+
+def _option_mult(code):
+    """期权合约乘数: OPTION_MULT_OVERRIDES 优先, 否则取品种的 opt_mult(缺省 = 期货乘数)。"""
+    c = get_contract(code)
+    if not c:
+        return 1.0
+    try:
+        return float(OPTION_MULT_OVERRIDES.get(c["code"], c["opt_mult"]) or 1) or 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _migrate_dual_open_price(conn):
+    """v50.67 一次性纠正历史数据: 期权双买的开仓价原先把**每手权利金**存成了价格。
+
+    价格应该是「期权价格」(行情报价口径, 与止盈目标价同一口径), 而老代码存的是
+    期权价格 × 期权乘数 —— 乘数=1 的品种(如 lc)看不出来, 乘数>1 的品种(如 SH=30)
+    价格会凭空放大几十倍。
+
+    判定特征: mode='dual' 且 open_price 恰好等于 premium/qty(每手权利金)。
+    因为 premium 就是按「价格 × 乘数 × 手数」算出来的, 只有被乘过乘数才会两者相等;
+    改完之后该等式不再成立 → 重复执行不会再动它(天然幂等)。
+    改写历史数据前先做一次强制备份。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT id, underlying, open_price, qty, premium FROM trade_records "
+            "WHERE IFNULL(mode,'options')='dual' AND op_type='open' "
+            "  AND qty>0 AND premium>0 AND open_price>0"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    todo = []
+    for r in rows:
+        mult = _option_mult(r["underlying"])
+        if mult <= 1:
+            continue                       # 乘数=1 时价格本来就等于每手权利金, 无需处理
+        per_lot = (r["premium"] or 0) / r["qty"]
+        if abs((r["open_price"] or 0) - per_lot) > 0.005:
+            continue                       # 已经是价格口径(或用户手改过) → 不动
+        todo.append((r["id"], round(r["open_price"] / mult, 4), r["open_price"]))
+    if not todo:
+        return 0
+    fund_auto_backup("双买开仓价口径修正前", force=True)    # 改写历史数据前先留一份
+    for _id, _px, _old in todo:
+        conn.execute("UPDATE trade_records SET open_price=? WHERE id=?", (_px, _id))
+    print("[migrate] 期权双买开仓价口径修正: %d 条 (价格 ÷ 期权乘数)" % len(todo), file=sys.stderr)
+    return len(todo)
 
 
 def _calc_record_metrics(initial_equity, end_equity, cash_flow):
@@ -5690,9 +5741,13 @@ async function addDualToTradeRecord(){
   const _ivNote = _ivNum != null ? (' · IV ' + fmtTrim(_ivNum) + '%'
     + (_ivPctNum != null ? '（百分位 ' + fmtTrim(_ivPctNum) + '%）' : '')) : '';
   const legs = [
+    // v50.67: open_price 存「期权价格」(行情报价口径, 与止盈目标价同一口径) ——
+    //   之前误存成每手权利金(= 期权价格 × 期权乘数), 乘数>1 的品种价格会凭空放大几十倍
     { cp: 'C', contract: d.call.contract_code, qty: d.call.qty,
+      price: d.call.price_per_unit,
       prem: d.call.premium_per_lot, total: d.call.premium_total, delta: d.call.delta },
     { cp: 'P', contract: d.put.contract_code, qty: d.put.qty,
+      price: d.put.price_per_unit,
       prem: d.put.premium_per_lot, total: d.put.premium_total, delta: d.put.delta },
   ];
   try {
@@ -5701,7 +5756,7 @@ async function addDualToTradeRecord(){
         body: JSON.stringify({
           mode: 'dual', underlying: d.code, contract: l.contract, batch: batch,
           op_type: 'open', direction: 'buy', call_put: l.cp, open_date: today,
-          open_price: l.prem, qty: l.qty, premium: l.total, open_delta: l.delta,
+          open_price: l.price, qty: l.qty, premium: l.total, open_delta: l.delta,
           iv: _ivNum, iv_pct: _ivPctNum,
           note: '来自开仓计算器 · ' + d.contract + ' ' + d.month + ' 双买' + _ivNote,
         })});
@@ -7207,7 +7262,8 @@ const TradeUI = {
           body: JSON.stringify({
             mode: 'dual', underlying: u, contract: contract, batch: batch,
             op_type: 'open', direction: 'buy', call_put: l.cp, open_date: date,
-            open_price: prem, qty: l.qty, premium: prem * l.qty,
+            open_price: l.price,                            // v50.67: 存期权价格, 不乘乘数
+            qty: l.qty, premium: prem * l.qty,
             open_delta: l.delta,
             iv: ivOk ? iv : null, iv_pct: ivPctOk ? ivPct : null,
             note: (($('dmNote').value || '').trim() || ('手动新建 · 双买 ' + u + month + ' 两腿' + ivNote)),
