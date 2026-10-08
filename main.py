@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5067            # 与 README 版本号 v50.67 对齐(数值比较用于单实例接管)
+APP_VERSION = 5068            # 与 README 版本号 v50.68 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -6109,6 +6109,10 @@ function renderPlans(){
   }).join('');
 }
 function saveCurrentPlan(){
+  /* ⚠ v50.68: 所有参数一律存**输入框里的原始字符串**, 不要再 fmtTrim。
+     fmtTrim 是 toFixed(2) —— 会把 delta 0.3921 四舍五入成 0.39、把 tick=0.005 的国债价
+     105.335 变成 105.34。用户要求「输入多少就是多少」, 所以原样留档、调出也原样回填。 */
+  const rawVal = id => { const el = $(id); return el ? String(el.value || '').trim() : ''; };
   /* 期权双买(v50.59): 保存 标的 / 合约年月 / 两腿(行权价·delta·每手权利金) / 风险额度 / 权益 */
   if (curMode === 'dual'){
     if (!selCode.D){ alert('请先选择开仓标的'); return; }
@@ -6127,13 +6131,13 @@ function saveCurrentPlan(){
       [String(x.code).toLowerCase(), x.month, parseFloat(x.callStrike), parseFloat(x.putStrike)].join('|') !== sigD);
     planListD.unshift({
       code: cd.code, contract: cd.name, month: month,
-      callStrike: fmtTrim(cS), callDelta: fmtTrim(cD), callPremium: fmtTrim(cP),
-      callPrice: $('callPrice').value || '',          // v50.60 期权价格(与每手权利金联动, 一并留档)
-      putStrike: fmtTrim(pS), putDelta: fmtTrim(pD), putPremium: fmtTrim(pP),
-      putPrice: $('putPrice').value || '',
-      iv: $('dualIv').value || '', ivPct: $('dualIvPct').value || '',   // v50.61
-      riskPct: fmtTrim(parseFloat($('riskAmountD').value) || 3),
-      eqWan: fmtTrim(eqWanD),
+      callStrike: rawVal('callStrike'), callDelta: rawVal('callDelta'), callPremium: rawVal('callPremium'),
+      callPrice: rawVal('callPrice'),                  // v50.60 期权价格(与每手权利金联动, 一并留档)
+      putStrike: rawVal('putStrike'), putDelta: rawVal('putDelta'), putPremium: rawVal('putPremium'),
+      putPrice: rawVal('putPrice'),
+      iv: rawVal('dualIv'), ivPct: rawVal('dualIvPct'),   // v50.61
+      riskPct: String($('riskAmountD').value || '3'),
+      eqWan: rawVal('equity'),
       qtyC: (lastCalcD && lastCalcD.call) ? lastCalcD.call.qty : '',
       qtyP: (lastCalcD && lastCalcD.put) ? lastCalcD.put.qty : '',
       premiumTotal: (lastCalcD ? fmtTrim(lastCalcD.total_premium) : ''),
@@ -6157,9 +6161,9 @@ function saveCurrentPlan(){
     planListO.unshift({
       code: co.code,
       contract: co.name,
-      entry: fmtTrim(prem),
-      riskPct: fmtTrim(parseFloat($('riskAmountO').value) || 3),
-      eqWan: fmtTrim(eqWanO),
+      entry: rawVal('entryO'),
+      riskPct: String($('riskAmountO').value || '3'),
+      eqWan: rawVal('equity'),
     });
     persistPlans();
     return;
@@ -6182,12 +6186,12 @@ function saveCurrentPlan(){
     code: c.code,
     contract: c.name,
     dir: dirF,
-    entry: fmtTrim(entry),
-    stop: fmtTrim(stop),
-    target: fmtTrim(target),
+    entry: rawVal('entry'),
+    stop: rawVal('stop'),
+    target: rawVal('target'),
     mr: parseFloat($('marginRate').value) || 16,
-    riskPct: fmtTrim(parseFloat($('riskAmount').value) || 1),
-    eqWan: fmtTrim(eqWan),
+    riskPct: String($('riskAmount').value || '1'),
+    eqWan: rawVal('equity'),
   });
   persistPlans();
 }
@@ -6221,8 +6225,8 @@ function recallPlan(p){
     $('dualIv').value = p.iv || ''; $('dualIvPct').value = p.ivPct || '';   // v50.61
     if (p.callPrice) $('callPrice').value = p.callPrice;                     // v50.60 期权价格
     if (p.putPrice)  $('putPrice').value = p.putPrice;
-    $('callDelta').value = fmtDelta4(p.callDelta);                           // v50.62 delta 统一 4 位
-    $('putDelta').value = fmtDelta4(p.putDelta);
+    // ⚠ v50.68: 这里**不再**用 fmtDelta4 重新格式化 —— 存的就是用户输入的原文(0.3921 就是 0.3921),
+    //   之前 "存 fmtTrim(2位) + 调出 fmtDelta4(4位)" 一来一回把精度丢了(0.3921 → 0.3900)
     updateDualLegUI();
     const wantD = Number(p.riskPct);
     if ([0.5, 1, 1.5, 2, 3].indexOf(wantD) >= 0) $('riskAmountD').value = String(wantD);

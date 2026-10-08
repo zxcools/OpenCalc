@@ -2706,6 +2706,67 @@ async function main() {
         && Math.abs(v67.hB.C.premEach - 1500) < 0.5,
         JSON.stringify(v67.hB));
 
+  // ===== v50.68: 保存方案不许四舍五入(delta 4 位小数必须原样留住) =====
+  const v68Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const choose = (inputId, code) => { const el = q(inputId);
+      el.value = code; el.dispatchEvent(new Event('input'));
+      el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); };
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(400);
+    // ---- A) 双买: 4 位小数 delta ----
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(500);
+    choose('cSearchD', 'lc'); await w(900);
+    q('equity').value = '90'; q('equity').dispatchEvent(new Event('input'));
+    q('dualMonth').value = '2611';
+    q('callStrike').value = '144000'; q('callDelta').value = '0.3921';
+    q('callDelta').dispatchEvent(new Event('input'));
+    q('callPrice').value = '9800'; q('callPrice').dispatchEvent(new Event('input'));
+    q('putStrike').value = '120000'; q('putDelta').value = '-0.3127';
+    q('putDelta').dispatchEvent(new Event('input'));
+    q('putPrice').value = '8500'; q('putPrice').dispatchEvent(new Event('input'));
+    await w(900);
+    saveCurrentPlan(); await w(400);
+    const pD = (JSON.parse(localStorage.getItem('oc_dual_plans') || '[]')[0]) || {};
+    // 清空后调出 → 回填必须与保存时一字不差
+    q('callDelta').value = ''; q('putDelta').value = ''; q('callStrike').value = '';
+    recallPlan(JSON.parse(localStorage.getItem('oc_dual_plans') || '[]')[0]);
+    await w(700);
+    const backD = {c: q('callDelta').value, p: q('putDelta').value, s: q('callStrike').value,
+                   ivBefore: q('dualIv').value};
+    // ---- B) 期货: tick=0.005 的国债价 + 权益带小数 ----
+    document.querySelector('.mode[data-mode="futures"]').click(); await w(400);
+    choose('cSearch', 'TF'); await w(900);
+    q('equity').value = '12.345'; q('equity').dispatchEvent(new Event('input'));
+    q('entry').value = '105.335'; q('stop').value = '104.8'; q('target').value = '106.02';
+    onInput(); await w(1100);
+    saveCurrentPlan(); await w(400);
+    const pf = (JSON.parse(localStorage.getItem('oc_futures_plans') || '[]')[0]) || {};
+    q('entry').value = ''; q('equity').value = '';
+    recallPlan(pf); await w(700);
+    const backF = {e: q('entry').value, s: q('stop').value, t: q('target').value, eq: q('equity').value};
+    // 收尾: 别把方案留给后面的用例
+    localStorage.removeItem('oc_futures_plans');
+    localStorage.removeItem('oc_dual_plans');
+    localStorage.removeItem('oc_options_plans');
+    loadPlans();
+    renderPlans();
+    return JSON.stringify({pD, backD, pf, backF});
+  })()`);
+  const v68 = JSON.parse(v68Run);
+  check('方案不四舍五入(v50.68): 双买 4 位小数 delta 原样存进方案(0.3921 不变 0.39)',
+        v68.pD.callDelta === '0.3921' && v68.pD.putDelta === '-0.3127',
+        JSON.stringify({c: v68.pD.callDelta, p: v68.pD.putDelta}));
+  check('方案不四舍五入(v50.68): 调出方案后输入框回填也是 0.3921(不再变 0.3900)',
+        v68.backD.c === '0.3921' && v68.backD.p === '-0.3127' && v68.backD.s === '144000',
+        JSON.stringify(v68.backD));
+  check('方案不四舍五入(v50.68): 期货 tick=0.005 的价格不再被抹成 2 位(105.335 保住)',
+        v68.pf.entry === '105.335' && v68.pf.stop === '104.8' && v68.pf.target === '106.02',
+        JSON.stringify({e: v68.pf.entry, s: v68.pf.stop, t: v68.pf.target}));
+  check('方案不四舍五入(v50.68): 权益带小数也原样(12.345 万, 不进位成 12.35)',
+        v68.pf.eqWan === '12.345' && v68.backF.eq === '12.345' && v68.backF.e === '105.335',
+        JSON.stringify({eq: v68.pf.eqWan, back: v68.backF}));
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
