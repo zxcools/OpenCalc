@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5068            # 与 README 版本号 v50.68 对齐(数值比较用于单实例接管)
+APP_VERSION = 5069            # 与 README 版本号 v50.69 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -48,6 +48,12 @@ IDLE_EXIT_SECONDS = 7200     # 无请求空闲自动退出(2小时, 避免页面
 # ---------------------------------------------------------------------------
 # 合约数据表 (合约乘数: 每手对应的数量单位)
 # 结构: [code, 名称, 市场, 期货乘数, 期权乘数(None 表示与期货一致), 备注, 最小变动价位]
+# ⚠ **第 4 列「乘数」是「报价单价 → 每手金额」的乘数**(每手金额 = 报价 × 乘数) —— 不是吨位!
+#    绝大多数品种这两个数一致(报价 元/吨, 每手 N 吨), 但有个别品种报价单位不是 元/吨:
+#    jd 鸡蛋: 交易单位 5 吨/手, 但**报价单位是 元/500千克**(大商所鸡蛋期货合约第八/九条)
+#      → 报价 3500 是「3500 元/500千克」, 每手金额 = 3500 × (5吨 ÷ 0.5吨) = 3500 × 10, 所以这里写 10,
+#        备注列写成 500千克/手 表示报价口径。**写 5 会让每手金额/每手风险少算一半**(v50.69 修正)
+#    原木 lg: 报价 元/立方米, 交易单位 90 立方米/手 → 乘数 90 ✓ 一致
 # ⚠ 最小变动价位已逐个核对交易所官网/公告(最近核对 2026-09-15)。下面这些是调整过的, 改动前请再核:
 #    y 豆油 / p 棕榈油: 2→1 元/吨 (大商所〔2026〕32号, 2026-04-10 起)
 #    lc 碳酸锂: 50→20 元/吨 (广期所〔2024〕337号, 2024-12-17 结算起)
@@ -88,7 +94,7 @@ CONTRACTS = [
     ["p", "棕榈油", "大商所", 10, None, "吨/手", 1],
     ["c", "玉米", "大商所", 10, None, "吨/手", 1],
     ["cs", "玉米淀粉", "大商所", 10, None, "吨/手", 1],
-    ["jd", "鸡蛋", "大商所", 5, None, "吨/手", 1],
+    ["jd", "鸡蛋", "大商所", 10, None, "500千克/手", 1],
     ["lh", "生猪", "大商所", 16, None, "吨/手", 5],
     ["i", "铁矿石", "大商所", 100, None, "吨/手", 0.5],
     ["j", "焦炭", "大商所", 100, None, "吨/手", 0.5],
@@ -4083,6 +4089,12 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* 图表放大按钮 */
 .chartbox .ct{display:flex;align-items:center;gap:8px}
 .zoombtn{margin-left:auto;font-size:11.5px}
+/* 图表放大(v50.69): 点多了就把画布画宽, 外面套一层可横向滚动 + 一条滑块 */
+.zoomscroll{overflow-x:auto;overflow-y:hidden;height:66vh}
+.zoominner{position:relative;height:100%}
+.zoompan{display:flex;align-items:center;gap:12px;margin-top:10px}
+.zoompan-lbl{font-size:var(--fz-small);color:var(--sub);white-space:nowrap}
+.zoompan input[type=range]{flex:1;min-width:0;height:20px;accent-color:var(--accent);cursor:pointer}
 /* 中国习惯: 盈利=红, 亏损=绿 (与开仓模块一致) */
 .tbl .pos{color:var(--bad)}
 .tbl .neg{color:var(--good)}
@@ -4733,7 +4745,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <button class="btn" id="chartZoomClose">关闭</button>
       </div>
       <div class="legend" id="chartZoomLegend"></div>
-      <div style="position:relative;height:66vh"><canvas id="chartZoom"></canvas></div>
+      <!-- v50.69: 数据点多时图表画得更宽, 用下面这条滑块左右滑动查看 -->
+      <div class="zoomscroll" id="zoomScroll">
+        <div class="zoominner" id="zoomInner"><canvas id="chartZoom"></canvas></div>
+      </div>
+      <div class="zoompan hidden" id="zoomPanBar">
+        <span class="zoompan-lbl">◀ 左右滑动 ▶</span>
+        <input type="range" id="zoomPan" min="0" max="0" value="0" step="1" aria-label="左右滑动图表">
+      </div>
     </div>
   </div>
 
@@ -4900,6 +4919,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
         <label><span class="th-prem-lbl">权利金(元)</span>
           <input id="tmPremium" type="number" step="0.01" min="0" placeholder="1400">
+          <span id="tmPremiumHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
         <label id="tmPnlWrap">平仓盈亏
           <input id="tmPnl" type="number" step="0.01" placeholder="-760">
@@ -5347,7 +5367,9 @@ function pickContract(c, which){
   selCode[which] = c.code;   // 统一标记选中(所有调用路径生效; 搜索点击路径此前已赋值, 幂等)
   lastPicked[which] = c.code;   // 同步记录(方案调出路径也在此, 使后续"切换品种"判断一致)
   if(which==='F'){
-    $('unitF').textContent = c.unit.replace('吨/手','元/吨').replace('克/手','元/克').replace('千克/手','元/千克').replace('桶/手','元/桶');
+    // ⚠ 顺序有讲究: 「500千克/手」(jd) 必须先换, 否则会被下面的 '千克/手' 规则换成「500千元/克」
+    $('unitF').textContent = c.unit.replace('500千克/手','元/500千克')
+      .replace('吨/手','元/吨').replace('克/手','元/克').replace('千克/手','元/千克').replace('桶/手','元/桶');
     // 按品种最小变动价位设置价格步进(上下箭头 1 跳)
     ['entry','stop','target'].forEach(id=>{ $(id).step = c.tick; });
     updateTickHint();
@@ -5595,9 +5617,15 @@ function clearCalcCache(mode){
 /* ---- 双买: 期权价格(单价) ⇄ 每手权利金 双向换算 ----
    期权价格 = 行情里的单吨/单点报价; 每手权利金 = 期权价格 × 期权乘数
    ⚠ 乘数取当前所选标的的 opt_mult(缺省=mult), 没选标的时按 1 处理 */
-function dualOptMult(){
-  const c = CONTRACTS.find(x => String(x.code).toLowerCase() === String(selCode.D || '').toLowerCase());
+/* ---- 品种的「价格 → 每手金额」乘数(v50.69) ----
+   期权用 opt_mult, 缺省回落到期货乘数 —— 与后端 `_option_mult()` 同一口径。
+   用途: 期权权利金 = 开仓价(行情报价) × 该乘数 × 手数 */
+function optMultOf(code){
+  const c = CONTRACTS.find(x => String(x.code).toLowerCase() === String(code || '').toLowerCase());
   return (c && (c.opt_mult || c.mult)) || 1;
+}
+function dualOptMult(){
+  return optMultOf(selCode.D);
 }
 function dualUnitTxt(){
   const c = CONTRACTS.find(x => String(x.code).toLowerCase() === String(selCode.D || '').toLowerCase());
@@ -6538,6 +6566,14 @@ const TradeUI = {
     $('tmCancel').addEventListener('click', () => $('tradeModalBg').classList.add('hidden'));
     $('tradeModalBg').addEventListener('click', e => { if (e.target === $('tradeModalBg')) $('tradeModalBg').classList.add('hidden'); });
     $('tmSave').addEventListener('click', () => this.submitModal());
+    // v50.69: 期权模式「权利金」跟着「开仓价 / 数量 / 标的」自动算
+    //   ⚠ 用事件委托绑在弹窗上 —— tmContract 在不同模式下是 input / select, 直接绑元素会被换掉
+    ['input', 'change'].forEach(evt => $('tradeModalBg').addEventListener(evt, e => {
+      const id = e.target && e.target.id;
+      if (id === 'tmOpenPrice' || id === 'tmQty' || id === 'tmUnderlying' || id === 'tmContract'){
+        this.syncModalPremium();
+      }
+    }));
     // 回车保存: 在 tradeModalBg 内任意 input/select 按 Enter 直接保存(shift+enter/textarea 不触发)
     $('tradeModalBg').addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
@@ -7447,6 +7483,9 @@ const TradeUI = {
     }
     $('tmUnderlying').readOnly = preset.id ? true : (preset.underlying ? true : false);
     this.syncModalTick();     // v50.57: 价格框按当前品种的最小变动价位步进
+    // v50.69: 预填/刷新「权利金」提示; ⚠ 编辑已有记录时**不能**重算, 会把库里存的权利金覆盖掉
+    if ($('tmPremiumHint')) $('tmPremiumHint').textContent = '';
+    if (!preset.id) this.syncModalPremium();
     bg.classList.remove('hidden');
     bg.dataset.editing = preset.id || '';
   },
@@ -7465,6 +7504,27 @@ const TradeUI = {
         ? ('最小变动价位 ' + tick + '（1 跳），价格上下箭头按此步进')
         : (this.isFut() ? '选好品种/合约后按最小变动价位步进' : '');
     }
+  },
+
+  /* v50.69: 期权模式「权利金」不再手填 —— 自动 = 开仓价(行情报价) × 乘数 × 数量。
+     期货模式该字段含义是保证金, 不参与自动计算。
+     仍可手改: 改完不会被覆盖, 只有再动「开仓价 / 数量 / 标的」时才重算。 */
+  syncModalPremium(){
+    const hint = $('tmPremiumHint');
+    if (this.isFut()){ if (hint) hint.textContent = ''; return; }
+    const c = this._tickContract();
+    const mult = (c && (c.opt_mult || c.mult)) || 1;
+    const price = parseFloat($('tmOpenPrice').value);
+    const qty = parseInt($('tmQty').value || '0', 10);
+    if (!(price > 0)){
+      if (hint) hint.textContent = c ? ('每手 = 开仓价 × 乘数 ' + mult + '（填了开仓价自动算）') : '';
+      return;
+    }
+    const per = price * mult;
+    const total = qty > 0 ? per * qty : 0;
+    if (qty > 0) $('tmPremium').value = String(Math.round(total * 100) / 100);
+    if (hint) hint.textContent = '每手 ¥' + fmt(per) + ' ＝ 开仓价 ' + fmt(price) + ' × 乘数 ' + mult
+      + (qty > 0 ? '，' + qty + ' 手合计 ¥' + fmt(total) : '');
   },
 
   /* 从标的(品种代码)或手填合约里解析品种, 用来取最小变动价位 */
@@ -8480,7 +8540,7 @@ const FundUI = {
     });
   },
 
-  /* ---- 图表放大: 弹出大图查看 ---- */
+  /* ---- 图表放大: 弹出大图查看 (v50.69 加了左右滑动滑块) ---- */
   initZoom(){
     document.querySelectorAll('.zoombtn').forEach(b=>{
       b.addEventListener('click', ()=>this.openChartZoom(b.dataset.zoom));
@@ -8488,6 +8548,21 @@ const FundUI = {
     $('chartZoomClose').addEventListener('click', ()=>this.closeChartZoom());
     $('chartZoomBg').addEventListener('click', e=>{ if (e.target===$('chartZoomBg')) this.closeChartZoom(); });
     window.addEventListener('keydown', e=>{ if (e.key==='Escape') this.closeChartZoom(); });
+    // 滑块 → 图表横向滚动
+    const bar = $('zoomPan');
+    if (bar) bar.addEventListener('input', ()=>{
+      const sc = $('zoomScroll');
+      if (sc) sc.scrollLeft = parseInt(bar.value, 10) || 0;
+    });
+    // 鼠标拖 / 触控板滚动 / 缩放窗口 → 滑块跟着走
+    const sc = $('zoomScroll');
+    if (sc) sc.addEventListener('scroll', ()=>{
+      const b = $('zoomPan');
+      if (b && !b.classList.contains('hidden')) b.value = String(Math.round(sc.scrollLeft));
+    });
+    window.addEventListener('resize', ()=>{
+      if ($('chartZoomBg') && !$('chartZoomBg').classList.contains('hidden')) this.renderZoomChart();
+    });
   },
 
   openChartZoom(kind){
@@ -8500,6 +8575,8 @@ const FundUI = {
       : '<span class="lg"><i style="background:#a58ae0"></i>年末权益</span><span class="lg"><i style="background:#e78fb5"></i>年度总盈亏</span><span class="lg"><i style="background:#e2c985"></i>年化收益率（折线，右轴）</span>';
     this.zoomKind = kind;
     $('chartZoomBg').classList.remove('hidden');
+    const sc = $('zoomScroll');
+    if (sc) sc.scrollLeft = 0;                       // 每次打开都从最左边开始
     // modal 显示后再渲染, 否则 canvas 尺寸为 0
     setTimeout(()=>this.renderZoomChart(), 60);
   },
@@ -8509,12 +8586,28 @@ const FundUI = {
     if (this.chartZoom) { this.chartZoom.destroy(); this.chartZoom = null; }
   },
 
+  /* 数据点多就把画布画宽(每点至少占 zoomPerPoint 像素, 最少铺满容器) →
+     超出容器宽度时才出现左右滑动; 滑块范围 = 可滚动的像素数 */
+  syncZoomPan(n){
+    const sc = $('zoomScroll'), inner = $('zoomInner'), bar = $('zoomPanBar'), bar2 = $('zoomPan');
+    if (!sc || !inner || !bar || !bar2) return;
+    const per = this.zoomKind === 'monthly' ? 76 : 104;
+    const cw = sc.clientWidth || 900;
+    inner.style.width = Math.max(cw, Math.round(n * per)) + 'px';
+    const max = Math.max(0, inner.offsetWidth - sc.clientWidth);
+    bar.classList.toggle('hidden', max <= 2);
+    bar2.max = String(max);
+    if (parseInt(bar2.value, 10) > max) bar2.value = String(max);
+    bar2.value = String(Math.round(sc.scrollLeft));
+  },
+
   renderZoomChart(){
     if (typeof Chart === 'undefined') return;
     const isMonthly = this.zoomKind === 'monthly';
     const labels = isMonthly
       ? [...this.monthly].sort((a,b)=> (a.year-b.year) || (a.month-b.month)).map(r=> r.year + '/' + String(r.month).padStart(2,'0'))
       : [...this.yearly].sort((a,b)=>a.year-b.year).map(r=> String(r.year));
+    this.syncZoomPan(labels.length);      // ⚠ 必须在 new Chart 之前定好父容器宽度
     const d1 = isMonthly
       ? [...this.monthly].sort((a,b)=> (a.year-b.year) || (a.month-b.month)).map(r=> r.end_equity)
       : [...this.yearly].sort((a,b)=>a.year-b.year).map(r=> r.end_equity);

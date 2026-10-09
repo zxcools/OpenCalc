@@ -2767,6 +2767,115 @@ async function main() {
         v68.pf.eqWan === '12.345' && v68.backF.eq === '12.345' && v68.backF.e === '105.335',
         JSON.stringify({eq: v68.pf.eqWan, back: v68.backF}));
 
+  // ===== v50.69-A: 期权买方「权利金」= 开仓价 × 乘数 × 数量, 自动算 =====
+  const v69aRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    // ⚠ 必须 bubbles:true —— 权利金是挂在弹窗上的**事件委托**, 非冒泡的合成事件到不了那儿
+    //   (真人敲键盘产生的是冒泡的原生 input 事件, 这里要模拟成一样的)
+    const set = (id, v) => { const el = q(id); el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); };
+    // A) 期权买方: 玻璃 fg 乘数 20, 报价 7 → 每手 140, 3 手 → 420
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(1000);
+    q('btnNewOpen').click(); await w(400);
+    set('tmUnderlying', 'fg');
+    set('tmContract', 'fg2701-P-800');
+    set('tmOpenPrice', '7');
+    set('tmQty', '3');
+    await w(300);
+    const opt = {prem: q('tmPremium').value, hint: q('tmPremiumHint').textContent};
+    // 手改后不被覆盖(只有再动价格/数量才重算)
+    set('tmPremium', '999');
+    await w(150);
+    const manual = q('tmPremium').value;
+    set('tmQty', '4'); await w(200);
+    const recalc = q('tmPremium').value;
+    q('tmCancel').click(); await w(300);
+    // B) 期货模式不参与自动计算(该字段是保证金)
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(900);
+    q('btnNewOpen').click(); await w(400);
+    set('tmUnderlying', 'rb');
+    set('tmOpenPrice', '3200');
+    set('tmQty', '2');
+    await w(300);
+    const fut = {prem: q('tmPremium').value, hint: q('tmPremiumHint').textContent};
+    q('tmCancel').click(); await w(300);
+    // C) 鸡蛋 jd: 报价单位 元/500千克 → 乘数必须是 10(不是吨位 5)
+    const jd = CONTRACTS.find(x => String(x.code).toLowerCase() === 'jd') || {};
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(800);
+    q('btnNewOpen').click(); await w(400);
+    set('tmUnderlying', 'jd');
+    set('tmOpenPrice', '35');
+    set('tmQty', '2');
+    await w(300);
+    const jdPrem = q('tmPremium').value;
+    q('tmCancel').click(); await w(300);
+    return JSON.stringify({opt, manual, recalc, fut, jdMult: jd.mult, jdUnit: jd.unit, jdPrem});
+  })()`);
+  const v69a = JSON.parse(v69aRun);
+  check('期权买方权利金(v50.69): 玻璃报价 7 × 乘数 20 × 3 手 = 420, 自动填好',
+        v69a.opt.prem === '420' && /乘数 20/.test(v69a.opt.hint), JSON.stringify(v69a.opt));
+  check('期权买方权利金(v50.69): 提示写明「每手 ¥140 = 开仓价 7 × 乘数 20」',
+        /每手 ¥140/.test(v69a.opt.hint) && /3 手合计 ¥420/.test(v69a.opt.hint), v69a.opt.hint);
+  check('期权买方权利金(v50.69): 手改后不被覆盖, 动数量才重算(140×4=560)',
+        v69a.manual === '999' && v69a.recalc === '560',
+        '手改=' + v69a.manual + ' 重算=' + v69a.recalc);
+  check('期权买方权利金(v50.69): 期货模式不自动算(该字段是保证金, 保持空)',
+        v69a.fut.prem === '' && v69a.fut.hint === '', JSON.stringify(v69a.fut));
+  check('鸡蛋乘数(v50.69): 报价单位 元/500千克 → 乘数 10(修掉按吨位 5 算少一半)',
+        v69a.jdMult === 10 && v69a.jdUnit === '500千克/手' && v69a.jdPrem === '700',
+        'mult=' + v69a.jdMult + ' unit=' + v69a.jdUnit + ' 35×2 手=' + v69a.jdPrem);
+
+  // ===== v50.69-B: 资金曲线图表放大后有左右滑动滑块 =====
+  const v69bRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const rec = (y, m, ie, ee) => fetch('/api/funds/records', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({strategy:'期权买方', year:y, month:m, initial_equity:ie, end_equity:ee, cash_flow:0})});
+    // 灌 20 个月(2024-01 ~ 2025-08) → 放大后画布宽过容器, 该出现滑块
+    for (let i = 1; i <= 20; i++){
+      const y = 2024 + Math.floor((i-1)/12), m = ((i-1) % 12) + 1;
+      await rec(y, m, 100000 + i*1000, 101000 + i*1000);
+    }
+    document.querySelector('#mainTabs .maintab[data-tab="funds"]').click(); await w(900);
+    const seg = document.querySelector('#stratSeg button[data-strategy="期权买方"]');
+    if (seg) seg.click();
+    await w(900);
+    document.querySelector('.zoombtn[data-zoom="monthly"]').click(); await w(1400);
+    const bar = q('zoomPanBar'), sl = q('zoomPan'), sc = q('zoomScroll'), inner = q('zoomInner');
+    const before = {hidden: bar.classList.contains('hidden'), max: parseInt(sl.max, 10),
+                    inner: inner.offsetWidth, cw: sc.clientWidth, canvas: q('chartZoom').width};
+    sl.value = String(Math.round(parseInt(sl.max, 10) * 0.6));
+    sl.dispatchEvent(new Event('input')); await w(400);
+    const scrolled = Math.round(sc.scrollLeft);
+    sc.scrollLeft = 0; await w(300);
+    const synced = parseInt(sl.value, 10);
+    q('chartZoomClose').click(); await w(300);
+    // 年视图只有 2 个点 → 不需要滑块, 应隐藏
+    document.querySelector('.zoombtn[data-zoom="yearly"]').click(); await w(1200);
+    const yBar = q('zoomPanBar');
+    const yearHidden = yBar.classList.contains('hidden');
+    q('chartZoomClose').click(); await w(300);
+    for (let i = 1; i <= 20; i++){
+      const y = 2024 + Math.floor((i-1)/12), m = ((i-1) % 12) + 1;
+      await fetch('/api/funds/records', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({strategy:'期权买方', year:y, month:m, action:'delete'})});
+    }
+    return JSON.stringify({before, scrolled, synced, yearHidden});
+  })()`);
+  const v69b = JSON.parse(v69bRun);
+  check('图表放大滑块(v50.69): 数据点多时出现滑块, 画布比容器宽',
+        v69b.before.hidden === false && v69b.before.max > 0
+        && v69b.before.inner > v69b.before.cw + 10,
+        JSON.stringify(v69b.before));
+  check('图表放大滑块(v50.69): 拖动滑块 → 图表横向滚动到 60% 位置',
+        v69b.scrolled > 0 && Math.abs(v69b.scrolled - Math.round(v69b.before.max * 0.6)) <= 2,
+        'scrolled=' + v69b.scrolled + ' max=' + v69b.before.max);
+  check('图表放大滑块(v50.69): 手动把图表滚回最左, 滑块跟着回到 0',
+        v69b.synced === 0, String(v69b.synced));
+  check('图表放大滑块(v50.69): 点数少(年视图)时不需要滑块 → 隐藏', v69b.yearHidden === true,
+        String(v69b.yearHidden));
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

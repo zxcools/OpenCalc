@@ -112,6 +112,19 @@ check("阶梯每手浮盈 5R = 5x500 = 2500", abs(lad[3]["per_lot_profit"] - 250
 r2 = calc_futures({"equity": 1000000, "code": "rb", "direction": "long",
                    "entry": 3500, "stop": 3490, "target": 3510})
 check("盈亏比=1.0 不建议参与", r2["pl_ratio"] == 1.0 and r2["participate"] is False, str(r2["pl_ratio"]))
+
+# v50.69: 单个品种的报价单位不是「元/吨」时, 乘数是「报价→每手金额」的乘数
+#   鸡蛋 jd: 交易单位 5 吨/手, 但报价单位是 元/500千克(大商所鸡蛋期货合约第八/九条)
+#   → 报价 3500 元/500千克, 每手金额 = 3500 × 10 = 35000 元, 所以乘数写 10
+_jd = get_contract("jd")
+check("鸡蛋乘数(v50.69): 报价单位 元/500千克 → 乘数必须是 10(不是吨位 5)",
+      _jd and _jd["mult"] == 10 and _jd["unit"] == "500千克/手", str(_jd))
+_rjd = calc_futures({"equity": 1000000, "code": "jd", "direction": "long",
+                     "entry": 3500, "stop": 3450, "target": 3650})
+check("鸡蛋每手风险(v50.69): 价差 50 × 乘数 10 = 500 元(按吨位 5 会少算一半)",
+      abs(_rjd["per_lot_risk"] - 500) < 0.01, str(_rjd["per_lot_risk"]))
+check("鸡蛋每手保证金(v50.69): 3500 × 10 × 16% = 5600 元",
+      abs(_rjd["margin_per_lot"] - 5600) < 0.01, str(_rjd["margin_per_lot"]))
 check("价差10 乘数10 -> 每手风险100 -> 10000//100=100手", r2["max_lots"] == 100, str(r2["max_lots"]))
 
 # 自定义风险额度(百分比): 填 3 = 3% → 权益100万 × 3% = 30000
