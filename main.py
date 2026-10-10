@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5069            # 与 README 版本号 v50.69 对齐(数值比较用于单实例接管)
+APP_VERSION = 5070            # 与 README 版本号 v50.70 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -152,6 +152,249 @@ OPTION_MULT_OVERRIDES = {
     "HO": 100,   # 上证50股指期权
     "MO": 100,   # 中证1000股指期权
 }
+
+# ---------------------------------------------------------------------------
+# 交易所手续费率表 (v50.70)
+# 来源: 宏源期货《保证金、手续费、申报费》20250731 的「投机」表「交易所交易手续费」列
+# 结构: code -> (期货费率, 期货平今费率, 期权费率, 期权平今费率)
+#   费率写法:  数字      → 元/手
+#              ("rt", X) → 成交金额 × 万分之X   (成交金额 = 价格 × 乘数 × 手数)
+#   None 的含义: 平今/期权平今 = None → 与「期货费率 / 期权费率」相同(交易所未单列);
+#                期权费率 = None → 该品种无期权(或表里未列)
+# 本表是「交易所标准」; 实际收多少由 FEE_MARKUP 决定(宏源 = 交易所 + 0.01 元/手)
+# ⚠ 只收录「通用基准费率」: 表里那些针对**特定合约月份**的临时加收(如「2509合约万分之3」)
+#   和「临交割月第二月首个交易日起恢复原费率」的规则没有纳入 —— 那些随月份变动, 会过期
+# ---------------------------------------------------------------------------
+FEE_TABLE = {
+    # ===== 上期所 SHFE =====
+    "cu": (("rt", 0.5), ("rt", 1.0), 5.0, 0.0),   # 万分之0.5, 平今万分之1; 期权5元/手 平今0
+    "al": (3.0, None, 1.5, 0.0),
+    "zn": (3.0, 0.0, 1.5, 0.0),
+    "pb": (("rt", 0.4), 0.0, 2.0, 0.0),
+    "ni": (3.0, None, 1.5, 0.0),
+    "sn": (3.0, None, 1.5, 0.0),
+    "au": (10.0, 0.0, 2.0, 0.0),
+    "ag": (("rt", 0.1), None, 2.0, 0.0),
+    "rb": (("rt", 0.2), None, 2.0, 0.0),
+    "hc": (("rt", 0.2), None, None, None),
+    "ss": (2.0, 0.0, None, None),
+    "ru": (3.0, 0.0, 3.0, 0.0),
+    "sp": (("rt", 0.5), 0.0, None, None),
+    "bu": (("rt", 0.5), 0.0, None, None),
+    "fu": (("rt", 0.1), 0.0, None, None),
+    "wr": (("rt", 0.4), 0.0, None, None),
+    "ao": (("rt", 1), None, 3.5, 0.0),
+    "br": (("rt", 0.2), None, 0.5, 0.0),
+    # ===== 能源中心 INE =====
+    "sc": (20.0, 0.0, 10.0, 0.0),
+    "lu": (("rt", 0.1), None, None, None),
+    "nr": (("rt", 0.2), 0.0, None, None),
+    "bc": (("rt", 0.1), 0.0, None, None),
+    "ec": (("rt", 6), ("rt", 12), None, None),
+    # ===== 大商所 DCE =====
+    "m": (1.5, None, 1.0, 0.5),
+    "y": (2.5, None, 0.5, None),
+    "a": (2.0, None, 0.5, None),
+    "b": (1.0, None, 0.2, None),
+    "p": (2.5, None, 0.5, None),
+    "c": (1.2, None, 0.6, None),
+    "cs": (1.5, None, 0.2, None),
+    "jd": (("rt", 1.5), None, 0.5, None),
+    "lh": (("rt", 1), ("rt", 2), 1.5, None),
+    "i": (("rt", 1), None, 2.0, None),
+    "j": (("rt", 1), ("rt", 1.4), None, None),
+    "jm": (("rt", 1), None, None, None),
+    "l": (1.0, None, 0.5, None),
+    "pp": (1.0, None, 0.5, None),
+    "v": (1.0, None, 0.5, None),
+    "eg": (3.0, None, 0.5, None),
+    "eb": (3.0, None, 0.5, None),
+    "pg": (6.0, None, 1.0, None),
+    "rr": (1.0, None, None, None),
+    "lg": (("rt", 1), None, 1.0, None),
+    # ===== 郑商所 CZCE =====
+    "SR": (3.0, 0.0, 1.5, 0.0),
+    "CF": (4.3, 0.0, 1.5, 0.0),
+    "TA": (3.0, 0.0, 0.5, 0.0),
+    "MA": (("rt", 1), None, 0.5, 0.0),
+    "FG": (6.0, None, 0.5, 0.0),
+    "SA": (("rt", 2), None, 0.5, 0.0),
+    "UR": (("rt", 1), None, 1.0, 0.0),
+    "RM": (1.5, None, 0.8, 0.0),
+    "OI": (2.0, None, 1.5, 0.0),
+    "AP": (5.0, 20.0, 1.0, 0.0),
+    "CJ": (3.0, None, 1.0, 0.0),
+    "PF": (2.0, 0.0, 0.5, 0.0),
+    "PK": (4.0, None, 0.8, 0.0),
+    "CY": (1.0, 0.0, None, None),
+    "ZC": (150.0, None, 150.0, None),
+    "SF": (3.0, 0.0, 0.5, 0.0),
+    "SM": (3.0, 0.0, 0.5, 0.0),
+    "SH": (("rt", 1), 0.0, 2.0, 0.0),
+    "PX": (("rt", 1), 0.0, 1.0, 0.0),
+    "PR": (("rt", 0.5), 0.0, 1.0, 0.0),
+    "RS": (2.0, None, None, None),
+    "WH": (30.0, None, None, None),
+    # ===== 中金所 CFFEX =====
+    "IF": (("rt", 0.23), ("rt", 2.3), None, None),
+    "IH": (("rt", 0.23), ("rt", 2.3), None, None),
+    "IC": (("rt", 0.23), ("rt", 2.3), None, None),
+    "IM": (("rt", 0.23), ("rt", 2.3), None, None),
+    "T": (3.0, 0.0, None, None),
+    "TF": (3.0, 0.0, None, None),
+    "TL": (3.0, 0.0, None, None),
+    # ===== 广期所 GFEX =====
+    "si": (("rt", 1), 0.0, 2.0, 0.0),
+    "lc": (("rt", 0.8), None, 3.0, 0.0),
+    "ps": (("rt", 1), None, 2.0, None),
+}
+
+FEE_MARKUP = 0.01          # 宏源: 交易所标准 + 0.01 元/手(每边)
+FEE_MODE_OFF = "off"       # 不计算手续费
+FEE_MODE_EX = "ex"         # 交易所标准 + 0.01
+FEE_MODES = (FEE_MODE_OFF, FEE_MODE_EX)
+FEE_MODE_DEFAULT = FEE_MODE_EX
+
+
+def norm_fee_mode(v):
+    v = str(v or "").strip().lower()
+    return v if v in FEE_MODES else FEE_MODE_DEFAULT
+
+
+def fee_product(underlying, contract=""):
+    """从「标的」或「合约」里解析出品种代码(用于查手续费表).
+    标的可能是 rb / rb2610 / rb2610空 / fg2701-P-800 这类写法。"""
+    for raw in (underlying, contract):
+        s = str(raw or "").strip().lower()
+        if not s:
+            continue
+        m = re.match(r"^([a-z]+)", s)
+        if not m:
+            continue
+        code = m.group(1)
+        for row in CONTRACTS:
+            if row[0].lower() == code:
+                return row[0]
+    return ""
+
+
+def trade_day(date_str, time_str=""):
+    """把「日期 + 时间」换算成期货**交易日**。
+    ⚠ 夜盘(21:00 之后)属于**下一个**交易日: 周四 21:30 开的仓, 交易日是周五;
+      凌晨 00:00~02:30 是当晚夜盘的延续, 交易日就是当天(不用再往后挪)。
+      没填时间就按日盘处理(日期即交易日)。
+    """
+    d = str(date_str or "").strip()[:10]
+    if not d:
+        return ""
+    t = str(time_str or "").strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})", t)
+    if not m:
+        return d
+    if int(m.group(1)) >= 21:          # 21:00 之后 → 下一交易日
+        try:
+            return (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        except ValueError:
+            return d
+    return d
+
+
+def _fee_amount(rate, price, mult, qty, markup):
+    """按费率算一笔手续费。rate: 数字=元/手, ("rt",X)=成交金额万分之X。"""
+    if rate is None:
+        return 0.0
+    q = max(int(qty or 0), 0)
+    if q <= 0:
+        return 0.0
+    p = float(price or 0) or 0.0
+    if isinstance(rate, tuple):        # 按成交金额比例
+        return p * float(mult or 1) * q * float(rate[1]) / 10000.0 + markup * q
+    return float(rate) * q + markup * q
+
+
+def row_fee(row, mode, fee_mode, open_day=None):
+    """给一条交易记录(开/平仓)算手续费。
+    fee_mode = 'off' 直接返回 0; 'ex' = 交易所标准 + 0.01 元/手(每边)。
+    期权模式用「期权费率」; 平仓时若与开仓**同一交易日**则用「平今费率」, 否则用基准(平昨)。
+
+    ⚠ 平仓记录的 open_date 是空的(库里 close 行的 open_date 约定为 ""),
+      所以要判平今必须由调用方用 FIFO 配出「这笔平的是哪个开仓」→ 传 open_day 进来。
+      没传就退回用该行自己的 open_date/open_time(手工造的 close 行可能带)。
+    ⚠ 比例费率按成交金额算: 价格 × 乘数 × 手数 —— 期权记录的价格是单价口径(见 v50.67)。"""
+    fee_mode = norm_fee_mode(fee_mode)
+    if fee_mode == FEE_MODE_OFF:
+        return 0.0
+    code = fee_product(row.get("underlying"), row.get("contract"))
+    ent = FEE_TABLE.get(code)
+    if not ent:
+        return 0.0
+    fut_rate, fut_today, opt_rate, opt_today = ent
+    mode = str(row.get("mode") or "options").lower()
+    is_opt = mode in ("options", "dual")
+    is_close = str(row.get("op_type") or "") == "close"
+    base, today = (opt_rate, opt_today) if is_opt else (fut_rate, fut_today)
+    rate = base
+    if is_close and today is not None:
+        o_day = open_day if open_day is not None else trade_day(row.get("open_date"), row.get("open_time"))
+        c_day = trade_day(row.get("close_date"), row.get("close_time"))
+        if o_day and c_day and o_day == c_day:
+            rate = today
+    price = row.get("close_price") if is_close else row.get("open_price")
+    qty = row.get("close_qty") if is_close else row.get("qty")
+    mult = 1.0
+    c = get_contract(code)
+    if c:
+        mult = (OPTION_MULT_OVERRIDES.get(c["code"], c["opt_mult"]) if is_opt else c["mult"]) or 1
+    return _fee_amount(rate, price, mult, qty, FEE_MARKUP)
+
+
+def fee_known(row, mode=""):
+    """这条记录能不能算出费率: 费率表里有这个品种 + 该模式(期货/期权)有对应费率。
+    例: 燃料油 fu 在表里只有期货费率、没有期权费率 → 期权记录算不出来(不是 0, 是「不知道」)。
+    前端据此把手续费显示成「—」而不是「¥0」, 免得误以为该品种免手续费。"""
+    ent = FEE_TABLE.get(fee_product(row.get("underlying"), row.get("contract")))
+    if not ent:
+        return False
+    m = str(row.get("mode") or mode or "options").lower()
+    is_opt = m in ("options", "dual")
+    return (ent[2] if is_opt else ent[0]) is not None
+
+
+def fifo_open_day(opens, closes):
+    """按合约 FIFO 把每个平仓配到它实际平掉的那个开仓 → 返回 {close_id: 该开仓的交易日}。
+    用来判「平今 / 平昨」: 平仓行的 open_date 是空的, 只能这样反推。"""
+    q = {}
+    for o in sorted(opens, key=lambda x: (x.get("open_date") or "", x.get("open_time") or "", x.get("id") or 0)):
+        k = (o.get("contract") or "").strip().upper()
+        q.setdefault(k, []).append([o.get("qty") or 0, trade_day(o.get("open_date"), o.get("open_time"))])
+    out = {}
+    for c in sorted(closes, key=lambda x: (x.get("close_date") or "", x.get("close_time") or "", x.get("id") or 0)):
+        need = c.get("close_qty") or 0
+        day = ""
+        for slot in q.get((c.get("contract") or "").strip().upper(), []):
+            if need <= 0:
+                break
+            if slot[0] <= 0:
+                continue
+            take = min(need, slot[0])
+            slot[0] -= take
+            need -= take
+            if not day:
+                day = slot[1] or ""
+        out[c.get("id")] = day
+    return out
+
+
+def group_fee(items, opens, closes, mode, fee_mode):
+    """一组记录的手续费合计(开+平; 平的按 FIFO 配到的开仓判平今/平昨)"""
+    days = fifo_open_day(opens, closes)
+    tot = 0.0
+    for x in items:
+        if x.get("op_type") == "close":
+            tot += row_fee(x, mode, fee_mode, days.get(x.get("id")))
+        else:
+            tot += row_fee(x, mode, fee_mode)
+    return round(tot, 2)
 
 
 def get_contract(code: str):
@@ -1505,6 +1748,8 @@ def _db_ensure_schema(conn):
         ("batch", "TEXT"),                              # 批次号: 空=默认批次(手动新增/老数据); 非空=独立成一条主页记录
         ("iv", "REAL"),                                 # v50.61 期权: 开仓时该品种的 IV(%)
         ("iv_pct", "REAL"),                             # v50.61 期权: 当时 IV 所处百分位(%)
+        ("open_time", "TEXT"),                          # v50.70 开仓时间 HH:MM (判平今/平昨)
+        ("close_time", "TEXT"),                         # v50.70 平仓时间 HH:MM
     ])
     _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
     _ensure_cols("trade_reviews", [
@@ -1847,7 +2092,7 @@ def fund_export_backup():
     """
     return {
         "app": "期货开仓计算器",
-        "backup_version": 4,          # v50.59: 交易记录含第三种模式 dual(期权双买)
+        "backup_version": 5,          # v50.70: 交易记录多了开/平仓时间(判平今/平昨), 旧版仍可导入
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "records": fund_list_records(),
         "trades": trade_list_records(),
@@ -2128,6 +2373,8 @@ def _trade_record_to_dict(r):
         "batch": (r["batch"] if "batch" in r.keys() else "") or "",
         "iv": (r["iv"] if "iv" in r.keys() else None),
         "iv_pct": (r["iv_pct"] if "iv_pct" in r.keys() else None),
+        "open_time": ((r["open_time"] if "open_time" in r.keys() else "") or ""),
+        "close_time": ((r["close_time"] if "close_time" in r.keys() else "") or ""),
         "created_at": r["created_at"] or "",
         "updated_at": r["updated_at"] or "",
     }
@@ -2229,7 +2476,11 @@ def trade_upsert(payload):
         "close_qty", "close_price", "pnl", "close_date", "note",
         "mode", "init_stop", "init_target", "calc_json", "batch",
         "iv", "iv_pct",
+        # v50.70: 开/平仓时间(分钟级) —— 判「平今 / 平昨」用; 老记录为空 → 按日盘处理
+        "open_time", "close_time",
     )
+    payload["open_time"] = (payload.get("open_time") or "").strip()[:5]
+    payload["close_time"] = (payload.get("close_time") or "").strip()[:5]
     # 兜底: close 类型允许 qty/premium 为空(平仓字段用 close_qty/pnl 表达; API 直调漏传不报错)
     if payload.get("op_type") == "close":
         if payload.get("qty") is None:
@@ -2314,11 +2565,12 @@ def trade_delete(rec_id):
     db.execute("DELETE FROM trade_records WHERE id=?", (rec_id,))
 
 
-def trade_groups(strategy=None, mode="options"):
+def trade_groups(strategy=None, mode="options", fee_mode=FEE_MODE_DEFAULT):
     """主表汇总: 按 underlying 分组(主键=开仓标的), 输出每组:
        direction(主要方向), open_date(首次开仓), close_status(未平/部分平/全平),
-       total_pnl(已实现盈亏), last_close_date(最后平仓日).
-       mode: 'options' 期权模式 / 'futures' 期货模式 (两套记录互不可见)"""
+       total_pnl(已实现盈亏), fee_total(手续费合计), net_pnl(净盈亏), last_close_date(最后平仓日).
+       mode: 'options' 期权模式 / 'futures' 期货模式 (两套记录互不可见)
+       fee_mode: 'off' 不算手续费 / 'ex' 交易所标准+0.01 (v50.70)"""
     recs = trade_list_records(strategy, mode)
     if not recs:
         return []
@@ -2355,6 +2607,11 @@ def trade_groups(strategy=None, mode="options"):
         total_pnl = sum((x["pnl"] or 0) for x in closes)
         close_dates = [x["close_date"] for x in closes if x["close_date"]]
         last_close = max(close_dates) if close_dates else ""
+        # v50.70: 主表「开仓时间 / 平仓时间」要带分钟级时间 → 取最早开仓 / 最后平仓那笔的时间
+        _os = sorted(opens, key=lambda y: ((y.get("open_date") or ""), (y.get("open_time") or "")))
+        _cs = sorted(closes, key=lambda y: ((y.get("close_date") or ""), (y.get("close_time") or "")))
+        first_open_time = (_os[0].get("open_time") or "") if _os else ""
+        last_close_time = (_cs[-1].get("close_time") or "") if _cs else ""
         # 方向: 主方向=持仓最多的合约的方向; 无持仓取最近开仓的方向
         direction = ""
         if has_open_position:
@@ -2372,14 +2629,21 @@ def trade_groups(strategy=None, mode="options"):
             close_status = "部分平仓"
         else:
             close_status = "未平仓"
+        _fee = group_fee(items, opens, closes, mode, fee_mode)
         groups.append({
             "underlying": u,
             "batch": batch,
             "direction": direction,
             "open_date": first_open,
+            "open_time": first_open_time,
             "close_status": close_status,
             "total_pnl": round(total_pnl, 2),
+            # v50.70: 手续费合计(开+平) 与净盈亏 = 毛盈亏 − 手续费
+            "fee_total": _fee,
+            "fee_unknown": sum(1 for x in items if not fee_known(x, mode)) if norm_fee_mode(fee_mode) != FEE_MODE_OFF else 0,
+            "net_pnl": round(total_pnl - _fee, 2),
             "last_close_date": last_close,
+            "last_close_time": last_close_time,
             # 该标的用到的合约(主表搜索要能按合约号命中)
             "contracts": sorted({(x.get("contract") or "").strip() for x in items if x.get("contract")}),
         })
@@ -2454,9 +2718,11 @@ def _dual_targets(underlying, mode, holdings, opens):
     }
 
 
-def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", batch=""):
+def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", batch="",
+                 fee_mode=FEE_MODE_DEFAULT):
     """单个标的详情: 上方持仓汇总(按 contract 分组, 仅算未平仓部分加权均价), 下方操作记录(按日期升序).
-    batch: 批次号(v50.47), 只取该批次的操作记录; 空串=默认批次"""
+    batch: 批次号(v50.47), 只取该批次的操作记录; 空串=默认批次
+    fee_mode: v50.70 'off' 不算手续费 / 'ex' 交易所标准+0.01 → 每条操作带 fee, 整批带合计与净盈亏"""
     db = _fund_db()
     rows = db.execute(
         "SELECT * FROM trade_records WHERE strategy=? AND underlying=? "
@@ -2532,6 +2798,20 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
     def _op_dt(x):
         return x["open_date"] if x["op_type"] == "open" else x["close_date"]
     ops = sorted(items, key=_op_dt)
+    # v50.70: 每条操作的手续费(开+平都算) + 整批合计与净盈亏
+    #   平仓行的 open_date 空着 → 用 FIFO 配到的开仓交易日判平今/平昨
+    _days = fifo_open_day(opens, closes)
+    for _x in ops:
+        _od = _days.get(_x.get("id")) if _x["op_type"] == "close" else None
+        if _od is None:
+            _od = trade_day(_x.get("open_date"), _x.get("open_time"))
+        _x["fee"] = round(row_fee(_x, mode, fee_mode, _od), 2)
+        _x["fee_unknown"] = (not fee_known(_x, mode)) and norm_fee_mode(fee_mode) != FEE_MODE_OFF
+        _cd = trade_day(_x.get("close_date"), _x.get("close_time"))
+        _x["open_day"] = _od or ""
+        _x["close_day"] = _cd
+        _x["fee_is_today"] = bool(_x["op_type"] == "close" and _od and _cd and _od == _cd)
+    fee_total = round(sum(x["fee"] for x in ops), 2)
 
     # ⚠ v50.51: 这五项必须由**本批次自己**算出来返回给前端。
     #   原先前端 renderDetail 去主表 groups 里按 underlying 找 → 同品种有多条(不同批次)时
@@ -2566,6 +2846,10 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             "total_pnl": round(total_pnl, 2),
             "last_close_date": max(close_dates) if close_dates else "",
             "iv": _iv, "iv_pct": _iv_pct,
+            # v50.70: 手续费合计 / 净盈亏(毛盈亏 − 手续费) / 当前手续费口径
+            "fee_total": fee_total,
+            "fee_mode": norm_fee_mode(fee_mode),
+            "net_pnl": round(total_pnl - fee_total, 2),
             # v50.63: 双买止盈价测算(详情页持仓汇总上方展示) —— 前端不再自己算
             "dual_targets": _dual_targets(underlying, mode, holdings, opens),
             "holdings": holdings, "operations": ops}
@@ -2644,6 +2928,8 @@ _TRADE_IMPORT_COLS = (
     "mode", "init_stop", "init_target", "calc_json", "batch",
     # v50.61: 期权的 IV / IV 百分位(不带上 → 备份恢复后开仓时的 IV 全丢)
     "iv", "iv_pct",
+    # v50.70: 开/平仓时间(不带上 → 备份恢复后平今/平昨判不出来, 手续费会算成平昨)
+    "open_time", "close_time",
 )
 
 
@@ -2781,6 +3067,8 @@ def trade_import_record(r):
         "batch": (r.get("batch") or "").strip(),
         "iv": r.get("iv"),
         "iv_pct": r.get("iv_pct"),
+        "open_time": (r.get("open_time") or ""),
+        "close_time": (r.get("close_time") or ""),
     }
     db = _fund_db()
     if row["id"] is None:
@@ -2972,7 +3260,8 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             strategy = (qs.get("strategy") or [None])[0]   # None → 全部策略
             mode = _mode_arg(qs.get("mode"))
-            self._send(200, _json({"ok": True, "groups": trade_groups(strategy, mode)}))
+            fee_mode = (qs.get("fee") or [FEE_MODE_DEFAULT])[0]   # v50.70: off / ex
+            self._send(200, _json({"ok": True, "groups": trade_groups(strategy, mode, fee_mode)}))
 
         elif path == "/api/trades/detail":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
@@ -2980,10 +3269,11 @@ class Handler(BaseHTTPRequestHandler):
             strategy = (qs.get("strategy") or [TRADE_STRATEGY_DEFAULT])[0]
             mode = _mode_arg(qs.get("mode"))
             batch = (qs.get("batch") or [""])[0]        # v50.47: 批次号(缺省=默认批次)
+            fee_mode = (qs.get("fee") or [FEE_MODE_DEFAULT])[0]   # v50.70: off / ex
             if not underlying:
                 self._send(200, _json({"ok": False, "error": "缺少 underlying"}))
                 return
-            self._send(200, _json({"ok": True, **trade_detail(underlying, strategy, mode, batch)}))
+            self._send(200, _json({"ok": True, **trade_detail(underlying, strategy, mode, batch, fee_mode)}))
 
         elif path == "/api/trades/pool":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
@@ -3821,6 +4111,13 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
    工具栏里的 .chk 是 flex item, 会被这 14px 上边距推低(align-items:center 按 margin box 居中) */
 .chk{display:flex;align-items:center;gap:6px;font-size:var(--fz-chk);color:var(--text);cursor:pointer;white-space:nowrap;margin:0}
 .chk input{accent-color:var(--accent);margin:0}
+/* 手续费口径选择(v50.70): 与工具栏其它控件同一行同一高, ⚠ 自建控件 margin 必须归零 */
+.fee-sel{display:flex;align-items:center;gap:6px;margin:0;flex:none}
+.fee-sel .fee-lbl{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap}
+.fee-sel select{padding:5px 13px;border-radius:8px;border:1px solid var(--border);background:transparent;
+  color:var(--sub);font-size:var(--fz-btn);cursor:pointer;line-height:1.4;transition:all .2s}
+.fee-sel select:hover{color:var(--accent);border-color:var(--accent)}
+.fee-sel select:focus{outline:none;border-color:var(--accent);color:var(--text)}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
 /* 期货/期权模式切换: 带 .opt-only 的元素只在期权模式显示(v50.39) */
@@ -4158,8 +4455,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>期货模式</small></div>
     <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>多策略</small></div>
     <div class="side-extras">
-      <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记 + 计算器最近方案）">⬆</button>
-      <button class="side-btn" id="btnImport" title="导入备份（合并资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记 + 计算器最近方案）">⬇</button>
+      <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径设置）">⬆</button>
+      <button class="side-btn" id="btnImport" title="导入备份（合并资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径设置）">⬇</button>
       <button class="side-btn" id="btnDataDir" style="position:relative" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙<span id="dataRiskDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnUpdate" style="position:relative" title="检查更新">⟳<span id="updateDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
@@ -4237,6 +4534,12 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <span class="qchg" id="qChgF"></span>
           <button class="qref" id="qRefF">刷新</button>
         </div>
+
+        <!-- v50.70: 合约年月 —— 加入记录时把「合约」与「标的」都拼成年月形式(如 rb2610) -->
+        <label>合约年月（可选，如 2610）
+          <span class="dim" style="font-weight:400;font-size:var(--fz-small)">填了 → 加入记录的标的与合约都带年月</span>
+        </label>
+        <input id="futMonth" placeholder="如 2610" maxlength="4" inputmode="numeric" autocomplete="off">
 
         <div class="dirrow">
           <span class="dirlabel">持仓方向</span>
@@ -4438,7 +4741,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="dcell"><span class="k" title="每手保证金 × 手数">最大占用保证金</span><span class="v money gold" id="rMarginUsedF">—</span></div>
         </div>
         <div class="anim" style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn xs cyan" id="btnAddToTrade" title="把当前开仓价/止损价/止盈价与上面的测算结果一键写入「交易记录：期货模式」">📥 加入记录</button>
+          <button class="btn xs cyan" id="btnAddToTrade" title="把当前开仓价/止损价/止盈价与上面的测算结果一键写入「交易记录：期货模式」；上面填了合约年月，合约与标的都会带上（如 rb2610）">📥 加入记录</button>
           <span class="dim" style="font-size:11.5px">写入「交易记录：期货模式」；标的默认取品种代码，可在记录里点 ✎ 补月份</span>
         </div>
         <!-- 阶梯止盈: 以止损价差为 1R, 2R~5R 逐级目标价 (独立方块) -->
@@ -4638,6 +4941,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <label class="chk tgl" id="onlyOpenLbl"><input type="checkbox" id="tradesOnlyOpen"><span class="tgl-txt">只展示未平仓</span></label>
           <!-- 统计卡片显示/隐藏(v50.55): 状态存 localStorage, 下次打开保持上次的选择 -->
           <button class="btn xs ghost" id="btnToggleStats" title="隐藏顶部统计卡片（状态会记住）">🙈 隐藏统计</button>
+          <!-- 手续费口径(v50.70): 只影响「净盈亏」列, 不改动原始平仓盈亏 -->
+          <span class="fee-sel" title="手续费口径：影响主表「净盈亏」列（净盈亏 = 平仓盈亏 − 手续费）">
+            <span class="fee-lbl">手续费</span>
+            <select id="feeMode">
+              <option value="ex">交易所 + 0.01</option>
+              <option value="off">不计算</option>
+            </select>
+          </span>
           <span class="spacer"></span>
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
         </div>
@@ -4658,9 +4969,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="tblwrap">
               <table class="tbl trades-tbl" id="tradesTable">
                   <thead><tr>
-                    <th>开仓标的</th><th>方向</th><th>开仓时间</th>
-                    <th>是否平仓</th><th>平仓盈亏</th><th>平仓时间</th>
-                    <th>操作</th>
+            <th>开仓标的</th><th>方向</th><th>开仓时间</th>
+            <th>是否平仓</th><th>平仓盈亏</th><th>净盈亏</th><th>平仓时间</th>
+            <th>操作</th>
                   </tr></thead>
                   <tbody></tbody>
                 </table>
@@ -4714,8 +5025,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
                 <thead><tr>
                   <th>合约</th><th>日期</th><th>操作</th>
                   <th class="opt-only">delta</th><th class="opt-only">看涨看跌</th>
-                  <th>方向</th><th>数量</th><th>价格</th><th class="th-prem">权利金</th>
-                  <th>平仓盈亏</th><th>状态</th><th>备注</th><th>操作</th>
+                <th>方向</th><th>数量</th><th>价格</th><th class="th-prem">权利金</th>
+                <th>平仓盈亏</th><th>手续费</th><th>状态</th><th>备注</th><th>操作</th>
                 </tr></thead>
                 <tbody id="tdOps"></tbody>
               </table>
@@ -4873,8 +5184,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <label><span class="req">开仓日期 <i>*</i></span>
           <input id="tmOpenDate" type="date">
         </label>
+        <!-- v50.70: 时间用来判「平今 / 平昨」(夜盘 21:00 后算下一交易日); 不填就当日盘处理 -->
+        <label>开仓时间
+          <input id="tmOpenTime" type="time" step="60" title="填了才判得出平今/平昨；夜盘 21:00 之后算下一个交易日">
+        </label>
         <label>平仓日期
           <input id="tmCloseDate" type="date">
+        </label>
+        <label>平仓时间
+          <input id="tmCloseTime" type="time" step="60" title="与开仓时间同一交易日 → 按「平今」费率算手续费">
         </label>
 
         <label class="opt-only">看涨/看跌
@@ -5544,7 +5862,7 @@ $('exitBtn').addEventListener('click',()=>{
 });
 
 /* 输入事件 */
-['equity','entry','stop','target','marginRate','entryO',
+['equity','entry','stop','target','marginRate','entryO','futMonth',
  'dualMonth','callStrike','callDelta','putStrike','dualIv','dualIvPct'].forEach(id=>{
   const el = $(id);
   if (el) el.addEventListener('input',onInput);
@@ -5841,7 +6159,9 @@ function renderF(d){
   $('rFormulaF').innerHTML = '＝ 权益 <b>' + eqWanTxt + ' 万</b> × ' + pctTxt + '%';
   $('rLotsF').textContent = d.max_lots;
   $('rRatioF').textContent = d.pl_ratio.toFixed(2);
-  $('rContractF').textContent = d.contract+'（'+d.code+' · '+d.exchange+'）';
+  $('rContractF').textContent = d.contract
+    + (($('futMonth') && ($('futMonth').value || '').trim()) ? ' ' + ($('futMonth').value || '').trim() : '')
+    + '（' + d.code + ' · ' + d.exchange + '）';
   $('rMultF').textContent = d.mult+' '+d.unit;
   $('rMarginF').textContent = fmtMoney(d.margin_per_lot);
   $('rRiskF').textContent = fmtMoney(d.per_lot_risk);
@@ -5999,7 +6319,11 @@ function persistPlans(){
    ⚠ 方案存在 localStorage, 不在后端库里 → 之前备份完全没带它们, 换电脑后方案全丢 */
 function plansSnapshot(){
   loadPlans();
-  return { futures: planList.slice(), options: planListO.slice(), dual: planListD.slice() };
+  // v50.70: 手续费口径也存 localStorage, 一并打包(否则换电脑后手续费设置丢)
+  let feeMode = 'ex';
+  try { feeMode = localStorage.getItem('oc-fee-mode') || 'ex'; } catch(e){}
+  return { futures: planList.slice(), options: planListO.slice(), dual: planListD.slice(),
+           feeMode: (feeMode === 'off') ? 'off' : 'ex' };
 }
 /* 备份恢复: 把备份里的方案写回 localStorage 与本进程内存, 返回恢复的组数 */
 function plansRestore(pl){
@@ -6013,6 +6337,12 @@ function plansRestore(pl){
     try { localStorage.setItem(key, JSON.stringify(cut)); } catch(e){}
     n += cut.length;
   });
+  // v50.70: 恢复手续费口径(老备份没有这个键 → 不动本机设置)
+  //   ⚠ 不计入返回值 n —— n 的语义是「恢复了多少组方案」, 设置项不算一组
+  if (pl.feeMode === 'off' || pl.feeMode === 'ex'){
+    try { localStorage.setItem('oc-fee-mode', pl.feeMode); } catch(e){}
+    if (typeof TradeUI !== 'undefined' && TradeUI.applyFeePref) TradeUI.applyFeePref();
+  }
   if (n){ loadPlans(); renderPlans(); }
   return n;
 }
@@ -6036,8 +6366,15 @@ async function addToTradeRecord(){
   }
   const c = CONTRACTS.find(x => x.code.toLowerCase() === String(selCode.F).toLowerCase())
     || {code: selCode.F, name: selCode.F};
+  // v50.70: 合约年月(可选) —— 填了就把年月拼进合约与标的(rb → rb2610)
+  const month = ($('futMonth') ? ($('futMonth').value || '').trim() : '');
+  if (month && !/^\d{3,4}$/.test(month)){
+    alert('合约年月请填 3~4 位数字（如 2610）');
+    return;
+  }
+  const futCode = c.code + month;
   const snap = {
-    code: c.code, name: c.name, dir: dirF,
+    code: futCode, name: c.name, dir: dirF,
     entry: entry, stop: stop, target: target,
     riskPct: fmtTrim(lastCalcF.risk_percent != null ? lastCalcF.risk_percent : 1),
     budget: lastCalcF.budget,
@@ -6053,12 +6390,13 @@ async function addToTradeRecord(){
   const batch = newBatch();
   const payload = {
     mode: 'futures',
-    underlying: c.code,
-    contract: c.code,
+    underlying: futCode,      // v50.70: 标的带上合约年月(如 rb2610) → 不同月份各自成一条记录
+    contract: futCode,
     batch: batch,
     op_type: 'open',
     direction: dirF === 'short' ? 'sell' : 'buy',
     open_date: new Date().toISOString().slice(0, 10),
+    open_time: new Date().toTimeString().slice(0, 5),   // v50.70: 开仓时间(判平今/平昨用)
     call_put: '',
     open_price: entry,
     qty: lots,
@@ -6066,7 +6404,8 @@ async function addToTradeRecord(){
     init_stop: stop,
     init_target: target,
     calc_json: JSON.stringify(snap),
-    note: '来自开仓计算器 · ' + c.name + (dirF === 'short' ? ' 空头' : ' 多头')
+    note: '来自开仓计算器 · ' + c.name + (month ? ' ' + month : '')
+          + (dirF === 'short' ? ' 空头' : ' 多头')
           + ' @' + fmtTrim(entry) + ' 止损' + fmtTrim(stop) + ' 止盈' + fmtTrim(target),
   };
   try {
@@ -6081,7 +6420,7 @@ async function addToTradeRecord(){
     // 直接跳到交易记录：期货模式, 并打开该标的详情
     const tab = document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]');
     if (tab) tab.click();
-    if (typeof TradeUI !== 'undefined') TradeUI.loadDetail(c.code, batch);
+    if (typeof TradeUI !== 'undefined') TradeUI.loadDetail(futCode, batch);
   } catch (e) { alert('加入记录失败：' + e); }
 }
 
@@ -6328,6 +6667,7 @@ const TradeUI = {
   onlyOpen: false,      // 只展示未平仓
   mainQuery: '',        // 主表搜索关键词(空=不过滤)
   showAll: false,       // 是否展开全部(>10)
+  feeMode: 'ex',        // v50.70 手续费口径: 'ex' 交易所+0.01 / 'off' 不计算
 
   // 预处理: 空白是打字随手敲的 → 直接删; _ / 视为有意分段 → 统一成 '-'; 合并连续'-'; 去首尾'-'
   //   'br 2610 C 15800' -> 'br-2610-C-15800' ; 'lc2611_C_144000' -> 'lc2611-C-144000'
@@ -6472,14 +6812,20 @@ const TradeUI = {
   },
   /* 资金占用字段名: 期权 权利金 / 期货 保证金 */
   premLabel(){ return this.mode === 'futures' ? '保证金' : '权利金'; },
-  /* 接口带 mode 参数 */
-  modeQ(){ return 'mode=' + this.mode; },
+  /* 接口带 mode + 手续费口径(v50.70: 所有 groups/detail 请求都带上 fee) */
+  modeQ(){ return 'mode=' + this.mode + '&fee=' + this.feeMode; },
   isFut(){ return this.mode === 'futures'; },
 
   fmtDate(d){
     if (!d) return '—';
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
     return d;
+  },
+  /* 日期 + 时间(v50.70): 有填时间就显示成 2026-10-09 21:33 */
+  fmtDateTime(d, t){
+    const ds = this.fmtDate(d);
+    const hh = String(t || '').trim().slice(0, 5);
+    return (ds && ds !== '—' && hh) ? (ds + ' ' + hh) : ds;
   },
 
   async init(){
@@ -6491,6 +6837,9 @@ const TradeUI = {
     this.syncOnlyOpenBtn();
     $('btnToggleStats').addEventListener('click', () => this.toggleStats());
     this.applyStatsPref();        // v50.55: 恢复上次的统计卡片显隐选择(默认显示)
+    // v50.70: 手续费口径选择(交易所+0.01 / 不计算), 切换即重拉 → 净盈亏列跟着变
+    if ($('feeMode')) $('feeMode').addEventListener('change', e => this.setFeeMode(e.target.value));
+    this.applyFeePref();
     // 主表搜索框: 输入即筛选(与「只展示未平仓」叠加生效)
     $('tradesSearch').addEventListener('input', e => {
       this.mainQuery = e.target.value;
@@ -6664,6 +7013,21 @@ const TradeUI = {
     this.syncStatsToggle();
   },
 
+  /* 手续费口径(v50.70): 状态存 localStorage(oc-fee-mode), 三个模式共用;
+     切换后重拉一次数据(手续费是后端按当前口径现算的, 前端不缓存) */
+  applyFeePref(){
+    let v = 'ex';
+    try { v = localStorage.getItem('oc-fee-mode') || 'ex'; } catch (e) {}
+    this.feeMode = (v === 'off') ? 'off' : 'ex';
+    const sel = $('feeMode');
+    if (sel) sel.value = this.feeMode;
+  },
+  setFeeMode(v){
+    this.feeMode = (v === 'off') ? 'off' : 'ex';
+    try { localStorage.setItem('oc-fee-mode', this.feeMode); } catch (e) {}
+    return this.refresh();
+  },
+
   renderStats(){
     const box = $('tradeStats');
     if (!box) return;
@@ -6716,7 +7080,7 @@ const TradeUI = {
     if (tw && !(this.showAll && total > this.MAX)) { tw.style.maxHeight = ''; tw.classList.remove('capped'); }
     if (!show.length){
       const msg = q ? ('没有匹配「' + q + '」的记录') : '暂无记录，点上面「新建开仓」添加';
-      tb.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--sub)">'
+      tb.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:18px;color:var(--sub)">'
         + escHtml(msg) + '</td></tr>';
       return;
     }
@@ -6726,6 +7090,10 @@ const TradeUI = {
       const statusTag = g.close_status === '已平仓' ? 'closed' : (g.close_status === '部分平仓' ? 'partial' : 'unclosed');
       const pnl = g.total_pnl;
       const pnlCls = pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '');
+      // v50.70: 净盈亏 = 平仓盈亏 − 手续费; 手续费口径为「不计算」时两者相同, 该列显示 —
+      const net = (g.net_pnl != null) ? g.net_pnl : pnl;
+      const netCls = net > 0 ? 'pos' : (net < 0 ? 'neg' : '');
+      const fee = g.fee_total || 0;
       // v50.47: 同品种会有多条(不同批次) → 标的下面补一行合约小字, 否则两行长得一模一样分不清
       const con = (g.contracts || []).filter(Boolean);
       const conTxt = con.length ? ('<div class="u-sub">' + escHtml(con.join(' / ')) + '</div>') : '';
@@ -6735,10 +7103,11 @@ const TradeUI = {
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
         <td><b>${escHtml(nameTxt)}</b>${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
-        <td>${this.fmtDate(g.open_date)}</td>
+        <td>${this.fmtDateTime(g.open_date, g.open_time)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>
         <td class="${pnlCls}" style="font-weight:600">${pnl ? (pnl > 0 ? '+' : '') + 'CN¥' + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
-        <td>${this.fmtDate(g.last_close_date)}</td>
+        <td class="${netCls}" style="font-weight:600" title="净盈亏 = 平仓盈亏 − 手续费${fee ? '（本记录手续费合计 ¥' + fee.toLocaleString('en-US',{maximumFractionDigits:2}) + '）' : ''}${g.fee_unknown ? '（有 ' + g.fee_unknown + ' 笔费率表未收录，未计入）' : ''}">${(pnl || fee) ? (net > 0 ? '+' : '') + 'CN¥' + net.toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+        <td>${this.fmtDateTime(g.last_close_date, g.last_close_time)}</td>
         <td class="row-actions">
           <button class="iconbtn" data-act="edit" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}" title="修改开仓内容">✎</button>
           <button class="iconbtn" data-act="del" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}" title="删除该记录全部操作">🗑</button>
@@ -7067,7 +7436,7 @@ const TradeUI = {
       ? d.operations.filter(o => this.normalizeContract(o.contract).toUpperCase() === _f)
       : d.operations;
     if (!ops.length){
-      ob.innerHTML = '<tr><td colspan="' + (this.isFut() ? 10 : 13) + '" style="text-align:center;padding:14px;color:var(--sub)">' +
+      ob.innerHTML = '<tr><td colspan="' + (this.isFut() ? 11 : 14) + '" style="text-align:center;padding:14px;color:var(--sub)">' +
         (d.operations.length ? '该合约无操作记录' : '暂无操作记录') + '</td></tr>';
       return;
     }
@@ -7083,9 +7452,14 @@ const TradeUI = {
       // 权利金: 开仓显示金额, 平仓填 "/"(平仓不产生新权利金); 数量: 平仓显示 close_qty
       const premiumTxt = isOpen ? o.premium.toLocaleString('en-US',{maximumFractionDigits:2}) : '/';
       const qtyTxt = isOpen ? o.qty : (o.close_qty != null ? o.close_qty : o.qty);
+      // v50.70: 该笔的手续费(手续费口径为「不计算」时后端返回 0 → 显示 —)
+      //   ⚠ 费率表里没收录这个品种(如燃料油期权)时显示「—」而不是「¥0」, 免得误以为免手续费
+      const feeUnknown = !!o.fee_unknown;
+      const feeTxt = feeUnknown ? '—'
+        : ((o.fee > 0) ? 'CN¥' + o.fee.toLocaleString('en-US',{maximumFractionDigits:2}) : '—');
       return `<tr class="row-${opTag}">
         <td><b>${escHtml(o.contract)}</b></td>
-        <td>${this.fmtDate(dt)}</td>
+        <td>${this.fmtDateTime(dt, isOpen ? o.open_time : o.close_time)}</td>
         <td><span class="tag ${opTag}">${opTxt}</span></td>
         <td class="opt-only">${fmtDelta4(o.open_delta) || '—'}</td>
         <td class="opt-only"><span class="tag ${o.call_put==='P'?'short':(o.call_put==='C'?'long':'')}">${o.call_put==='P'?'看跌':(o.call_put==='C'?'看涨':'—')}</span></td>
@@ -7094,6 +7468,7 @@ const TradeUI = {
         <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${premiumTxt}</td>
         <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':(o.pnl<0?'-CN¥':'CN¥'))+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+        <td class="op-fee"${o.fee > 0 ? ' title="' + (isOpen ? '开仓' : (o.fee_is_today ? '平今' : '平昨')) + '手续费"' : ''}${feeUnknown ? ' title="手续费费率表里没有收录这个品种的期权费率，需要的话补进 FEE_TABLE"' : ''}>${feeTxt}</td>
         <td><span class="tag ${st.cls}">${st.txt}</span></td>
         <td class="op-note"><span class="op-note-txt"${o.note ? ' title="' + escHtml(o.note) + '"' : ''}>${o.note ? escHtml(o.note) : '—'}</span></td>
         <td class="row-actions">
@@ -7327,7 +7702,7 @@ const TradeUI = {
     // 重置
     ['tmUnderlying','tmContract','tmOpenDate','tmCloseDate','tmOpenDelta',
      'tmOpenPrice','tmClosePrice','tmQty','tmCloseQty','tmPremium','tmPnl','tmNote',
-     'tmInitStop','tmInitTarget'].forEach(id=>{ const el=$(id); if (el) el.value=''; });
+     'tmInitStop','tmInitTarget','tmOpenTime','tmCloseTime'].forEach(id=>{ const el=$(id); if (el) el.value=''; });
     $('tmCallPut').value = preset.call_put || '';
     $('tmDirection').value = preset.direction || 'buy';
     $('tmOpType').value = type;
@@ -7445,6 +7820,8 @@ const TradeUI = {
     document.getElementById('tmCallPut').parentElement.style.display = '';   // 两模式都显示
     document.getElementById('tmCallPut').disabled = !isOpen;                // 平仓自动, 只读
     document.getElementById('tmCloseDate').parentElement.style.display = isOpen ? 'none' : '';
+    document.getElementById('tmCloseTime').parentElement.style.display = isOpen ? 'none' : '';
+    document.getElementById('tmOpenTime').parentElement.style.display = isOpen ? '' : 'none';
     document.getElementById('tmCloseQtyWrap').style.display = isOpen ? 'none' : '';
     document.getElementById('tmClosePriceWrap').style.display = isOpen ? 'none' : '';
     document.getElementById('tmPnlWrap').style.display = isOpen ? 'none' : '';
@@ -7457,6 +7834,8 @@ const TradeUI = {
       else if (contractEl.dataset.contractSelect){ /* 平仓 select 设 value */ contractEl.value = preset.contract || ''; }
       $('tmOpenDate').value = preset.open_date || '';
       $('tmCloseDate').value = preset.close_date || '';
+      $('tmOpenTime').value = preset.open_time || '';
+      $('tmCloseTime').value = preset.close_time || '';
       $('tmOpenDelta').value = preset.open_delta != null ? fmtDelta4(preset.open_delta) : '';
       $('tmOpenPrice').value = preset.open_price != null ? preset.open_price : '';
       $('tmClosePrice').value = preset.close_price != null ? preset.close_price : '';
@@ -7474,6 +7853,10 @@ const TradeUI = {
       const today = new Date().toISOString().slice(0,10);
       if (isOpen) $('tmOpenDate').value = today;
       else $('tmCloseDate').value = today;
+      // v50.70: 默认带上当前时间(判平今/平昨要用); 平仓时开仓时间不好猜 → 留空由用户按需填
+      const nowHHMM = new Date().toTimeString().slice(0, 5);
+      if (isOpen) $('tmOpenTime').value = nowHHMM;
+      else $('tmCloseTime').value = nowHHMM;
       // 开仓默认 contract = underlying (用户可改); 期货不预填 —— 标的≠合约, 预填会让人以为填好了(v50.44)
       if (isOpen && preset.underlying && !this.isFut()) $('tmContract').value = preset.underlying;
       // 行内+开仓默认 delta 0.3 (v50.62: 目标 delta 字段已去掉)
@@ -7612,6 +7995,8 @@ const TradeUI = {
       underlying: $('tmUnderlying').value.trim(),
       contract: TradeUI.normalizeContract(contractVal),
       open_date: $('tmOpenDate').value,
+      open_time: ($('tmOpenTime') ? $('tmOpenTime').value : ''),
+      close_time: ($('tmCloseTime') ? $('tmCloseTime').value : ''),
       open_delta: $('tmOpenDelta').value === '' ? null : parseFloat($('tmOpenDelta').value),
       target_delta: null,        // v50.62: 「目标 delta」字段已去掉, 老数据仍保留在库里
       call_put: $('tmCallPut').value,

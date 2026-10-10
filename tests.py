@@ -125,6 +125,95 @@ check("鸡蛋每手风险(v50.69): 价差 50 × 乘数 10 = 500 元(按吨位 5 
       abs(_rjd["per_lot_risk"] - 500) < 0.01, str(_rjd["per_lot_risk"]))
 check("鸡蛋每手保证金(v50.69): 3500 × 10 × 16% = 5600 元",
       abs(_rjd["margin_per_lot"] - 5600) < 0.01, str(_rjd["margin_per_lot"]))
+
+# ===== v50.70: 手续费(交易所标准 + 0.01 元/手) =====
+print("\n== 手续费 / 交易日 ==")
+from main import (row_fee, trade_day, fifo_open_day, FEE_TABLE, fee_product,  # noqa: E402
+                  trade_groups, FEE_MARKUP)
+
+_missing_fee = [c[0] for c in CONTRACTS if c[0] not in FEE_TABLE]
+check("手续费表(v50.70): 合约表里 %d 个品种全部有费率" % len(CONTRACTS), not _missing_fee,
+      "缺: %s" % _missing_fee)
+check("手续费加成(v50.70): 宏源 = 交易所 + 0.01 元/手", abs(FEE_MARKUP - 0.01) < 1e-12, str(FEE_MARKUP))
+
+
+def _frow(**kw):
+    r = {"mode": "futures", "op_type": "open", "underlying": "", "contract": "",
+         "open_price": 0, "qty": 0, "premium": 0, "open_date": "", "open_time": "",
+         "close_price": None, "close_qty": None, "close_date": "", "close_time": ""}
+    r.update(kw)
+    return r
+
+
+check("手续费(v50.70): 定额 铝 3元/手 × 2手 + 0.01×2 = 6.02",
+      abs(row_fee(_frow(underlying="al", open_price=20000, qty=2), "futures", "ex") - 6.02) < 1e-9,
+      str(row_fee(_frow(underlying="al", open_price=20000, qty=2), "futures", "ex")))
+check("手续费(v50.70): 比例 螺纹 万分之0.2, 3500×10×2手 = 1.4 + 0.02 = 1.42",
+      abs(row_fee(_frow(underlying="rb", open_price=3500, qty=2), "futures", "ex") - 1.42) < 1e-9,
+      str(row_fee(_frow(underlying="rb", open_price=3500, qty=2), "futures", "ex")))
+check("手续费(v50.70): 不计算模式一律 0",
+      row_fee(_frow(underlying="al", open_price=20000, qty=2), "futures", "off") == 0, '')
+check("手续费(v50.70): 表里没有的品种算 0(不猜)",
+      row_fee(_frow(underlying="zzz", open_price=100, qty=1), "futures", "ex") == 0, '')
+from main import fee_known  # noqa: E402
+check("手续费(v50.70): 表里没有的品种算「未收录」而不是 0",
+      fee_known(_frow(underlying="zzz")) is False, '')
+check("手续费(v50.70): 燃料油只有期货费率 → 期权记录标记未收录(不假装免费)",
+      fee_known(_frow(underlying="fu")) is True and fee_known(_frow(mode="options", underlying="fu")) is False, '')
+check("手续费(v50.70): 有期权费率的品种(玻璃)期权记录算得出",
+      fee_known(_frow(mode="options", underlying="fg")) is True, '')
+_cf_close = dict(underlying="CF", contract="CF2701", op_type="close", close_price=15000,
+                 close_qty=2, close_date="2026-10-10", close_time="10:00")
+check("手续费(v50.70): 平今 棉花(平今0) → 只收 0.01/手 = 0.02",
+      abs(row_fee(_frow(**_cf_close), "futures", "ex", open_day="2026-10-10") - 0.02) < 1e-9,
+      str(row_fee(_frow(**_cf_close), "futures", "ex", open_day="2026-10-10")))
+check("手续费(v50.70): 平昨(不同交易日) → 按基准 4.3元/手 = 8.62",
+      abs(row_fee(_frow(**_cf_close), "futures", "ex", open_day="2026-10-09") - 8.62) < 1e-9,
+      str(row_fee(_frow(**_cf_close), "futures", "ex", open_day="2026-10-09")))
+check("手续费(v50.70): 平今比例 铜 万分之1 → 70000×5×1/10000 + 0.01 = 35.01",
+      abs(row_fee(_frow(underlying="cu", contract="cu2612", op_type="close", close_price=70000,
+                        close_qty=1, close_date="2026-10-10"), "futures", "ex",
+                  open_day="2026-10-10") - 35.01) < 1e-9, '')
+check("手续费(v50.70): 期权用「期权费率」玻璃 0.5元/手 × 3手 + 0.03 = 1.53",
+      abs(row_fee(_frow(mode="options", underlying="fg", contract="fg2701-P-800",
+                        open_price=7, qty=3), "options", "ex") - 1.53) < 1e-9, '')
+check("手续费(v50.70): 鸡蛋按 元/500千克 口径 → 3500×10×1.5/10000 + 0.01 = 5.26",
+      abs(row_fee(_frow(underlying="jd", open_price=3500, qty=1), "futures", "ex") - 5.26) < 1e-9,
+      str(row_fee(_frow(underlying="jd", open_price=3500, qty=1), "futures", "ex")))
+check("手续费(v50.70): 从「标的」或「合约」都能解析品种(fg2701空 / fg2701-P-800)",
+      fee_product("fg2701空", "") == "FG" and fee_product("", "fg2701-P-800") == "FG", '')
+check("交易日夜盘(v50.70): 21:30 开仓 → 算下一个交易日",
+      trade_day("2026-10-09", "21:30") == "2026-10-10", trade_day("2026-10-09", "21:30"))
+check("交易日(v50.70): 凌晨 01:00 是夜盘延续 → 交易日就是当天",
+      trade_day("2026-10-10", "01:00") == "2026-10-10", trade_day("2026-10-10", "01:00"))
+check("交易日(v50.70): 没填时间 → 日期即交易日(日盘)",
+      trade_day("2026-10-10", "") == "2026-10-10", trade_day("2026-10-10", ""))
+# 夜盘开的仓, 次日早盘平 —— 日期跨天但同一交易日 → 平今
+_cf_night = dict(underlying="CF", contract="CF2701", op_type="close", close_price=15000,
+                 close_qty=1, close_date="2026-10-10", close_time="09:30")
+check("平今判定(v50.70): 夜盘(10-09 21:30)开的仓, 次日 09:30 平 = 平今(只 0.01)",
+      abs(row_fee(_frow(**_cf_night), "futures", "ex", open_day=trade_day("2026-10-09", "21:30")) - 0.01) < 1e-9, '')
+check("平今判定(v50.70): 09:30 开、当天 21:30 平 → 一个日盘一个夜盘, 是平昨",
+      trade_day("2026-10-09", "09:30") != trade_day("2026-10-09", "21:30"), '')
+
+# 集成: 一组记录(开+平) → fee_total / net_pnl
+_fu = "e2efee70"
+trade_upsert({'mode': 'futures', 'underlying': _fu, 'contract': 'al2612', 'batch': 'Bfee70',
+              'op_type': 'open', 'direction': 'buy', 'open_date': '2026-10-10', 'open_time': '10:00',
+              'open_price': 20000, 'qty': 2, 'premium': 0})
+trade_upsert({'mode': 'futures', 'underlying': _fu, 'contract': 'al2612', 'batch': 'Bfee70',
+              'op_type': 'close', 'direction': 'sell', 'close_date': '2026-10-10', 'close_time': '14:00',
+              'close_qty': 2, 'close_price': 20100, 'pnl': 1000})
+_g = [x for x in trade_groups(mode="futures", fee_mode="ex") if x["underlying"] == _fu]
+check("手续费合计(v50.70): 铝 开2手+平2手 = 3.01×2 + 3.01×2 = 12.04",
+      _g and abs(_g[0]["fee_total"] - 12.04) < 1e-6, str(_g and _g[0]["fee_total"]))
+check("净盈亏(v50.70): = 平仓盈亏 1000 − 手续费 12.04 = 987.96",
+      _g and abs(_g[0]["net_pnl"] - 987.96) < 1e-6, str(_g and _g[0]["net_pnl"]))
+check("手续费口径(v50.70): 切成「不计算」→ 手续费 0 且净盈亏 = 平仓盈亏",
+      (lambda gg: bool(gg) and gg[0]["fee_total"] == 0 and abs(gg[0]["net_pnl"] - 1000) < 1e-6)(
+          [x for x in trade_groups(mode="futures", fee_mode="off") if x["underlying"] == _fu]), '')
+for _o in trade_detail(_fu, mode="futures", batch="Bfee70")["operations"]:
+    trade_delete(_o["id"])
 check("价差10 乘数10 -> 每手风险100 -> 10000//100=100手", r2["max_lots"] == 100, str(r2["max_lots"]))
 
 # 自定义风险额度(百分比): 填 3 = 3% → 权益100万 × 3% = 30000
@@ -674,7 +763,7 @@ check("期权监控池不出现在 futures 模式", not any(x['id'] == _po for x
 _rv = trade_review_upsert({'mode': 'futures', 'underlying': _mu, 'review_at': '2026-09-16T10:00',
                            'content': 'v50.50 复盘导入测试'})
 _exp = fund_export_backup()
-check("导出 backup_version=4(v50.59 含双买模式)", _exp.get('backup_version') == 4, str(_exp.get('backup_version')))
+check("导出 backup_version=5(v50.70 含开/平仓时间)", _exp.get('backup_version') == 5, str(_exp.get('backup_version')))
 check("导出含 futures 监控池(之前只导 options)", any(x['id'] == _pf for x in _exp['trade_pools']),
       str([(x['id'], x.get('mode')) for x in _exp['trade_pools']]))
 check("导出监控池带 mode 字段", all('mode' in x for x in _exp['trade_pools']))

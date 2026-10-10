@@ -2876,6 +2876,143 @@ async function main() {
   check('图表放大滑块(v50.69): 点数少(年视图)时不需要滑块 → 隐藏', v69b.yearHidden === true,
         String(v69b.yearHidden));
 
+  // ===== v50.70: 手续费(交易所+0.01) / 净盈亏列 / 开平仓时间 / 平今 / 期货合约年月 =====
+  const v70Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const post = (p) => fetch('/api/trades/upsert', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)}).then(r=>r.json());
+    const wipe = async (mode) => {
+      const g = await (await fetch('/api/trades/groups?mode=' + mode)).json();
+      for (const it of (g.groups || [])) {
+        const d = await (await fetch('/api/trades/detail?mode=' + mode + '&underlying=' + it.underlying
+          + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) {
+          await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({id: op.id})});
+        }
+      }
+    };
+    await wipe('futures'); await wipe('options');
+    // ---- A) 铜(万分之0.5, 平今万分之1): 开 1 手 70000, 同日平 1 手 71000 ----
+    await post({mode:'futures', underlying:'e2efee70', contract:'cu2612', batch:'Bv70a',
+      op_type:'open', direction:'buy', open_date:'2026-10-10', open_time:'10:00',
+      open_price:70000, qty:1, premium:0});
+    await post({mode:'futures', underlying:'e2efee70', contract:'cu2612', batch:'Bv70a',
+      op_type:'close', direction:'sell', close_date:'2026-10-10', close_time:'14:00',
+      close_qty:1, close_price:71000, pnl:5000});
+    // ---- B) 棉花(4.3元/手, 平今0): 隔一个交易日平 → 平昨 4.31; 同日平 → 平今 0.01 ----
+    await post({mode:'futures', underlying:'e2efee71', contract:'CF2701', batch:'Bv70b',
+      op_type:'open', direction:'buy', open_date:'2026-10-09', open_time:'10:00',
+      open_price:15000, qty:1, premium:0});
+    await post({mode:'futures', underlying:'e2efee71', contract:'CF2701', batch:'Bv70b',
+      op_type:'close', direction:'sell', close_date:'2026-10-10', close_time:'14:00',
+      close_qty:1, close_price:15100, pnl:500});
+    await post({mode:'futures', underlying:'e2efee72', contract:'CF2701', batch:'Bv70c',
+      op_type:'open', direction:'buy', open_date:'2026-10-10', open_time:'09:00',
+      open_price:15000, qty:1, premium:0});
+    await post({mode:'futures', underlying:'e2efee72', contract:'CF2701', batch:'Bv70c',
+      op_type:'close', direction:'sell', close_date:'2026-10-10', close_time:'14:00',
+      close_qty:1, close_price:15100, pnl:500});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(1200);
+    const readMain = () => {
+      const tr = [...document.querySelectorAll('#tradesTable tbody tr.clickable')]
+        .find(x => x.dataset.u === 'e2efee70');
+      return tr ? tr.innerText.replace(/\\s+/g, ' ').trim() : '';
+    };
+    const mainOn = readMain();
+    const heads = [...document.querySelectorAll('#tradesTable thead th')].map(t => t.textContent.trim());
+    // 详情: 操作记录里的手续费
+    await TradeUI.loadDetail('e2efee70', 'Bv70a'); await w(1200);
+    const feeHeads = [...document.querySelectorAll('#tdOps')].length
+      ? [...document.querySelectorAll('#tradeDetailPanel table.tbl')][1].tHead.rows[0] : null;
+    const opRows = [...document.querySelectorAll('#tdOps tr')].map(tr => tr.innerText.replace(/\\s+/g, ' ').trim());
+    const dA = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efee70&batch=Bv70a&fee=ex')).json();
+    const dB = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efee71&batch=Bv70b&fee=ex')).json();
+    const dC = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efee72&batch=Bv70c&fee=ex')).json();
+    const dBOff = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efee71&batch=Bv70b&fee=off')).json();
+    TradeUI.closeDetail(); await w(300);
+    // 切成「不计算」→ 净盈亏 = 平仓盈亏
+    const sel = q('feeMode');
+    sel.value = 'off'; sel.dispatchEvent(new Event('change')); await w(1300);
+    const mainOff = readMain();
+    const stored = localStorage.getItem('oc-fee-mode');
+    sel.value = 'ex'; sel.dispatchEvent(new Event('change')); await w(1200);
+    const mainBack = readMain();
+    // ---- C) 期货计算器: 合约年月 → 加入记录后标的带年月 ----
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(400);
+    document.querySelector('.mode[data-mode="futures"]').click(); await w(400);
+    const el = q('cSearch'); el.value = 'rb'; el.dispatchEvent(new Event('input'));
+    el.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); await w(900);
+    q('equity').value = '50'; q('equity').dispatchEvent(new Event('input'));
+    q('futMonth').value = '2610'; q('futMonth').dispatchEvent(new Event('input'));
+    q('entry').value = '3200'; q('stop').value = '3100'; q('target').value = '3450';
+    onInput(); await w(1200);
+    const cardTxt = q('rContractF').textContent;
+    await addToTradeRecord(); await w(2200);
+    const gsFut = (await (await fetch('/api/trades/groups?mode=futures')).json()).groups || [];
+    const rbG = gsFut.find(x => String(x.underlying).toLowerCase() === 'rb2610');
+    const dRb = rbG ? await (await fetch('/api/trades/detail?mode=futures&underlying=' + encodeURIComponent(rbG.underlying)
+      + '&batch=' + encodeURIComponent(rbG.batch || '') + '&fee=ex')).json() : {operations: []};
+    const rbOp = (dRb.operations || [])[0] || {};
+    // ---- D) 时间字段: 新建开仓默认带当前时间并落库 ----
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
+    q('btnNewOpen').click(); await w(400);
+    const timePrefilled = /^\\d{2}:\\d{2}$/.test(q('tmOpenTime').value);
+    q('tmUnderlying').value = 'fg'; q('tmUnderlying').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmContract').value = 'fg2701-P-800'; q('tmContract').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmOpenPrice').value = '7'; q('tmOpenPrice').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmQty').value = '3'; q('tmQty').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmOpenTime').value = '21:30'; q('tmOpenTime').dispatchEvent(new Event('input', {bubbles:true}));
+    await w(300);
+    const premAuto = q('tmPremium').value;
+    q('tmSave').click(); await w(2000);
+    const gsOpt = (await (await fetch('/api/trades/groups?mode=options')).json()).groups || [];
+    const fgG = gsOpt.find(x => String(x.underlying).toLowerCase() === 'fg');
+    const dFg = fgG ? await (await fetch('/api/trades/detail?mode=options&underlying=' + encodeURIComponent(fgG.underlying)
+      + '&batch=' + encodeURIComponent(fgG.batch || '') + '&fee=ex')).json() : {operations: []};
+    const fgOp = (dFg.operations || [])[0] || {};
+    await wipe('futures'); await wipe('options');
+    return JSON.stringify({mainOn, heads, opRows, dB: dB.operations.map(o => o.fee),
+                           dBtotal: dB.fee_total, dBnet: dB.net_pnl, dBoff: dBOff.fee_total,
+                           dBtoday: dB.operations.map(o => o.fee_is_today),
+                           dC: dC.operations.map(o => o.fee), dCtoday: dC.operations.map(o => o.fee_is_today),
+                           mainOff, mainBack, stored, cardTxt, rbUnd: rbG && rbG.underlying,
+                           rbContract: rbOp.contract, rbTime: rbOp.open_time, timePrefilled,
+                           premAuto, fgTime: fgOp.open_time, fgFee: fgOp.fee,
+                           aFeeTotal: dA.fee_total, aNet: dA.net_pnl});
+  })()`);
+  const v70 = JSON.parse(v70Run);
+  check('手续费(v50.70): 主表新增「净盈亏」列', v70.heads.indexOf('净盈亏') >= 0, JSON.stringify(v70.heads));
+  check('手续费(v50.70): 铜 开1手+同日平1手 = 万分之0.5×70000×5 + 万分之1×71000×5 + 0.04',
+        Math.abs(v70.aFeeTotal - (70000 * 5 * 0.5 / 10000 + 71000 * 5 * 1 / 10000 + 0.02)) < 0.02,
+        'fee=' + v70.aFeeTotal);
+  check('手续费(v50.70): 净盈亏 = 5000 − 手续费',
+        Math.abs(v70.aNet - (5000 - v70.aFeeTotal)) < 0.02, 'net=' + v70.aNet);
+  check('平今/平昨(v50.70): 棉花隔日平 = 平昨 4.31; 同日平 = 平今 0.01',
+        v70.dBtoday[1] === false && Math.abs(v70.dB[1] - 4.31) < 1e-6
+        && v70.dCtoday[1] === true && Math.abs(v70.dC[1] - 0.01) < 1e-6,
+        '平昨=' + JSON.stringify(v70.dB) + ' 平今=' + JSON.stringify(v70.dC));
+  check('手续费(v50.70): 操作记录表出现「手续费」列并显示两笔金额',
+        v70.opRows.length === 2 && v70.opRows.every(r => r.indexOf('CN¥') >= 0),
+        JSON.stringify(v70.opRows));
+  check('手续费口径(v50.70): 切「不计算」→ 手续费 0, 净盈亏 = 平仓盈亏, 且写进 localStorage',
+        v70.stored === 'off' && /CN¥5,000/.test(v70.mainOff) && !/4,946/.test(v70.mainOff),
+        'stored=' + v70.stored + ' main=' + v70.mainOff);
+  check('手续费口径(v50.70): 切回「交易所 + 0.01」→ 净盈亏重新变回扣费后的数',
+        /CN¥4,946\.98/.test(v70.mainBack), v70.mainBack);
+  check('期货合约年月(v50.70): 计算器结果卡显示带年月的合约',
+        /螺纹钢 2610/.test(v70.cardTxt), v70.cardTxt);
+  check('期货合约年月(v50.70): 加入记录后标的与合约都带年月(rb2610)',
+        v70.rbUnd === 'rb2610' && v70.rbContract === 'rb2610',
+        '标的=' + v70.rbUnd + ' 合约=' + v70.rbContract);
+  check('期货合约年月(v50.70): 加入记录时自动带上开仓时间',
+        /^\d{2}:\d{2}$/.test(v70.rbTime || ''), String(v70.rbTime));
+  check('开平仓时间(v50.70): 新建开仓默认带当前时间, 存库保留手填的 21:30',
+        v70.timePrefilled === true && v70.fgTime === '21:30', 'prefilled=' + v70.timePrefilled + ' t=' + v70.fgTime);
+  check('期权手续费(v50.70): 玻璃期权 0.5元/手 × 3 手 + 0.03 = 1.53',
+        Math.abs(v70.fgFee - 1.53) < 1e-6, String(v70.fgFee));
+
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
