@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5071            # 与 README 版本号 v50.71 对齐(数值比较用于单实例接管)
+APP_VERSION = 5072            # 与 README 版本号 v50.72 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -5269,8 +5269,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <input id="tmPremium" type="number" step="0.01" min="0" placeholder="1400">
           <span id="tmPremiumHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
-        <label id="tmPnlWrap">平仓盈亏
-          <input id="tmPnl" type="number" step="0.01" placeholder="-760">
+        <label id="tmPnlWrap"><span class="th-prem-lbl">平仓盈亏（不含手续费）</span>
+          <input id="tmPnl" type="number" step="0.01" placeholder="按 开仓价 / 平仓价 自动算">
+          <span id="tmPnlHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
 
         <label class="full">备注
@@ -6698,6 +6699,7 @@ const TradeUI = {
   mainQuery: '',        // 主表搜索关键词(空=不过滤)
   showAll: false,       // 是否展开全部(>10)
   feeMode: 'ex',        // v50.70 手续费口径: 'ex' 交易所+0.01 / 'off' 不计算
+  _closeModal: false,   // v50.72 当前弹窗是不是「平仓」(决定要不要自动算平仓盈亏)
 
   // 预处理: 空白是打字随手敲的 → 直接删; _ / 视为有意分段 → 统一成 '-'; 合并连续'-'; 去首尾'-'
   //   'br 2610 C 15800' -> 'br-2610-C-15800' ; 'lc2611_C_144000' -> 'lc2611-C-144000'
@@ -6951,10 +6953,14 @@ const TradeUI = {
     $('tmSave').addEventListener('click', () => this.submitModal());
     // v50.69: 期权模式「权利金」跟着「开仓价 / 数量 / 标的」自动算
     //   ⚠ 用事件委托绑在弹窗上 —— tmContract 在不同模式下是 input / select, 直接绑元素会被换掉
+    // v50.72: 平仓盈亏跟着「平仓价 / 平仓数量 / 合约 / 标的」自动算(不含手续费)
     ['input', 'change'].forEach(evt => $('tradeModalBg').addEventListener(evt, e => {
       const id = e.target && e.target.id;
       if (id === 'tmOpenPrice' || id === 'tmQty' || id === 'tmUnderlying' || id === 'tmContract'){
         this.syncModalPremium();
+      }
+      if (id === 'tmClosePrice' || id === 'tmCloseQty' || id === 'tmContract' || id === 'tmUnderlying'){
+        if (this._closeModal) this.syncModalPnl(true);
       }
     }));
     // 回车保存: 在 tradeModalBg 内任意 input/select 按 Enter 直接保存(shift+enter/textarea 不触发)
@@ -7813,6 +7819,8 @@ const TradeUI = {
         o.dataset.remaining = h.qty;
         o.dataset.opendir = h.direction;
         o.dataset.callput = h.call_put || '';
+        // v50.72: 平仓盈亏自动算要用「开仓均价」(持仓汇总里的加权均价)
+        o.dataset.openprice = (h.open_price != null ? h.open_price : '');
         // 期货没有看涨看跌, 文案只留 合约 + 方向 + 余量 + 均价
         o.textContent = isFut
           ? `${h.contract} ${h.direction==='buy'?'多头':'空头'} 余${h.qty}手 @均价${h.open_price}`
@@ -7930,6 +7938,12 @@ const TradeUI = {
     // v50.69: 预填/刷新「权利金」提示; ⚠ 编辑已有记录时**不能**重算, 会把库里存的权利金覆盖掉
     if ($('tmPremiumHint')) $('tmPremiumHint').textContent = '';
     if (!preset.id) this.syncModalPremium();
+    // v50.72: 平仓盈亏也自动算(不含手续费)
+    //   ⚠ 编辑已有平仓记录时**只写提示、不动输入框**(库里存的值可能是手改过的),
+    //     但只要用户改了平仓价/平仓数量/合约, 就会重算 —— 见下面的事件委托
+    if ($('tmPnlHint')) $('tmPnlHint').textContent = '';
+    this._closeModal = !isOpen;
+    if (!isOpen) this.syncModalPnl(!preset.id);
     bg.classList.remove('hidden');
     bg.dataset.editing = preset.id || '';
   },
@@ -7969,6 +7983,79 @@ const TradeUI = {
     if (qty > 0) $('tmPremium').value = String(Math.round(total * 100) / 100);
     if (hint) hint.textContent = '每手 ¥' + fmt(per) + ' ＝ 开仓价 ' + fmt(price) + ' × 乘数 ' + mult
       + (qty > 0 ? '，' + qty + ' 手合计 ¥' + fmt(total) : '');
+  },
+
+  /* v50.72: 平仓盈亏自动算 —— **不含手续费**
+     口径: 平仓盈亏 = (平仓价 − 开仓均价) × 方向系数 × 合约乘数 × 平仓手数
+       · 方向系数: 开仓是买(多头) → +1(价涨赚); 开仓是卖(空头) → −1(价跌赚)
+       · 乘数: 期货用 mult; 期权(买方/双买)用 opt_mult —— 与「权利金 = 开仓价 × 乘数 × 手数」同一口径
+       · 期权记录的开仓价/平仓价都是**单价**(行情报价口径, 见 v50.67)
+     ⚠ 仍然可以手改: 手填的值不会被覆盖, 只有再动「平仓价 / 平仓数量 / 合约 / 标的」时才重算
+     ⚠ 开仓均价来源(close 行自己不带开仓价, 库里约定 open_price=0):
+       ① 平仓下拉的选项带 data-openprice(持仓汇总的加权均价, 与详情页显示的一致)
+       ② 编辑已有平仓记录 → 从当前 detail 的 holdings / 开仓记录里按合约算加权均价
+       ③ 都取不到 → 不填, 提示让用户手填(不猜)  */
+  syncModalPnl(write = true){
+    const hint = $('tmPnlHint');
+    const wrap = $('tmPnlWrap');
+    if (!wrap || wrap.style.display === 'none'){ if (hint) hint.textContent = ''; return; }
+    const sel = $('tmContract');
+    const contract = sel ? (sel.tagName === 'SELECT'
+      ? (sel.selectedIndex >= 0 ? sel.value : '') : sel.value) : '';
+    const info = this._openAvgInfo(contract, sel);
+    const closePrice = parseFloat($('tmClosePrice').value);
+    const qty = parseInt($('tmCloseQty').value || '0', 10);
+    if (!info){
+      if (hint) hint.textContent = '这个合约找不到开仓价（可能开仓记录已删），盈亏请手动填';
+      return;
+    }
+    const mult = info.mult || 1;
+    const sign = info.direction === 'sell' ? -1 : 1;
+    const head = '开仓均价 ' + fmt(info.price) + ' × 乘数 ' + mult;
+    if (!(closePrice > 0) || !(qty > 0)){
+      if (hint) hint.textContent = '（' + head + '）填了平仓价与平仓数量就自动算（不含手续费）';
+      return;
+    }
+    const raw = (closePrice - info.price) * sign * mult * qty;
+    const val = Math.round(raw * 100) / 100;
+    if (write) $('tmPnl').value = String(val);
+    if (hint) hint.textContent = '(' + fmt(closePrice) + ' − ' + fmt(info.price) + ')'
+      + (sign < 0 ? ' × −1' : '') + ' × 乘数 ' + mult + ' × ' + qty + ' 手 = '
+      + (val > 0 ? '+' : (val < 0 ? '−' : '')) + '¥' + fmt(Math.abs(val)) + '（不含手续费）';
+  },
+
+  /* 取某个合约的「开仓均价 + 开仓方向 + 乘数」, 取不到返回 null */
+  _openAvgInfo(contract, sel){
+    const key = s => this.normalizeContract(String(s || '')).toUpperCase();
+    const cU = key(contract);
+    if (!cU) return null;
+    const c = this._tickContract();
+    const mult = c ? ((this.isFut() ? c.mult : (c.opt_mult || c.mult)) || 1) : 1;
+    // ① 平仓下拉的选项自带(持仓汇总的加权均价)
+    if (sel && sel.tagName === 'SELECT' && sel.selectedIndex >= 0){
+      const o = sel.options[sel.selectedIndex];
+      if (o && key(o.value) === cU){
+        const p = parseFloat(o.dataset.openprice);
+        if (p > 0) return {price: p, direction: o.dataset.opendir || 'buy', mult: mult, contract: o.value};
+      }
+    }
+    const d = this.detail || {};
+    // ② 当前持仓里同合约(编辑部分平仓时最常见)
+    const hit = (d.holdings || []).find(h => key(h.contract) === cU);
+    if (hit && +hit.open_price > 0){
+      return {price: +hit.open_price, direction: hit.direction || 'buy', mult: mult, contract: hit.contract};
+    }
+    // ③ 从该合约的开仓记录算加权均价(已全部平掉、holdings 为空时)
+    let sum = 0, q = 0, dir = '';
+    (d.operations || []).forEach(o => {
+      if (o.op_type !== 'open' || key(o.contract) !== cU) return;
+      const n = +o.qty || 0;
+      if (n <= 0) return;
+      sum += (+o.open_price || 0) * n; q += n;
+      if (!dir) dir = o.direction || '';
+    });
+    if (q > 0 && sum > 0) return {price: sum / q, direction: dir || 'buy', mult: mult, contract: contract};
+    return null;
   },
 
   /* 从标的(品种代码)或手填合约里解析品种, 用来取最小变动价位 */

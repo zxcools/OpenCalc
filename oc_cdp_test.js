@@ -2327,7 +2327,7 @@ async function main() {
     const hintTxt = q('dmHint').textContent.replace(/\\s+/g, ' ').trim();
     const dlgPutDelta = q('dmPutDelta').value;
     const savedOk = await TradeUI.submitDualModal();
-    await w(1600);
+    await w(2400);          // ⚠ 保存后会 refresh + loadDetail, 等不够时操作表还是空态行(旧断言会抛异常)
     const gd = await (await fetch('/api/trades/groups?mode=dual')).json();
     const grp = (gd.groups || []).find(x => String(x.underlying) === 'lc');
     let legs = [], ivIn = null, premSum = 0, opNames = [], deltaCell = '';
@@ -2343,7 +2343,8 @@ async function main() {
       opNames = [...opsTbl.tHead.rows[0].children].filter(c => c.offsetParent !== null)
         .map(c => c.textContent.trim());
       const row = opsTbl.tBodies[0].rows[0];
-      deltaCell = row ? (row.children[3] || {}).textContent.trim() : '';
+      // ⚠ 操作表还没渲染完时第一行可能是「暂无操作记录」的空态行(只有 1 个 td) → 不能直接 .trim()
+      deltaCell = (row && row.children[3] && row.children[3].textContent || '').trim();
       for (const op of (dd.operations || [])) {
         await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
       }
@@ -3242,6 +3243,127 @@ async function main() {
   check('工具栏间距(v50.55): 与上方标题的间隙已收紧(内层 wrap 不再留 28px)',
         stg.wrapPT <= 6 && stg.gapTop <= 34,
         'wrapPT=' + stg.wrapPT + ' gapTop=' + stg.gapTop + ' hdrMB=' + stg.hdrMB);
+
+  // ===== v50.72: 平仓盈亏按 开仓价/平仓价 自动算(不含手续费), 仍可手改 =====
+  const pnl72Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const set = (id, v) => { const el = q(id); el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); };
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const wipe = async (mode) => {
+      const g = await (await fetch('/api/trades/groups?mode=' + mode)).json();
+      for (const it of (g.groups || [])) {
+        const d = await (await fetch('/api/trades/detail?mode=' + mode + '&underlying='
+          + encodeURIComponent(it.underlying) + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+    };
+    await wipe('futures'); await wipe('options');
+
+    // ---- A) 期货空头: 开仓卖 3500, 平仓买 3450, 10 手 × 乘数 10 → 价跌赚 (3450-3500)×(-1)×10×10 = +5000
+    await post({mode:'futures', underlying:'rb', contract:'rb2701', batch:'Brb72',
+                op_type:'open', direction:'sell', open_date:'2026-09-01', open_time:'09:00',
+                open_price:3500, qty:10, premium:0});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(900);
+    await TradeUI.loadDetail('rb', 'Brb72'); await w(800);
+    q('tdNewClose').click(); await w(400);
+    const hintBefore = q('tmPnlHint').textContent;      // 只填了数量前: 提示里应有开仓均价
+    const pnlBefore = q('tmPnl').value;                 // 还没填平仓价 → 不写值
+    set('tmCloseQty', '10'); await w(150);
+    set('tmClosePrice', '3450'); await w(250);
+    const futShort = q('tmPnl').value;
+    const futHint = q('tmPnlHint').textContent;
+    // 手改 → 不动源输入就不会被覆盖
+    set('tmPnl', '777'); await w(150);
+    const manualKeep = q('tmPnl').value;
+    // 再动平仓数量 → 重算回来
+    set('tmCloseQty', '10'); await w(250);
+    const afterTouch = q('tmPnl').value;
+    // 改平仓价 → 跟着变: (3460-3500)×(-1)×10×10 = 4000
+    set('tmClosePrice', '3460'); await w(250);
+    const futShort2 = q('tmPnl').value;
+    // 存下去(这一批 10 手全平) → holdings 变空, 供 D) 用
+    set('tmClosePrice', '3450'); await w(200);
+    const closeSaved = await TradeUI.submitModal(); await w(800);
+    q('tradeModalBg').classList.add('hidden');
+
+    // ---- B) 期货多头: 开仓买 3500, 平仓卖 3530, 2 手 × 乘数 10 → 价涨赚 = +600
+    await post({mode:'futures', underlying:'hc', contract:'hc2701', batch:'Bhc72',
+                op_type:'open', direction:'buy', open_date:'2026-09-01', open_time:'09:00',
+                open_price:3500, qty:2, premium:0});
+    await TradeUI.refresh(); await w(600);
+    await TradeUI.loadDetail('hc', 'Bhc72'); await w(800);
+    q('tdNewClose').click(); await w(400);
+    set('tmCloseQty', '2');
+    set('tmClosePrice', '3530'); await w(250);
+    const futLong = q('tmPnl').value;
+    // 亏损方向: 平仓价低于开仓价 → 负数, 且**提示里的符号**必须是负号(不能只写 ¥600)
+    set('tmClosePrice', '3470'); await w(250);       // (3470-3500)×10×2 = -600
+    const futLoss = q('tmPnl').value;
+    const lossHint = q('tmPnlHint').textContent;
+    q('tmCancel').click(); await w(200);
+
+    // ---- C) 期权: 烧碱 SH 乘数 30, 开仓买 40 → 平 55, 2 手 → (55-40)×30×2 = +900
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
+    await post({mode:'options', underlying:'SH', contract:'SH2701C2000', batch:'Bsh72',
+                op_type:'open', direction:'buy', call_put:'C', open_date:'2026-09-02',
+                open_price:40, qty:2, premium:2400});
+    await TradeUI.refresh(); await w(600);
+    await TradeUI.loadDetail('SH', 'Bsh72'); await w(800);
+    q('tdNewClose').click(); await w(400);
+    set('tmCloseQty', '2');
+    set('tmClosePrice', '55'); await w(250);
+    const optPnl = q('tmPnl').value;
+    const optHint = q('tmPnlHint').textContent;
+    q('tmCancel').click(); await w(200);
+
+    // ---- D) 编辑已有平仓记录: holdings 已空 → 从该合约的开仓记录取均价; 库里存的值不被覆盖
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(800);
+    await TradeUI.loadDetail('rb', 'Brb72'); await w(800);
+    const holdLeft = (TradeUI.detail.holdings || []).length;
+    const closeOp = (TradeUI.detail.operations || []).filter(o => o.op_type === 'close').pop();
+    document.querySelector('#tdOps [data-edit="' + closeOp.id + '"]').click(); await w(500);
+    const editPnl = q('tmPnl').value;
+    const editHint = q('tmPnlHint').textContent;
+    set('tmClosePrice', '3400'); await w(250);          // (3400-3500)×(-1)×10×10 = +10000
+    const editRe = q('tmPnl').value;
+    q('tmCancel').click(); await w(200);
+
+    await wipe('futures'); await wipe('options');
+    return JSON.stringify({hintBefore, pnlBefore, futShort, futHint, manualKeep, afterTouch,
+                           futShort2, closeSaved: !!closeSaved, futLong, futLoss, lossHint,
+                           optPnl, optHint, holdLeft, editPnl, editHint, editRe});
+  })()`);
+  const pn72 = JSON.parse(pnl72Run);
+  check('平仓盈亏自动算(v50.72): 只填数量时先提示开仓均价, 不乱填值',
+        /开仓均价 3,500/.test(pn72.hintBefore) && /不含手续费/.test(pn72.hintBefore) && pn72.pnlBefore === '',
+        JSON.stringify({hint: pn72.hintBefore, v: pn72.pnlBefore}));
+  check('平仓盈亏自动算(v50.72): 期货空头 价跌赚 → (3450−3500)×(−1)×10×10 = 5000',
+        pn72.futShort === '5000', String(pn72.futShort));
+  check('平仓盈亏自动算(v50.72): 期货多头 价涨赚 → (3530−3500)×10×2 = 600',
+        pn72.futLong === '600', String(pn72.futLong));
+  check('平仓盈亏自动算(v50.72): 亏损是负数, 提示里也带负号 → -600 / −¥600',
+        pn72.futLoss === '-600' && / = −¥600/.test(pn72.lossHint),
+        JSON.stringify({v: pn72.futLoss, h: pn72.lossHint}));
+  check('平仓盈亏自动算(v50.72): 期权用期权乘数(SH×30) → (55−40)×30×2 = 900',
+        pn72.optPnl === '900' && /乘数 30/.test(pn72.optHint), JSON.stringify({v: pn72.optPnl, h: pn72.optHint}));
+  check('平仓盈亏(v50.72): 提示里写明算式与「不含手续费」',
+        /\(3,450 − 3,500\)/.test(pn72.futHint) && /× −1/.test(pn72.futHint) && /不含手续费/.test(pn72.futHint),
+        pn72.futHint);
+  check('平仓盈亏(v50.72): 手填的值不会被覆盖(不动源输入就保留)',
+        pn72.manualKeep === '777', String(pn72.manualKeep));
+  check('平仓盈亏(v50.72): 再动平仓数量/平仓价 就重算(777 被算回来)',
+        pn72.afterTouch === '5000' && pn72.futShort2 === '4000',
+        'afterTouch=' + pn72.afterTouch + ' 改价后=' + pn72.futShort2);
+  check('平仓盈亏(v50.72): 编辑已有平仓记录时不覆盖库里存的值(提示里给算式供对照)',
+        pn72.closeSaved && pn72.holdLeft === 0 && pn72.editPnl === '5000'
+        && /\(3,450 − 3,500\)/.test(pn72.editHint) && /\+¥5,000/.test(pn72.editHint),
+        JSON.stringify({saved: pn72.closeSaved, left: pn72.holdLeft, v: pn72.editPnl, h: pn72.editHint}));
+  check('平仓盈亏(v50.72): 持仓已清空也能从开仓记录取到均价并重算 → 10000',
+        pn72.editRe === '10000', String(pn72.editRe));
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
