@@ -2932,13 +2932,24 @@ async function main() {
     const dC = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efee72&batch=Bv70c&fee=ex')).json();
     const dBOff = await (await fetch('/api/trades/detail?mode=futures&underlying=e2efee71&batch=Bv70b&fee=off')).json();
     TradeUI.closeDetail(); await w(300);
+    // ---- v50.71: 手续费口径从 <select> 改成「两个选项平铺」的分段控件 ----
+    const feeBtn = k => document.querySelector('#feeSeg .fee-opt[data-fee="' + k + '"]');
+    const noSelect = document.getElementById('feeMode') === null;
+    const feeOpts = [...document.querySelectorAll('#feeSeg .fee-opt')]
+      .map(b => b.textContent.trim() + ':' + b.classList.contains('active'));
+    // 与旁边的「隐藏统计」按钮在同一行且竖直居中对齐(margin box 陷阱的回归测试)
+    const rSeg = document.querySelector('#feeSeg .seg').getBoundingClientRect();
+    const rBtn = document.getElementById('btnToggleStats').getBoundingClientRect();
+    const segAlign = Math.abs((rSeg.top + rSeg.height / 2) - (rBtn.top + rBtn.height / 2)) <= 1.5;
+    const segRow = Math.abs(rSeg.top - rBtn.top) < rSeg.height;
     // 切成「不计算」→ 净盈亏 = 平仓盈亏
-    const sel = q('feeMode');
-    sel.value = 'off'; sel.dispatchEvent(new Event('change')); await w(1300);
+    feeBtn('off').click(); await w(1300);
     const mainOff = readMain();
     const stored = localStorage.getItem('oc-fee-mode');
-    sel.value = 'ex'; sel.dispatchEvent(new Event('change')); await w(1200);
+    const offActive = feeBtn('off').classList.contains('active') && !feeBtn('ex').classList.contains('active');
+    feeBtn('ex').click(); await w(1200);
     const mainBack = readMain();
+    const onActive = feeBtn('ex').classList.contains('active') && feeBtn('ex').getAttribute('aria-pressed') === 'true';
     // ---- C) 期货计算器: 合约年月 → 加入记录后标的带年月 ----
     document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(400);
     document.querySelector('.mode[data-mode="futures"]').click(); await w(400);
@@ -2980,7 +2991,8 @@ async function main() {
                            mainOff, mainBack, stored, cardTxt, rbUnd: rbG && rbG.underlying,
                            rbContract: rbOp.contract, rbTime: rbOp.open_time, timePrefilled,
                            premAuto, fgTime: fgOp.open_time, fgFee: fgOp.fee,
-                           aFeeTotal: dA.fee_total, aNet: dA.net_pnl});
+                           aFeeTotal: dA.fee_total, aNet: dA.net_pnl,
+                           noSelect, feeOpts, segAlign, segRow, offActive, onActive});
   })()`);
   const v70 = JSON.parse(v70Run);
   check('手续费(v50.70): 主表新增「净盈亏」列', v70.heads.indexOf('净盈亏') >= 0, JSON.stringify(v70.heads));
@@ -3012,6 +3024,17 @@ async function main() {
         v70.timePrefilled === true && v70.fgTime === '21:30', 'prefilled=' + v70.timePrefilled + ' t=' + v70.fgTime);
   check('期权手续费(v50.70): 玻璃期权 0.5元/手 × 3 手 + 0.03 = 1.53',
         Math.abs(v70.fgFee - 1.53) < 1e-6, String(v70.fgFee));
+  // ---- v50.71: 手续费口径改成「选项平铺」的分段控件 ----
+  check('手续费口径UI(v50.71): 不再用下拉框, 两个选项同时平铺可见',
+        v70.noSelect === true && v70.feeOpts.length === 2
+        && v70.feeOpts[0].indexOf('交易所 + 0.01') === 0 && v70.feeOpts[1].indexOf('不计算') === 0,
+        JSON.stringify({noSelect: v70.noSelect, opts: v70.feeOpts}));
+  check('手续费口径UI(v50.71): 与「隐藏统计」同一行且竖直居中(±1.5px)',
+        v70.segAlign === true && v70.segRow === true,
+        'align=' + v70.segAlign + ' row=' + v70.segRow);
+  check('手续费口径UI(v50.71): 选中态跟着按钮走(点「不计算」后高亮转移)',
+        v70.offActive === true && v70.onActive === true,
+        'off=' + v70.offActive + ' on=' + v70.onActive);
 
   // ===== v50.53: 顶部统计卡片(口径 = 主表每条记录) =====
   const stRun = await evalJs(ws, `(async () => {
@@ -3059,13 +3082,37 @@ async function main() {
     const rowsAfterFilter = document.querySelectorAll('#tradesTable tbody tr.clickable').length;
     chk.checked = false; chk.dispatchEvent(new Event('change'));
     await w(500);
-    // 切到期权模式 -> 期货那 4 笔不算进来
+    // ---- v50.71: 净盈亏比(扣手续费) —— 再补 2 笔真实品种(铝 3元/手、螺纹 万分之0.2) ----
+    await post({underlying:'al', contract:'al2611', op_type:'open', direction:'buy',
+                open_date:'2026-09-01', open_price:20000, qty:2, premium:0, mode:'futures'});
+    await post({underlying:'al', contract:'al2611', op_type:'close', direction:'sell',
+                close_date:'2026-09-30', close_qty:2, close_price:20100, pnl:1000, mode:'futures'});
+    await post({underlying:'rb', contract:'rb2611', op_type:'open', direction:'buy',
+                open_date:'2026-09-01', open_price:3200, qty:10, premium:0, mode:'futures'});
+    await post({underlying:'rb', contract:'rb2611', op_type:'close', direction:'sell',
+                close_date:'2026-09-30', close_qty:10, close_price:3100, pnl:-1000, mode:'futures'});
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(600);
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(1200);
+    const nut = read();
+    const nutCard = (nut || []).find(c => c.k === '盈亏比 / 净盈亏比') || {};
+    const nutTip = (document.querySelectorAll('#tradeStats .stat-card')[3] || {})
+      .querySelector('.sv').getAttribute('title') || '';
+    const feeBtn2 = k => document.querySelector('#feeSeg .fee-opt[data-fee="' + k + '"]');
+    feeBtn2('off').click(); await w(1400);
+    const nutOff = ((read() || []).find(c => c.k === '盈亏比 / 净盈亏比') || {}).v || '';
+    feeBtn2('ex').click(); await w(1400);
+    const nutBack = ((read() || []).find(c => c.k === '盈亏比 / 净盈亏比') || {}).v || '';
+    const nutTitle = (document.querySelectorAll('#tradeStats .stat-card')[3] || {})
+      .querySelector('.sk') || {};
+    // 切到期权模式 -> 期货那几笔不算进来
     document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
     await w(1000);
     const opt = read();
     const optMode = TradeUI.mode;
     await wipe('futures'); await wipe('options');
-    return JSON.stringify({fut, afterFilter, rowsAfterFilter, opt, optMode, oneRow, gridCols});
+    return JSON.stringify({fut, afterFilter, rowsAfterFilter, opt, optMode, oneRow, gridCols,
+                           nut, nutCard, nutTip, nutOff, nutBack,
+                           nutLabel: nutTitle.textContent || ''});
   })()`);
   const stat = JSON.parse(stRun);
   const cardOf = (arr, k) => (arr || []).find(c => c.k === k) || {};
@@ -3082,8 +3129,22 @@ async function main() {
         cardOf(stat.fut, '已平仓').v === '4' && /持仓中: 0/.test(cardOf(stat.fut, '已平仓').s),
         JSON.stringify(cardOf(stat.fut, '已平仓')));
   check('统计卡(v50.53): 盈亏比 = 盈利4805 / 亏损680 = 7.07',
-        cardOf(stat.fut, '盈亏比').v === '7.07' && /盈利 4,805 \/ 亏损 680/.test(cardOf(stat.fut, '盈亏比').s),
-        JSON.stringify(cardOf(stat.fut, '盈亏比')));
+        cardOf(stat.fut, '盈亏比 / 净盈亏比').v === '7.07 / 7.07'
+        && /盈利 4,805 \/ 亏损 680/.test(cardOf(stat.fut, '盈亏比 / 净盈亏比').s),
+        JSON.stringify(cardOf(stat.fut, '盈亏比 / 净盈亏比')));
+  // ---- v50.71: 「盈亏比 / 净盈亏比」一格两值, 净 = 扣掉手续费 ----
+  check('净盈亏比(v50.71): 卡片标题改成「盈亏比 / 净盈亏比」',
+        stat.nutLabel === '盈亏比 / 净盈亏比', stat.nutLabel);
+  check('净盈亏比(v50.71): 同一格里两个比值 —— 毛 3.46 / 净 3.42(铝+螺纹的手续费把比率拉低)',
+        stat.nutCard.v === '3.46 / 3.42', String(stat.nutCard.v));
+  check('净盈亏比(v50.71): tooltip 写明毛/净两个口径与各自盈亏',
+        /未扣手续费/.test(stat.nutTip) && /扣手续费后/.test(stat.nutTip)
+        && /毛：盈利 5,805 \/ 亏损 1,680/.test(stat.nutTip)
+        && /净：盈利 5,792\.96 \/ 亏损 1,692\.8/.test(stat.nutTip), stat.nutTip);
+  check('净盈亏比(v50.71): 切「不计算」→ 两个比值相同(3.46 / 3.46)',
+        stat.nutOff === '3.46 / 3.46', String(stat.nutOff));
+  check('净盈亏比(v50.71): 切回「交易所 + 0.01」→ 净盈亏比重新变小(3.46 / 3.42)',
+        stat.nutBack === '3.46 / 3.42', String(stat.nutBack));
   check('统计卡(v50.53): 平均盈亏 = 4125 / 4 = +CN¥1,031.25',
         cardOf(stat.fut, '平均盈亏').v === '+CN¥1,031.25', JSON.stringify(cardOf(stat.fut, '平均盈亏')));
   check('统计卡(v50.53): 不受「只展示未平仓」影响(表格空了卡片不变)',

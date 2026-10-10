@@ -158,8 +158,8 @@ check("手续费(v50.70): 表里没有的品种算 0(不猜)",
 from main import fee_known  # noqa: E402
 check("手续费(v50.70): 表里没有的品种算「未收录」而不是 0",
       fee_known(_frow(underlying="zzz")) is False, '')
-check("手续费(v50.70): 燃料油只有期货费率 → 期权记录标记未收录(不假装免费)",
-      fee_known(_frow(underlying="fu")) is True and fee_known(_frow(mode="options", underlying="fu")) is False, '')
+check("手续费(v50.70): 欧线只有期货费率 → 期权记录标记未收录(不假装免费)",
+      fee_known(_frow(underlying="ec")) is True and fee_known(_frow(mode="options", underlying="ec")) is False, '')
 check("手续费(v50.70): 有期权费率的品种(玻璃)期权记录算得出",
       fee_known(_frow(mode="options", underlying="fg")) is True, '')
 _cf_close = dict(underlying="CF", contract="CF2701", op_type="close", close_price=15000,
@@ -195,6 +195,37 @@ check("平今判定(v50.70): 夜盘(10-09 21:30)开的仓, 次日 09:30 平 = �
       abs(row_fee(_frow(**_cf_night), "futures", "ex", open_day=trade_day("2026-10-09", "21:30")) - 0.01) < 1e-9, '')
 check("平今判定(v50.70): 09:30 开、当天 21:30 平 → 一个日盘一个夜盘, 是平昨",
       trade_day("2026-10-09", "09:30") != trade_day("2026-10-09", "21:30"), '')
+
+# ===== v50.71: 费率表更新到《保证金、手续费、申报费》20261009 =====
+print("\n== 手续费费率表 v50.71 ==")
+check("费率表(v50.71): 共 91 个品种(含 16 个尚未进合约表的, 先留档)",
+      len(FEE_TABLE) == 91, str(len(FEE_TABLE)))
+check("费率表(v50.71): 补齐燃料油 fu 的期权费率 → rt0.1/平今0 / 期权1元/手 平今0",
+      FEE_TABLE["fu"] == (("rt", 0.1), 0.0, 1.0, 0.0), str(FEE_TABLE["fu"]))
+check("费率表(v50.71): 焦炭 j / 焦煤 jm 补上期权费率 0.5元/手",
+      FEE_TABLE["j"][2] == 0.5 and FEE_TABLE["jm"][2] == 0.5, str((FEE_TABLE["j"], FEE_TABLE["jm"])))
+check("费率表(v50.71): 螺纹 rb 期权费率 2.0 → 1.5元/手",
+      FEE_TABLE["rb"] == (("rt", 0.2), None, 1.5, 0.0), str(FEE_TABLE["rb"]))
+check("费率表(v50.71): 热卷 hc / 石油沥青 bu / 不锈钢 ss 都补上了期权费率",
+      FEE_TABLE["hc"][2] == 2.0 and FEE_TABLE["bu"][2] == 1.0 and FEE_TABLE["ss"][2] == 1.0,
+      str((FEE_TABLE["hc"], FEE_TABLE["bu"], FEE_TABLE["ss"])))
+check("费率表(v50.71): 玻璃 FG 期货费率按新表改成 2元/手(期权 0.5 不变)",
+      FEE_TABLE["FG"] == (2.0, None, 0.5, 0.0), str(FEE_TABLE["FG"]))
+check("费率表(v50.71): 碳酸锂 lc 平今 = 万分之3.2(通用基准, 非仅某月)",
+      FEE_TABLE["lc"] == (("rt", 0.8), ("rt", 3.2), 3.0, 0.0), str(FEE_TABLE["lc"]))
+check("费率表(v50.71): 液化石油气只收通用平今 → pg 平今仍为 None(2605-2606 的 12元/手 属临时加收, 不收录)",
+      FEE_TABLE["pg"] == (6.0, None, 1.0, None), str(FEE_TABLE["pg"]))
+check("费率表(v50.71): 股指期权 IO/HO/MO 只有期权费率 15元/手(没有对应期货 → 期货费率 None)",
+      FEE_TABLE["IO"] == (None, None, 15.0, None) and FEE_TABLE["HO"] == (None, None, 15.0, None)
+      and FEE_TABLE["MO"] == (None, None, 15.0, None), str(FEE_TABLE["IO"]))
+check("费率表(v50.71): 未进合约表的品种不会误伤(取不到品种 → 0 元, fee_known=False)",
+      row_fee(_frow(underlying="ad", open_price=20000, qty=1), "futures", "ex") == 0
+      and fee_known(_frow(underlying="ad")) is False, '')
+check("手续费(v50.71): 燃料油期权 1元/手 × 2 手 + 0.02 = 2.02",
+      abs(row_fee(_frow(mode="options", underlying="fu", contract="fu2612C5200", open_price=120, qty=2),
+                  "options", "ex") - 2.02) < 1e-9,
+      str(row_fee(_frow(mode="options", underlying="fu", contract="fu2612C5200", open_price=120, qty=2),
+                  "options", "ex")))
 
 # 集成: 一组记录(开+平) → fee_total / net_pnl
 _fu = "e2efee70"

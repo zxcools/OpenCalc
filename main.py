@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5070            # 与 README 版本号 v50.70 对齐(数值比较用于单实例接管)
+APP_VERSION = 5071            # 与 README 版本号 v50.71 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -154,99 +154,122 @@ OPTION_MULT_OVERRIDES = {
 }
 
 # ---------------------------------------------------------------------------
-# 交易所手续费率表 (v50.70)
-# 来源: 宏源期货《保证金、手续费、申报费》20250731 的「投机」表「交易所交易手续费」列
+# 交易所手续费率表 (v50.71)
+# 来源: 宏源期货《保证金、手续费、申报费》20261009 的「投机」表「交易所交易手续费」列
+#   本版相对上一版(20250731): 补齐了原来缺的**期权费率**(燃料油 fu / 热卷 hc / 石油沥青 bu /
+#   不锈钢 ss / 国际铜 bc / 低硫燃料油 lu / 20号胶 nr / 漂针浆 sp / 螺纹 rb / 天然橡胶 ru /
+#   铅 pb / 焦炭 j / 焦煤 jm / 液化石油气 pg 等), 同步了交易所调整过的期货费率, 并新增了
+#   铝合金 ad / 胶版纸 op / 钯 pd / 铂 pt / 纯苯 bz / 丙烯 PL / 2年国债 TS / 股指期权 IO·HO·MO。
 # 结构: code -> (期货费率, 期货平今费率, 期权费率, 期权平今费率)
 #   费率写法:  数字      → 元/手
 #              ("rt", X) → 成交金额 × 万分之X   (成交金额 = 价格 × 乘数 × 手数)
 #   None 的含义: 平今/期权平今 = None → 与「期货费率 / 期权费率」相同(交易所未单列);
 #                期权费率 = None → 该品种无期权(或表里未列)
+#   纯期权品种(IO/HO/MO 股指期权): 没有对应期货 → 期货费率为 None
 # 本表是「交易所标准」; 实际收多少由 FEE_MARKUP 决定(宏源 = 交易所 + 0.01 元/手)
-# ⚠ 只收录「通用基准费率」: 表里那些针对**特定合约月份**的临时加收(如「2509合约万分之3」)
-#   和「临交割月第二月首个交易日起恢复原费率」的规则没有纳入 —— 那些随月份变动, 会过期
+# ⚠ 只收录「通用基准费率」: 表里那些**只针对特定合约月份**的临时加收
+#   (如 pg「2605-2606合约平今12元/手」)和「临交割月第二月首个交易日起恢复原费率」的规则
+#   没有纳入 —— 那些随月份变动, 收录进来一定会过期
+# ⚠ 标了「合约表里暂无这品种」的只是先把费率先留档(选不到该品种), 加进 CONTRACTS 后才生效
 # ---------------------------------------------------------------------------
 FEE_TABLE = {
-    # ===== 上期所 SHFE =====
-    "cu": (("rt", 0.5), ("rt", 1.0), 5.0, 0.0),   # 万分之0.5, 平今万分之1; 期权5元/手 平今0
-    "al": (3.0, None, 1.5, 0.0),
-    "zn": (3.0, 0.0, 1.5, 0.0),
-    "pb": (("rt", 0.4), 0.0, 2.0, 0.0),
-    "ni": (3.0, None, 1.5, 0.0),
-    "sn": (3.0, None, 1.5, 0.0),
-    "au": (10.0, 0.0, 2.0, 0.0),
-    "ag": (("rt", 0.1), None, 2.0, 0.0),
-    "rb": (("rt", 0.2), None, 2.0, 0.0),
-    "hc": (("rt", 0.2), None, None, None),
-    "ss": (2.0, 0.0, None, None),
-    "ru": (3.0, 0.0, 3.0, 0.0),
-    "sp": (("rt", 0.5), 0.0, None, None),
-    "bu": (("rt", 0.5), 0.0, None, None),
-    "fu": (("rt", 0.1), 0.0, None, None),
-    "wr": (("rt", 0.4), 0.0, None, None),
-    "ao": (("rt", 1), None, 3.5, 0.0),
-    "br": (("rt", 0.2), None, 0.5, 0.0),
-    # ===== 能源中心 INE =====
-    "sc": (20.0, 0.0, 10.0, 0.0),
-    "lu": (("rt", 0.1), None, None, None),
-    "nr": (("rt", 0.2), 0.0, None, None),
-    "bc": (("rt", 0.1), 0.0, None, None),
-    "ec": (("rt", 6), ("rt", 12), None, None),
-    # ===== 大商所 DCE =====
-    "m": (1.5, None, 1.0, 0.5),
-    "y": (2.5, None, 0.5, None),
-    "a": (2.0, None, 0.5, None),
-    "b": (1.0, None, 0.2, None),
-    "p": (2.5, None, 0.5, None),
-    "c": (1.2, None, 0.6, None),
-    "cs": (1.5, None, 0.2, None),
-    "jd": (("rt", 1.5), None, 0.5, None),
-    "lh": (("rt", 1), ("rt", 2), 1.5, None),
-    "i": (("rt", 1), None, 2.0, None),
-    "j": (("rt", 1), ("rt", 1.4), None, None),
-    "jm": (("rt", 1), None, None, None),
-    "l": (1.0, None, 0.5, None),
-    "pp": (1.0, None, 0.5, None),
-    "v": (1.0, None, 0.5, None),
-    "eg": (3.0, None, 0.5, None),
-    "eb": (3.0, None, 0.5, None),
-    "pg": (6.0, None, 1.0, None),
-    "rr": (1.0, None, None, None),
-    "lg": (("rt", 1), None, 1.0, None),
-    # ===== 郑商所 CZCE =====
-    "SR": (3.0, 0.0, 1.5, 0.0),
-    "CF": (4.3, 0.0, 1.5, 0.0),
-    "TA": (3.0, 0.0, 0.5, 0.0),
-    "MA": (("rt", 1), None, 0.5, 0.0),
-    "FG": (6.0, None, 0.5, 0.0),
-    "SA": (("rt", 2), None, 0.5, 0.0),
-    "UR": (("rt", 1), None, 1.0, 0.0),
-    "RM": (1.5, None, 0.8, 0.0),
-    "OI": (2.0, None, 1.5, 0.0),
-    "AP": (5.0, 20.0, 1.0, 0.0),
-    "CJ": (3.0, None, 1.0, 0.0),
-    "PF": (2.0, 0.0, 0.5, 0.0),
-    "PK": (4.0, None, 0.8, 0.0),
-    "CY": (1.0, 0.0, None, None),
-    "ZC": (150.0, None, 150.0, None),
-    "SF": (3.0, 0.0, 0.5, 0.0),
-    "SM": (3.0, 0.0, 0.5, 0.0),
-    "SH": (("rt", 1), 0.0, 2.0, 0.0),
-    "PX": (("rt", 1), 0.0, 1.0, 0.0),
-    "PR": (("rt", 0.5), 0.0, 1.0, 0.0),
-    "RS": (2.0, None, None, None),
-    "WH": (30.0, None, None, None),
-    # ===== 中金所 CFFEX =====
-    "IF": (("rt", 0.23), ("rt", 2.3), None, None),
-    "IH": (("rt", 0.23), ("rt", 2.3), None, None),
-    "IC": (("rt", 0.23), ("rt", 2.3), None, None),
-    "IM": (("rt", 0.23), ("rt", 2.3), None, None),
-    "T": (3.0, 0.0, None, None),
-    "TF": (3.0, 0.0, None, None),
-    "TL": (3.0, 0.0, None, None),
-    # ===== 广期所 GFEX =====
-    "si": (("rt", 1), 0.0, 2.0, 0.0),
-    "lc": (("rt", 0.8), None, 3.0, 0.0),
-    "ps": (("rt", 1), None, 2.0, None),
+    # ==== 上期所 SHFE ====
+    "ad":    (('rt', 0.5), 0.0, 5.0, 0.0),          # 万分之0.5, 平今0元/手; 期权5元/手 平今0元/手   ⚠ 合约表里暂无这品种
+    "ag":    (('rt', 0.1), None, 2.0, 0.0),         # 万分之0.1; 期权2元/手 平今0元/手
+    "al":    (3.0, None, 1.5, 0.0),                 # 3元/手; 期权1.5元/手 平今0元/手
+    "ao":    (('rt', 1.0), None, 3.5, 0.0),         # 万分之1; 期权3.5元/手 平今0元/手
+    "au":    (10.0, 0.0, 2.0, 0.0),                 # 10元/手, 平今0元/手; 期权2元/手 平今0元/手
+    "br":    (('rt', 0.2), None, 0.5, 0.0),         # 万分之0.2; 期权0.5元/手 平今0元/手
+    "bu":    (('rt', 0.5), 0.0, 1.0, 0.0),          # 万分之0.5, 平今0元/手; 期权1元/手 平今0元/手
+    "cu":    (('rt', 0.5), ('rt', 1.0), 5.0, 0.0),  # 万分之0.5, 平今万分之1; 期权5元/手 平今0元/手
+    "fu":    (('rt', 0.1), 0.0, 1.0, 0.0),          # 万分之0.1, 平今0元/手; 期权1元/手 平今0元/手
+    "hc":    (('rt', 0.2), None, 2.0, 0.0),         # 万分之0.2; 期权2元/手 平今0元/手
+    "ni":    (3.0, None, 1.5, 0.0),                 # 3元/手; 期权1.5元/手 平今0元/手
+    "op":    (('rt', 0.2), 0.0, 5.0, 0.0),          # 万分之0.2, 平今0元/手; 期权5元/手 平今0元/手   ⚠ 合约表里暂无这品种
+    "pb":    (('rt', 0.4), 0.0, 1.5, 0.0),          # 万分之0.4, 平今0元/手; 期权1.5元/手 平今0元/手
+    "rb":    (('rt', 0.2), None, 1.5, 0.0),         # 万分之0.2; 期权1.5元/手 平今0元/手
+    "ru":    (3.0, 0.0, 1.5, 0.0),                  # 3元/手, 平今0元/手; 期权1.5元/手 平今0元/手
+    "sn":    (3.0, None, 1.5, 0.0),                 # 3元/手; 期权1.5元/手 平今0元/手
+    "sp":    (('rt', 0.2), 0.0, 1.5, 0.0),          # 万分之0.2, 平今0元/手; 期权1.5元/手 平今0元/手
+    "ss":    (2.0, 0.0, 1.0, 0.0),                  # 2元/手, 平今0元/手; 期权1元/手 平今0元/手
+    "wr":    (('rt', 0.4), 0.0, None, None),        # 万分之0.4, 平今0元/手
+    "zn":    (3.0, 0.0, 1.5, 0.0),                  # 3元/手, 平今0元/手; 期权1.5元/手 平今0元/手
+    # ==== 能源中心 INE ====
+    "bc":    (('rt', 0.1), 0.0, 2.0, 0.0),          # 万分之0.1, 平今0元/手; 期权2元/手 平今0元/手
+    "ec":    (('rt', 6.0), ('rt', 12.0), None, None), # 万分之6, 平今万分之12
+    "lu":    (('rt', 0.1), None, 0.2, 0.0),         # 万分之0.1; 期权0.2元/手 平今0元/手
+    "nr":    (('rt', 0.2), 0.0, 1.5, 0.0),          # 万分之0.2, 平今0元/手; 期权1.5元/手 平今0元/手
+    "sc":    (20.0, 0.0, 10.0, 0.0),                # 20元/手, 平今0元/手; 期权10元/手 平今0元/手
+    # ==== 大商所 DCE ====
+    "a":     (2.0, None, 0.5, None),                # 2元/手; 期权0.5元/手
+    "b":     (1.0, None, 0.2, None),                # 1元/手; 期权0.2元/手
+    "bb":    (('rt', 0.5), None, None, None),       # 万分之0.5   ⚠ 合约表里暂无这品种
+    "bz":    (3.0, None, 1.0, None),                # 3元/手; 期权1元/手   ⚠ 合约表里暂无这品种
+    "c":     (1.2, None, 0.6, None),                # 1.2元/手; 期权0.6元/手
+    "cs":    (1.5, None, 0.2, None),                # 1.5元/手; 期权0.2元/手
+    "eb":    (1.0, None, 0.5, None),                # 1元/手; 期权0.5元/手
+    "eg":    (3.0, None, 0.5, None),                # 3元/手; 期权0.5元/手
+    "fb":    (('rt', 0.5), None, None, None),       # 万分之0.5   ⚠ 合约表里暂无这品种
+    "i":     (('rt', 1.0), None, 2.0, None),        # 万分之1; 期权2元/手
+    "j":     (('rt', 1.0), ('rt', 1.4), 0.5, None), # 万分之1, 平今万分之1.4; 期权0.5元/手
+    "jd":    (('rt', 1.5), None, 0.5, None),        # 万分之1.5; 期权0.5元/手
+    "jm":    (('rt', 1.0), None, 0.5, None),        # 万分之1; 期权0.5元/手
+    "l":     (1.0, None, 0.5, None),                # 1元/手; 期权0.5元/手
+    "lg":    (('rt', 0.3), None, 1.0, None),        # 万分之0.3; 期权1元/手
+    "lh":    (('rt', 1.0), ('rt', 2.0), 1.5, None), # 万分之1, 平今万分之2; 期权1.5元/手
+    "m":     (1.5, None, 1.0, 0.5),                 # 1.5元/手; 期权1元/手 平今0.5元/手
+    "p":     (2.5, None, 0.5, None),                # 2.5元/手; 期权0.5元/手
+    "pg":    (6.0, None, 1.0, None),                # 6元/手; 期权1元/手
+    "pp":    (1.0, None, 0.5, None),                # 1元/手; 期权0.5元/手
+    "rr":    (1.0, None, None, None),               # 1元/手
+    "v":     (1.0, None, 0.5, None),                # 1元/手; 期权0.5元/手
+    "y":     (2.5, None, 0.5, None),                # 2.5元/手; 期权0.5元/手
+    # ==== 郑商所 CZCE ====
+    "AP":    (5.0, 10.0, 1.0, 0.0),                 # 5元/手, 平今10元/手; 期权1元/手 平今0元/手
+    "CF":    (4.3, 0.0, 1.5, 0.0),                  # 4.3元/手, 平今0元/手; 期权1.5元/手 平今0元/手
+    "CJ":    (3.0, None, 1.0, 0.0),                 # 3元/手; 期权1元/手 平今0元/手
+    "CY":    (1.0, 0.0, None, None),                # 1元/手, 平今0元/手
+    "FG":    (2.0, None, 0.5, 0.0),                 # 2元/手; 期权0.5元/手 平今0元/手
+    "JR":    (3.0, None, None, None),               # 3元/手   ⚠ 合约表里暂无这品种
+    "LR":    (3.0, None, None, None),               # 3元/手   ⚠ 合约表里暂无这品种
+    "MA":    (('rt', 1.0), None, 0.5, 0.0),         # 万分之1; 期权0.5元/手 平今0元/手
+    "OI":    (2.0, None, 1.5, 0.0),                 # 2元/手; 期权1.5元/手 平今0元/手
+    "PF":    (2.0, 0.0, 0.5, 0.0),                  # 2元/手, 平今0元/手; 期权0.5元/手 平今0元/手
+    "PK":    (2.0, None, 0.8, 0.0),                 # 2元/手; 期权0.8元/手 平今0元/手
+    "PL":    (3.0, 0.0, 1.0, 0.0),                  # 3元/手, 平今0元/手; 期权1元/手 平今0元/手   ⚠ 合约表里暂无这品种
+    "PM":    (30.0, None, None, None),              # 30元/手   ⚠ 合约表里暂无这品种
+    "PR":    (('rt', 0.5), 0.0, 1.0, 0.0),          # 万分之0.5, 平今0元/手; 期权1元/手 平今0元/手
+    "PX":    (('rt', 1.0), 0.0, 1.0, 0.0),          # 万分之1, 平今0元/手; 期权1元/手 平今0元/手
+    "RI":    (2.5, None, None, None),               # 2.5元/手   ⚠ 合约表里暂无这品种
+    "RM":    (1.5, 0.0, 0.8, 0.0),                  # 1.5元/手, 平今0元/手; 期权0.8元/手 平今0元/手
+    "RS":    (2.0, 0.0, None, None),                # 2元/手, 平今0元/手
+    "SA":    (('rt', 1.0), None, 0.5, 0.0),         # 万分之1; 期权0.5元/手 平今0元/手
+    "SF":    (2.0, 0.0, 0.5, 0.0),                  # 2元/手, 平今0元/手; 期权0.5元/手 平今0元/手
+    "SH":    (('rt', 1.0), 0.0, 2.0, 0.0),          # 万分之1, 平今0元/手; 期权2元/手 平今0元/手
+    "SM":    (2.0, 0.0, 0.5, 0.0),                  # 2元/手, 平今0元/手; 期权0.5元/手 平今0元/手
+    "SR":    (2.0, 0.0, 1.5, 0.0),                  # 2元/手, 平今0元/手; 期权1.5元/手 平今0元/手
+    "TA":    (3.0, 0.0, 0.5, 0.0),                  # 3元/手, 平今0元/手; 期权0.5元/手 平今0元/手
+    "UR":    (('rt', 1.0), None, 1.0, 0.0),         # 万分之1; 期权1元/手 平今0元/手
+    "WH":    (30.0, None, None, None),              # 30元/手
+    "ZC":    (150.0, None, 150.0, None),            # 150元/手; 期权150元/手
+    # ==== 中金所 CFFEX ====
+    "IC":    (('rt', 0.23), ('rt', 2.3), None, None), # 万分之0.23, 平今万分之2.3
+    "IF":    (('rt', 0.23), ('rt', 2.3), None, None), # 万分之0.23, 平今万分之2.3
+    "IH":    (('rt', 0.23), ('rt', 2.3), None, None), # 万分之0.23, 平今万分之2.3
+    "IM":    (('rt', 0.23), ('rt', 2.3), None, None), # 万分之0.23, 平今万分之2.3
+    "T":     (3.0, 0.0, None, None),                # 3元/手, 平今0元/手
+    "TF":    (3.0, 0.0, None, None),                # 3元/手, 平今0元/手
+    "TL":    (3.0, 0.0, None, None),                # 3元/手, 平今0元/手
+    "TS":    (3.0, 0.0, None, None),                # 3元/手, 平今0元/手   ⚠ 合约表里暂无这品种
+    "HO":    (None, None, 15.0, None),              # 纯期权, 无期货; 期权15元/手   ⚠ 合约表里暂无这品种
+    "IO":    (None, None, 15.0, None),              # 纯期权, 无期货; 期权15元/手   ⚠ 合约表里暂无这品种
+    "MO":    (None, None, 15.0, None),              # 纯期权, 无期货; 期权15元/手   ⚠ 合约表里暂无这品种
+    # ==== 广期所 GFEX ====
+    "lc":    (('rt', 0.8), ('rt', 3.2), 3.0, 0.0),  # 万分之0.8, 平今万分之3.2; 期权3元/手 平今0元/手
+    "pd":    (('rt', 1.0), 0.0, 2.0, 0.0),          # 万分之1, 平今0元/手; 期权2元/手 平今0元/手   ⚠ 合约表里暂无这品种
+    "ps":    (('rt', 1.0), ('rt', 2.5), 2.0, None), # 万分之1, 平今万分之2.5; 期权2元/手
+    "pt":    (('rt', 1.0), 0.0, 2.0, 0.0),          # 万分之1, 平今0元/手; 期权2元/手 平今0元/手   ⚠ 合约表里暂无这品种
+    "si":    (('rt', 1.0), 0.0, 2.0, 0.0),          # 万分之1, 平今0元/手; 期权2元/手 平今0元/手
 }
 
 FEE_MARKUP = 0.01          # 宏源: 交易所标准 + 0.01 元/手(每边)
@@ -4111,13 +4134,19 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
    工具栏里的 .chk 是 flex item, 会被这 14px 上边距推低(align-items:center 按 margin box 居中) */
 .chk{display:flex;align-items:center;gap:6px;font-size:var(--fz-chk);color:var(--text);cursor:pointer;white-space:nowrap;margin:0}
 .chk input{accent-color:var(--accent);margin:0}
-/* 手续费口径选择(v50.70): 与工具栏其它控件同一行同一高, ⚠ 自建控件 margin 必须归零 */
-.fee-sel{display:flex;align-items:center;gap:6px;margin:0;flex:none}
+/* 手续费口径选择(v50.70; v50.71 从 <select> 改成「选项平铺」的分段控件):
+   与工具栏其它控件同一行同一高; 视觉沿用资金曲线工具栏的 .seg(同一套组件语言)
+   ⚠ 自建控件 margin 必须归零 —— 全局 label{margin:14px 0 6px} 会把 flex item 按 margin box 居中推低 */
+.fee-sel{display:flex;align-items:center;gap:8px;margin:0;flex:none}
 .fee-sel .fee-lbl{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap}
-.fee-sel select{padding:5px 13px;border-radius:8px;border:1px solid var(--border);background:transparent;
-  color:var(--sub);font-size:var(--fz-btn);cursor:pointer;line-height:1.4;transition:all .2s}
-.fee-sel select:hover{color:var(--accent);border-color:var(--accent)}
-.fee-sel select:focus{outline:none;border-color:var(--accent);color:var(--text)}
+.fee-sel .seg{display:flex;gap:3px;padding:2px;border:1px solid var(--border);border-radius:10px;
+  background:var(--panel)}
+.fee-sel .fee-opt{padding:4px 11px;border:0;border-radius:8px;background:transparent;color:var(--sub);
+  font-family:inherit;font-size:var(--fz-btn);font-weight:600;line-height:1.3;white-space:nowrap;
+  cursor:pointer;transition:all .2s}
+.fee-sel .fee-opt:hover{background:var(--panel2);color:var(--text)}
+.fee-sel .fee-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
+.fee-sel .fee-opt.active:hover{color:#fff}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
 /* 期货/期权模式切换: 带 .opt-only 的元素只在期权模式显示(v50.39) */
@@ -4941,13 +4970,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <label class="chk tgl" id="onlyOpenLbl"><input type="checkbox" id="tradesOnlyOpen"><span class="tgl-txt">只展示未平仓</span></label>
           <!-- 统计卡片显示/隐藏(v50.55): 状态存 localStorage, 下次打开保持上次的选择 -->
           <button class="btn xs ghost" id="btnToggleStats" title="隐藏顶部统计卡片（状态会记住）">🙈 隐藏统计</button>
-          <!-- 手续费口径(v50.70): 只影响「净盈亏」列, 不改动原始平仓盈亏 -->
-          <span class="fee-sel" title="手续费口径：影响主表「净盈亏」列（净盈亏 = 平仓盈亏 − 手续费）">
+          <!-- 手续费口径(v50.70): 只影响「净盈亏」列, 不改动原始平仓盈亏
+               v50.71: 原来是个 <select> 下拉框, 选项藏起来了 → 改成把两个选项直接平铺出来 -->
+          <span class="fee-sel" id="feeSeg" title="手续费口径：影响主表「净盈亏」列与统计卡的「净盈亏比」（净盈亏 = 平仓盈亏 − 手续费）">
             <span class="fee-lbl">手续费</span>
-            <select id="feeMode">
-              <option value="ex">交易所 + 0.01</option>
-              <option value="off">不计算</option>
-            </select>
+            <span class="seg" role="group" aria-label="手续费口径">
+              <button type="button" class="fee-opt active" data-fee="ex" aria-pressed="true">交易所 + 0.01</button>
+              <button type="button" class="fee-opt" data-fee="off" aria-pressed="false">不计算</button>
+            </span>
           </span>
           <span class="spacer"></span>
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
@@ -6838,7 +6868,11 @@ const TradeUI = {
     $('btnToggleStats').addEventListener('click', () => this.toggleStats());
     this.applyStatsPref();        // v50.55: 恢复上次的统计卡片显隐选择(默认显示)
     // v50.70: 手续费口径选择(交易所+0.01 / 不计算), 切换即重拉 → 净盈亏列跟着变
-    if ($('feeMode')) $('feeMode').addEventListener('change', e => this.setFeeMode(e.target.value));
+    const feeSeg = $('feeSeg');
+    if (feeSeg) feeSeg.addEventListener('click', e => {
+      const b = e.target.closest ? e.target.closest('.fee-opt') : null;
+      if (b && b.dataset.fee !== this.feeMode) this.setFeeMode(b.dataset.fee);
+    });
     this.applyFeePref();
     // 主表搜索框: 输入即筛选(与「只展示未平仓」叠加生效)
     $('tradesSearch').addEventListener('input', e => {
@@ -6966,19 +7000,28 @@ const TradeUI = {
   calcStats(){
     const gs = this.groups || [];
     const pnlOf = g => (g.total_pnl || 0);
+    // v50.71: 净盈亏口径(扣掉手续费) —— 后端按当前手续费口径算好放在 net_pnl 里
+    const netOf = g => (g.net_pnl != null ? g.net_pnl : pnlOf(g));
     const closed = gs.filter(g => pnlOf(g) !== 0);        // 有已实现盈亏(已平完 + 部分平)
     const wins = closed.filter(g => pnlOf(g) > 0);
     const losses = closed.filter(g => pnlOf(g) < 0);
     const grossWin = wins.reduce((s, g) => s + pnlOf(g), 0);
     const grossLoss = losses.reduce((s, g) => s + pnlOf(g), 0);   // 负数
     const realized = grossWin + grossLoss;
+    // 净口径用**同一批「已平仓」记录**(只把这批的盈亏换成净盈亏), 免得没平的持仓被开仓手续费拖成"亏损"
+    const netWin = closed.reduce((s, g) => s + Math.max(netOf(g), 0), 0);
+    const netLoss = closed.reduce((s, g) => s + Math.min(netOf(g), 0), 0);   // 负数
     const flat = gs.filter(g => g.close_status === '已平仓').length;
     return {
       n: gs.length, flat, holding: gs.length - flat,
       closedN: closed.length, wins: wins.length, losses: losses.length,
       grossWin, grossLoss, realized,
+      netWin, netLoss,
+      // 费率表没收录的笔数(这部分手续费按 0 计, 净口径会略微偏乐观) → 卡片 tooltip 里提示
+      feeUnknown: closed.reduce((s, g) => s + (g.fee_unknown ? 1 : 0), 0),
       winRate: closed.length ? wins.length / closed.length : null,
       plRatio: grossLoss ? grossWin / Math.abs(grossLoss) : null,
+      netRatio: netLoss ? netWin / Math.abs(netLoss) : null,
       avg: closed.length ? realized / closed.length : null,
       maxWin: wins.length ? Math.max(...wins.map(pnlOf)) : 0,
       maxLoss: losses.length ? Math.min(...losses.map(pnlOf)) : 0,
@@ -7014,17 +7057,26 @@ const TradeUI = {
   },
 
   /* 手续费口径(v50.70): 状态存 localStorage(oc-fee-mode), 三个模式共用;
-     切换后重拉一次数据(手续费是后端按当前口径现算的, 前端不缓存) */
+     切换后重拉一次数据(手续费是后端按当前口径现算的, 前端不缓存)
+     v50.71: 选项从 <select> 变成平铺的分段控件 → 选中态靠 .active 类, 不再靠 select.value */
   applyFeePref(){
     let v = 'ex';
     try { v = localStorage.getItem('oc-fee-mode') || 'ex'; } catch (e) {}
     this.feeMode = (v === 'off') ? 'off' : 'ex';
-    const sel = $('feeMode');
-    if (sel) sel.value = this.feeMode;
+    this.syncFeeSeg();
+  },
+  /* 分段控件的选中态: 与 #feeSeg 里按钮的 data-fee 对齐 */
+  syncFeeSeg(){
+    document.querySelectorAll('#feeSeg .fee-opt').forEach(b => {
+      const on = b.dataset.fee === this.feeMode;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
   },
   setFeeMode(v){
     this.feeMode = (v === 'off') ? 'off' : 'ex';
     try { localStorage.setItem('oc-fee-mode', this.feeMode); } catch (e) {}
+    this.syncFeeSeg();
     return this.refresh();
   },
 
@@ -7038,22 +7090,31 @@ const TradeUI = {
     // 卡片小字用纯数字(参考图标尺): 5 列一行时列窄, 带 CN¥ 前缀会被 ellipsis 截掉
     const num = v => Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
     const cls = v => v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
-    const card = (k, title, val, sub, valCls) =>
+    const card = (k, title, val, sub, valCls, tip) =>
       '<div class="stat-card k' + k + '">'
       + '<div class="sk">' + escHtml(title) + '</div>'
-      + '<div class="sv ' + (valCls || '') + '" title="' + escHtml(title + ' ' + val) + '">'
+      + '<div class="sv ' + (valCls || '') + '" title="' + escHtml(tip || (title + ' ' + val)) + '">'
       + escHtml(val) + '</div>'
       + '<div class="ss" title="' + escHtml(sub) + '">' + escHtml(sub) + '</div></div>';
-    const ratioTxt = s.plRatio != null ? s.plRatio.toFixed(2)
-      : (s.grossWin > 0 ? '∞' : '—');                    // 有盈利无亏损 → ∞
+    // 比率文本: 有亏损才有比值; 只盈不亏 → ∞; 没数据 → —
+    const rTxt = (r, win) => r != null ? r.toFixed(2) : (win > 0 ? '∞' : '—');
     box.innerHTML =
       card(1, '累计盈亏', s.closedN ? money(s.realized) : '—',
            s.closedN ? ('已实现 · ' + s.closedN + ' 笔') : '暂无已平仓记录', cls(s.realized))
       + card(2, '胜率', s.winRate == null ? '—' : (s.winRate * 100).toFixed(1) + '%',
            s.closedN ? (s.wins + ' 胜 / ' + s.losses + ' 负') : '暂无已平仓记录')
       + card(3, '已平仓', String(s.flat), '持仓中: ' + s.holding + ' · 共 ' + s.n + ' 条')
-      + card(4, '盈亏比', ratioTxt,
-           s.closedN ? ('盈利 ' + num(s.grossWin) + ' / 亏损 ' + num(s.grossLoss)) : '—')
+      // v50.71: 「盈亏比」扩成「盈亏比 / 净盈亏比」—— 净 = 扣掉手续费后的同一口径
+      + card(4, '盈亏比 / 净盈亏比',
+           s.closedN ? (rTxt(s.plRatio, s.grossWin) + ' / ' + rTxt(s.netRatio, s.netWin)) : '—',
+           s.closedN ? ('盈利 ' + num(s.grossWin) + ' / 亏损 ' + num(Math.abs(s.grossLoss))) : '—',
+           '', s.closedN
+             ? ('盈亏比 ' + rTxt(s.plRatio, s.grossWin) + '（未扣手续费）· 净盈亏比 '
+                + rTxt(s.netRatio, s.netWin) + '（扣手续费后）\n'
+                + '毛：盈利 ' + num(s.grossWin) + ' / 亏损 ' + num(Math.abs(s.grossLoss))
+                + '\n净：盈利 ' + num(s.netWin) + ' / 亏损 ' + num(Math.abs(s.netLoss))
+                + (s.feeUnknown ? '\n⚠ 有 ' + s.feeUnknown + ' 条的费率表未收录，手续费按 0 计' : ''))
+             : '暂无已平仓记录')
       + card(5, '平均盈亏', s.avg == null ? '—' : money(s.avg),
            s.closedN ? ('最大盈 ' + num(s.maxWin) + ' / 亏 ' + num(Math.abs(s.maxLoss))) : '—',
            cls(s.avg));
