@@ -2877,6 +2877,92 @@ async function main() {
   check('图表放大滑块(v50.69): 点数少(年视图)时不需要滑块 → 隐藏', v69b.yearHidden === true,
         String(v69b.yearHidden));
 
+  // ===== v50.73: 点图例 = 显示 / 隐藏线条与柱状图 =====
+  const v73Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const rec = (y, m, ie, ee) => fetch('/api/funds/records', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({strategy:'期权买方', year:y, month:m, initial_equity:ie, end_equity:ee, cash_flow:0})});
+    for (let i = 1; i <= 6; i++) await rec(2025, i, 100000 + i*1000, 101000 + i*1000);
+    document.querySelector('#mainTabs .maintab[data-tab="funds"]').click(); await w(900);
+    document.querySelector('#stratSeg button[data-strategy="期权买方"]').click(); await w(1200);
+
+    const legM = q('chartMonthlyLegend');
+    const items = [...legM.querySelectorAll('.lg[data-ds]')];
+    const click = async (i)=>{ items[i].click(); await w(500); };
+    const snap = ()=>({
+      vis: [0,1,2].map(i => FundUI.chartMonthly.isDatasetVisible(i)),
+      off: items.map(it => it.classList.contains('off')),
+      y:  FundUI.chartMonthly.options.scales.y.display,
+      y1: FundUI.chartMonthly.options.scales.y1.display,
+    });
+
+    const t0 = {n: items.length, ds: items.map(it=>it.dataset.ds),
+                cursor: getComputedStyle(items[0]).cursor,
+                swatch: items[0].querySelector('i').offsetWidth > 0};
+
+    await click(2);                       // 隐藏折线
+    const t1 = snap();
+    await click(2);                       // 再点 → 显示回来
+    const t2 = snap();
+    await click(0); await click(1);       // 两根柱都隐藏
+    const t3 = snap();
+    await click(0); await click(1);       // 恢复
+
+    // 放大图与缩略图共用同一份偏好
+    await click(2);
+    document.querySelector('.zoombtn[data-zoom="monthly"]').click(); await w(1500);
+    const zItems = [...q('chartZoomLegend').querySelectorAll('.lg[data-ds]')];
+    const t4 = {vis2: FundUI.chartZoom.isDatasetVisible(2),
+                y1: FundUI.chartZoom.options.scales.y1.display,
+                off: zItems[2].classList.contains('off'),
+                swatch: zItems[0].querySelector('i').offsetWidth > 0};
+    zItems[2].click(); await w(700);      // 在弹窗里点回来 → 缩略图同步
+    const t5 = {zoomVis2: FundUI.chartZoom.isDatasetVisible(2),
+                smallVis2: FundUI.chartMonthly.isDatasetVisible(2),
+                smallOff: items[2].classList.contains('off')};
+    q('chartZoomClose').click(); await w(300);
+
+    // 换策略重渲染后仍保持"被点掉"
+    await click(2);
+    document.querySelector('#stratSeg button[data-strategy="威科夫"]').click(); await w(900);
+    document.querySelector('#stratSeg button[data-strategy="期权买方"]').click(); await w(1200);
+    const t6 = {vis2: FundUI.chartMonthly.isDatasetVisible(2),
+                off: items[2].classList.contains('off'),
+                y1: FundUI.chartMonthly.options.scales.y1.display};
+    await click(2);                       // 收尾: 全部恢复
+
+    for (let i = 1; i <= 6; i++){
+      await fetch('/api/funds/records', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({strategy:'期权买方', year:2025, month:i, action:'delete'})});
+    }
+    return JSON.stringify({t0,t1,t2,t3,t4,t5,t6});
+  })()`);
+  const v73 = JSON.parse(v73Run);
+  check('图例可点(v50.73): 3 项都带 data-ds, 鼠标手型, 色块可见',
+        v73.t0.n === 3 && v73.t0.ds.join(',') === '0,1,2'
+        && v73.t0.cursor === 'pointer' && v73.t0.swatch === true, JSON.stringify(v73.t0));
+  check('图例可点(v50.73): 点折线图例 → 折线隐藏 + 图例置灰划线 + 右轴收起',
+        v73.t1.vis.join(',') === 'true,true,false' && v73.t1.off.join(',') === 'false,false,true'
+        && v73.t1.y === true && v73.t1.y1 === false, JSON.stringify(v73.t1));
+  check('图例可点(v50.73): 再点一次 → 折线与右轴都回来',
+        v73.t2.vis.join(',') === 'true,true,true' && v73.t2.off.join(',') === 'false,false,false'
+        && v73.t2.y1 === true, JSON.stringify(v73.t2));
+  check('图例可点(v50.73): 两根柱都点掉 → 左轴也收起(只留折线)',
+        v73.t3.vis.join(',') === 'false,false,true' && v73.t3.y === false && v73.t3.y1 === true,
+        JSON.stringify(v73.t3));
+  check('图例可点(v50.73): 放大图沿用缩略图的选择(共用一份状态) + 弹窗色块可见',
+        v73.t4.vis2 === false && v73.t4.y1 === false && v73.t4.off === true && v73.t4.swatch === true,
+        JSON.stringify(v73.t4));
+  check('图例可点(v50.73): 在弹窗里点回来 → 缩略图同步恢复',
+        v73.t5.zoomVis2 === true && v73.t5.smallVis2 === true && v73.t5.smallOff === false,
+        JSON.stringify(v73.t5));
+  check('图例可点(v50.73): 换策略重渲染后仍保持"被点掉"',
+        v73.t6.vis2 === false && v73.t6.off === true && v73.t6.y1 === false, JSON.stringify(v73.t6));
+  check('图例可点(v50.73): 系列藏起来后不再画它的数值标签',
+        /isDatasetVisible|meta\.hidden/.test(await evalJs(ws, `valueLabelPlugin.afterDatasetsDraw.toString()`)));
+
   // ===== v50.70: 手续费(交易所+0.01) / 净盈亏列 / 开平仓时间 / 平今 / 期货合约年月 =====
   const v70Run = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

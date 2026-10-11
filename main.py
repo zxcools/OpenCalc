@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5072            # 与 README 版本号 v50.72 对齐(数值比较用于单实例接管)
+APP_VERSION = 5073            # 与 README 版本号 v50.73 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -4437,9 +4437,18 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .chartbox .ct{font-size:13.5px;font-weight:600;letter-spacing:.5px;margin-bottom:8px;
   display:flex;align-items:center;gap:8px;color:var(--text)}
 .chartbox .ct .dot{width:8px;height:8px;border-radius:50%;background:var(--accent2)}
-.chartbox .legend{display:flex;gap:14px;font-size:11.5px;color:var(--sub);flex-wrap:wrap;margin-bottom:6px}
-.chartbox .legend .lg{display:flex;align-items:center;gap:5px}
-.chartbox .legend .lg i{display:inline-block;width:11px;height:11px;border-radius:3px}
+/* v50.73: 图例样式改成通用 .legend —— 原来只写了 .chartbox .legend,
+   于是放大弹窗 #chartZoomLegend 里的色块 <i> 没有宽高, 在弹窗里根本看不见 */
+.legend{display:flex;gap:14px;font-size:11.5px;color:var(--sub);flex-wrap:wrap;margin-bottom:6px}
+.legend .lg{display:flex;align-items:center;gap:5px}
+.legend .lg i{display:inline-block;width:11px;height:11px;border-radius:3px;flex:none}
+/* v50.73: 点图例 = 显示/隐藏对应系列(线条或柱) */
+.legend .lg[data-ds]{cursor:pointer;user-select:none;padding:1px 6px;margin:-1px -6px;border-radius:6px;
+  transition:background .15s,opacity .15s}
+.legend .lg[data-ds]:hover{background:rgba(150,205,175,.14)}
+.legend .lg[data-ds]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.legend .lg[data-ds].off{opacity:.45;text-decoration:line-through}
+.legend .lg[data-ds].off i{filter:grayscale(1);opacity:.7}
 .chartbox canvas{width:100%!important;height:260px!important}
 
 .modalbg{position:fixed;inset:0;background:var(--modal-mask);z-index:999;
@@ -4941,20 +4950,20 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="chartbox">
         <div class="ct"><span class="dot"></span><span id="chartMonthlyTitle">期权买方 · 月收益图</span>
           <button class="btn sm zoombtn" data-zoom="monthly" title="放大查看">⤢ 放大</button></div>
-        <div class="legend">
-          <span class="lg"><i style="background:#a58ae0"></i>本月末权益（扣掉出入金之后）</span>
-          <span class="lg"><i style="background:#e78fb5"></i>本月盈亏</span>
-          <span class="lg"><i style="background:#e2c985"></i>本月收益率（折线，右轴）</span>
+        <div class="legend" id="chartMonthlyLegend">
+          <span class="lg" data-ds="0" role="button" tabindex="0" title="点击隐藏 / 显示「本月末权益」柱"><i style="background:#a58ae0"></i>本月末权益（扣掉出入金之后）</span>
+          <span class="lg" data-ds="1" role="button" tabindex="0" title="点击隐藏 / 显示「本月盈亏」柱"><i style="background:#e78fb5"></i>本月盈亏</span>
+          <span class="lg" data-ds="2" role="button" tabindex="0" title="点击隐藏 / 显示「本月收益率」折线"><i style="background:#e2c985"></i>本月收益率（折线，右轴）</span>
         </div>
         <canvas id="chartMonthly"></canvas>
       </div>
       <div class="chartbox">
         <div class="ct"><span class="dot"></span><span id="chartYearlyTitle">期权买方 · 年盈亏分析</span>
           <button class="btn sm zoombtn" data-zoom="yearly" title="放大查看">⤢ 放大</button></div>
-        <div class="legend">
-          <span class="lg"><i style="background:#a58ae0"></i>年末权益</span>
-          <span class="lg"><i style="background:#e78fb5"></i>年度总盈亏</span>
-          <span class="lg"><i style="background:#e2c985"></i>年化收益率（折线，右轴）</span>
+        <div class="legend" id="chartYearlyLegend">
+          <span class="lg" data-ds="0" role="button" tabindex="0" title="点击隐藏 / 显示「年末权益」柱"><i style="background:#a58ae0"></i>年末权益</span>
+          <span class="lg" data-ds="1" role="button" tabindex="0" title="点击隐藏 / 显示「年度总盈亏」柱"><i style="background:#e78fb5"></i>年度总盈亏</span>
+          <span class="lg" data-ds="2" role="button" tabindex="0" title="点击隐藏 / 显示「年化收益率」折线"><i style="background:#e2c985"></i>年化收益率（折线，右轴）</span>
         </div>
         <canvas id="chartYearly"></canvas>
       </div>
@@ -8309,8 +8318,11 @@ const valueLabelPlugin = {
     ctx.lineJoin = 'round';
     chart.data.datasets.forEach((ds, di)=>{
       const meta = chart.getDatasetMeta(di);
+      // v50.73: 被图例点掉的系列不再画数值标签(否则柱子没了、数字还浮在原地)
+      if (!meta || meta.hidden || !chart.isDatasetVisible(di)) return;
       const isLine = ds.type === 'line';
       meta.data.forEach((pt, i)=>{
+        if (!pt || !isFinite(pt.x) || !isFinite(pt.y)) return;
         const v = ds.data[i];
         if (v == null || isNaN(v)) return;
         const label = isLine ? v.toFixed(1) + '%' : fmtWan(v);
@@ -8332,6 +8344,9 @@ const FundUI = {
   chartYearly: null,
   showAllRows: false,       // 月度明细是否显示全部(默认只显示最近 5 条)
   chartZoom: null,          // 放大图实例
+  // v50.73: 被点图例关掉的系列下标; 缩略图与放大图共用同一份(同一份数据, 同一个偏好)
+  //  ⚠ 故意只放内存: localStorage 的新键都得挂进 .opcalc 备份, 这里不值得动备份链路
+  legendOff: {monthly:new Set(), yearly:new Set()},
 
   /* ---- 主 tab 切换 ---- */
   initMainTabs(){
@@ -9071,6 +9086,73 @@ const FundUI = {
         },
       },
     });
+
+    // v50.73: 图表重建后把「被点掉的系列」恢复回去(否则换策略/改字号档位后一律弹回来)
+    this.restoreLegend('monthly', this.chartMonthly);
+    this.restoreLegend('yearly',  this.chartYearly);
+  },
+
+  /* ==== v50.73 图例点击显示 / 隐藏系列(柱 / 折线) ==== */
+
+  // 缩略图与放大图分别属于哪个 kind
+  legendEl(kind){
+    return $(kind === 'monthly' ? 'chartMonthlyLegend' : 'chartYearlyLegend');
+  },
+
+  // off 集合 → 图表: 隐藏数据集; 折线藏了收右轴, 两根柱都藏了收左轴
+  applyLegendVis(chart, off, doUpdate){
+    if (!chart) return;
+    chart.data.datasets.forEach((ds, i)=> chart.setDatasetVisibility(i, !off.has(i)));
+    const sc = chart.options.scales || {};
+    if (sc.y)  sc.y.display  = !(off.has(0) && off.has(1));
+    if (sc.y1) sc.y1.display = !off.has(2);
+    if (doUpdate !== false) chart.update();
+  },
+
+  // 图例项的「已关闭」外观 + 悬停提示
+  paintLegend(el, off){
+    if (!el) return;
+    el.querySelectorAll('.lg[data-ds]').forEach(it=>{
+      const i = parseInt(it.dataset.ds, 10);
+      const isOff = off.has(i);
+      it.classList.toggle('off', isOff);
+      it.title = (isOff ? '点击显示' : '点击隐藏') + '「' + (it.textContent || '').trim() + '」';
+    });
+  },
+
+  // 图表刚重建完 → 把外观与可见性都对回 off 集合
+  restoreLegend(kind, chart){
+    const off = this.legendOff[kind];
+    this.paintLegend(this.legendEl(kind), off);
+    if (off.size) this.applyLegendVis(chart, off);
+  },
+
+  // 挂点击(keydown 也支持)。⚠ 弹窗图例每次 innerHTML 重建 → 每次都要重挂
+  bindLegend(el, kind){
+    if (!el) return;
+    el.querySelectorAll('.lg[data-ds]').forEach(it=>{
+      const i = parseInt(it.dataset.ds, 10);
+      if (it.dataset.wired) return;
+      it.dataset.wired = '1';
+      const fire = ()=> this.toggleDs(kind, i);
+      it.addEventListener('click', fire);
+      it.addEventListener('keydown', e=>{
+        if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); fire(); }
+      });
+    });
+  },
+
+  toggleDs(kind, i){
+    const off = this.legendOff[kind];
+    if (off.has(i)) off.delete(i); else off.add(i);
+    // 缩略图
+    this.applyLegendVis(kind === 'monthly' ? this.chartMonthly : this.chartYearly, off);
+    this.paintLegend(this.legendEl(kind), off);
+    // 放大图开着且是同一张 → 一起跟着切
+    if (this.chartZoom && this.zoomKind === kind){
+      this.applyLegendVis(this.chartZoom, off);
+      this.paintLegend($('chartZoomLegend'), off);
+    }
   },
 
   /* ---- 图表放大: 弹出大图查看 (v50.69 加了左右滑动滑块) ---- */
@@ -9103,10 +9185,16 @@ const FundUI = {
     const isCombined = this.strategy === 'combined';
     const titleStr = isCombined ? '汇总账户' : this.strategy;
     $('chartZoomTitle').textContent = titleStr + ' · ' + (isMonthly ? '月收益图' : '年盈亏分析');
+    const leg1 = m => '<span class="lg" data-ds="0" role="button" tabindex="0"><i style="background:#a58ae0"></i>' + m[0] + '</span>'
+                    + '<span class="lg" data-ds="1" role="button" tabindex="0"><i style="background:#e78fb5"></i>' + m[1] + '</span>'
+                    + '<span class="lg" data-ds="2" role="button" tabindex="0"><i style="background:#e2c985"></i>' + m[2] + '</span>';
     $('chartZoomLegend').innerHTML = isMonthly
-      ? '<span class="lg"><i style="background:#a58ae0"></i>本月末权益（扣掉出入金之后）</span><span class="lg"><i style="background:#e78fb5"></i>本月盈亏</span><span class="lg"><i style="background:#e2c985"></i>本月收益率（折线，右轴）</span>'
-      : '<span class="lg"><i style="background:#a58ae0"></i>年末权益</span><span class="lg"><i style="background:#e78fb5"></i>年度总盈亏</span><span class="lg"><i style="background:#e2c985"></i>年化收益率（折线，右轴）</span>';
+      ? leg1(['本月末权益（扣掉出入金之后）', '本月盈亏', '本月收益率（折线，右轴）'])
+      : leg1(['年末权益', '年度总盈亏', '年化收益率（折线，右轴）']);
     this.zoomKind = kind;
+    // ⚠ 上面刚重建了 innerHTML → 旧监听器全没了, 必须重挂
+    this.bindLegend($('chartZoomLegend'), kind);
+    this.paintLegend($('chartZoomLegend'), this.legendOff[kind]);
     $('chartZoomBg').classList.remove('hidden');
     const sc = $('zoomScroll');
     if (sc) sc.scrollLeft = 0;                       // 每次打开都从最左边开始
@@ -9185,6 +9273,8 @@ const FundUI = {
         },
       },
     });
+    // v50.73: 缩略图里点掉的系列, 放大看也该是关着的(共用同一份 legendOff)
+    this.restoreLegend(this.zoomKind, this.chartZoom);
   },
 
   init(){
@@ -9192,6 +9282,9 @@ const FundUI = {
     this.initStrategySeg();
     this.initModal();
     this.initZoom();
+    // v50.73: 两个缩略图的图例(静态 DOM, 挂一次就够); 弹窗图例每次开图时重建 → 在那里挂
+    this.bindLegend(this.legendEl('monthly'), 'monthly');
+    this.bindLegend(this.legendEl('yearly'),  'yearly');
   },
 };
 FundUI.init();
