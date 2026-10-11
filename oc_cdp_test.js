@@ -3451,6 +3451,115 @@ async function main() {
   check('平仓盈亏(v50.72): 持仓已清空也能从开仓记录取到均价并重算 → 10000',
         pn72.editRe === '10000', String(pn72.editRe));
 
+  // ===== v50.74: 新建平仓的「平今 / 平昨」手选(有些品种两档费率差很多) =====
+  const v74Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const wipe = async (mode) => {
+      const g = await (await fetch('/api/trades/groups?mode=' + mode)).json();
+      for (const it of (g.groups || [])) {
+        const d = await (await fetch('/api/trades/detail?mode=' + mode + '&underlying='
+          + encodeURIComponent(it.underlying) + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+    };
+    const det = async (mode, u, b) => (await (await fetch('/api/trades/detail?mode=' + mode
+      + '&underlying=' + encodeURIComponent(u) + '&batch=' + encodeURIComponent(b) + '&fee=ex')).json());
+    const opBtns = () => [...document.querySelectorAll('#tmCloseToday .pick-opt')];
+    const actCt = () => { const b = opBtns().find(x => x.classList.contains('active')); return b ? b.dataset.ct : null; };
+    const clickCt = async v => { opBtns().find(x => x.dataset.ct === v).click(); await w(250); };
+
+    await wipe('futures'); await wipe('options');
+
+    // ---- A) 期货 棉花(平今 0 元/手、平昨 4.3 元/手): 同一天平 → 自动=平今
+    await post({mode:'futures', underlying:'CF', contract:'CF2701', batch:'Bv74',
+                op_type:'open', direction:'sell', open_date:'2026-10-12', open_time:'09:30',
+                open_price:15000, qty:2, premium:0});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(900);
+    await TradeUI.loadDetail('CF', 'Bv74'); await w(800);
+    q('tdNewClose').click(); await w(500);
+    const shownCt = q('tmCloseTodayWrap').style.display !== 'none';
+    const labels = opBtns().map(b => b.textContent.trim());
+    const defActive = actCt();
+    const hintAuto = q('tmCloseTodayHint').textContent;
+    q('tmCloseQty').value = '2'; q('tmCloseQty').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmClosePrice').value = '14900'; q('tmClosePrice').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmCloseDate').value = '2026-10-12'; q('tmCloseTime').value = '14:00';
+    await w(300);
+    const savedAuto = await TradeUI.submitModal(); await w(900);
+    q('tradeModalBg').classList.add('hidden');
+    await TradeUI.loadDetail('CF', 'Bv74'); await w(700);
+    let d = await det('futures', 'CF', 'Bv74');
+    let cl = (d.operations || []).filter(o => o.op_type === 'close')[0] || {};
+    const autoFee = cl.fee, autoCt = cl.close_today, autoToday = cl.fee_is_today, autoManual = cl.fee_today_manual;
+
+    // ---- B) 编辑这笔平仓 → 预选「自动」+ 提示写出自动判定结果; 改成「平昨」→ 手续费变大
+    document.querySelector('#tdOps [data-edit="' + cl.id + '"]').click(); await w(500);
+    const editActive = actCt();
+    const editHint = q('tmCloseTodayHint').textContent;
+    await clickCt('0');
+    const pickedActive = actCt();
+    const pickedHint = q('tmCloseTodayHint').textContent;
+    const savedY = await TradeUI.submitModal(); await w(900);
+    q('tradeModalBg').classList.add('hidden');
+    await TradeUI.loadDetail('CF', 'Bv74'); await w(700);
+    d = await det('futures', 'CF', 'Bv74');
+    cl = (d.operations || []).filter(o => o.op_type === 'close')[0] || {};
+    const yFee = cl.fee, yCt = cl.close_today, yManual = cl.fee_today_manual, yToday = cl.fee_is_today;
+    const opFeeTitle = (document.querySelector('#tdOps [data-edit="' + cl.id + '"]')
+      .closest('tr').querySelector('.op-fee') || {}).title || '';
+
+    // ---- C) 再打开 → 手选被记住(仍是平昨)
+    document.querySelector('#tdOps [data-edit="' + cl.id + '"]').click(); await w(500);
+    const reopenActive = actCt();
+    q('tmCancel').click(); await w(200);
+
+    // ---- D) 期权买方模式也有同一套控件(三个模式共用弹窗)
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
+    await post({mode:'options', underlying:'CF', contract:'CF2701-P-15000', batch:'Bv74o',
+                op_type:'open', direction:'buy', call_put:'P', open_date:'2026-10-12',
+                open_price:92, qty:3, premium:1380});
+    await TradeUI.loadDetail('CF', 'Bv74o'); await w(800);
+    q('tdNewClose').click(); await w(500);
+    const optShown = q('tmCloseTodayWrap').style.display !== 'none';
+    const optLabels = opBtns().map(b => b.textContent.trim());
+    q('tmCancel').click(); await w(200);
+
+    await wipe('futures'); await wipe('options');
+    return JSON.stringify({shownCt, labels, defActive, hintAuto, savedAuto: !!savedAuto,
+                           autoFee, autoCt, autoToday, autoManual,
+                           editActive, editHint, pickedActive, pickedHint, savedY: !!savedY,
+                           yFee, yCt, yManual, yToday, opFeeTitle, reopenActive,
+                           optShown, optLabels});
+  })()`);
+  const v74 = JSON.parse(v74Run);
+  check('平今/平昨(v50.74): 平仓弹窗有「自动 / 平今 / 平昨」三项, 默认自动',
+        v74.shownCt === true && v74.labels.join(',') === '自动,平今,平昨' && v74.defActive === ''
+        && /自动/.test(v74.hintAuto), JSON.stringify(v74.labels) + ' active=' + v74.defActive);
+  check('平今/平昨(v50.74): 开仓弹窗/存盘正常, 自动档落库为 ""(空)',
+        v74.savedAuto === true && v74.autoCt === '', String(v74.autoCt));
+  check('平今/平昨(v50.74): 同一天平 → 自动判成平今, 棉花平今 0 元/手 → 只收 0.02',
+        v74.autoToday === true && v74.autoManual === false && Math.abs(v74.autoFee - 0.02) < 1e-6,
+        JSON.stringify({fee: v74.autoFee, today: v74.autoToday, manual: v74.autoManual}));
+  check('平今/平昨(v50.74): 编辑平仓时预选「自动」并把自动判定结果写进提示',
+        v74.editActive === '' && /自动判定：平今/.test(v74.editHint), v74.editHint);
+  check('平今/平昨(v50.74): 点「平昨」→ 选中态转移 + 提示改成强制说明',
+        v74.pickedActive === '0' && /强制按「平昨」/.test(v74.pickedHint), v74.pickedHint);
+  check('平今/平昨(v50.74): 手选平昨后手续费变成 4.3×2 + 0.02 = 8.62, 且标记为手选',
+        v74.savedY === true && v74.yCt === '0' && v74.yManual === true && v74.yToday === false
+        && Math.abs(v74.yFee - 8.62) < 1e-6,
+        JSON.stringify({fee: v74.yFee, ct: v74.yCt, manual: v74.yManual, today: v74.yToday}));
+  check('平今/平昨(v50.74): 操作表手续费列 tooltip 标出「平昨 · 手选」',
+        /平昨 · 手选/.test(v74.opFeeTitle), String(v74.opFeeTitle));
+  check('平今/平昨(v50.74): 再次打开平仓弹窗时手选被记住(仍是平昨)',
+        v74.reopenActive === '0', String(v74.reopenActive));
+  check('平今/平昨(v50.74): 期权买方模式也有同一套三项控件',
+        v74.optShown === true && v74.optLabels.join(',') === '自动,平今,平昨', JSON.stringify(v74.optLabels));
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

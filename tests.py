@@ -227,6 +227,77 @@ check("手续费(v50.71): 燃料油期权 1元/手 × 2 手 + 0.02 = 2.02",
       str(row_fee(_frow(mode="options", underlying="fu", contract="fu2612C5200", open_price=120, qty=2),
                   "options", "ex")))
 
+# ===== v50.74: 平今 / 平昨 手选(有些品种两档费率差很多) =====
+print("\n== 平今/平昨 手选 v50.74 ==")
+from main import norm_close_today, close_today_str  # noqa: E402
+check("平今平昨(v50.74): 归一化 —— ''/null/无法识别 = 自动, 1/'1'/True/平今 = 平今, 0/'0'/False/平昨 = 平昨",
+      [norm_close_today(v) for v in ("", None, "1", 1, True, "平今", "today",
+                                     "0", 0, False, "平昨", "yesterday", "x", "  ")]
+      == [None, None, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, None, None], '')
+check("平今平昨(v50.74): 存库字符串统一成 '' / '1' / '0'",
+      [close_today_str(v) for v in (None, "", "x", 1, "1", 0, "0")] == ["", "", "", "1", "1", "0", "0"], '')
+_cfauto = dict(underlying="CF", contract="CF2701", op_type="close", close_price=15000, close_qty=2,
+               close_date="2026-10-10", close_time="10:00", open_date="2026-10-09")
+check("平今平昨(v50.74): 不填(自动) 隔日平 → 平昨 4.3×2 + 0.02 = 8.62",
+      abs(row_fee(_frow(**_cfauto), "futures", "ex") - 8.62) < 1e-9,
+      str(row_fee(_frow(**_cfauto), "futures", "ex")))
+check("平今平昨(v50.74): 手选「平今」→ 忽略日期的自动判定(棉花平今 0 → 只 0.02)",
+      abs(row_fee(_frow(**dict(_cfauto, close_today="1")), "futures", "ex") - 0.02) < 1e-9,
+      str(row_fee(_frow(**dict(_cfauto, close_today="1")), "futures", "ex")))
+check("平今平昨(v50.74): 手选「平昨」→ 同一天平也按平昨算 = 8.62",
+      abs(row_fee(_frow(**dict(_cfauto, open_date="2026-10-10", close_today="0")), "futures", "ex") - 8.62) < 1e-9,
+      str(row_fee(_frow(**dict(_cfauto, open_date="2026-10-10", close_today="0")), "futures", "ex")))
+check("平今平昨(v50.74): 交易所没单列平今的品种(比率相同) → 手选也不改变金额(铝 3.01/手)",
+      abs(row_fee(_frow(underlying="al", contract="al2611", op_type="close", close_price=20000, close_qty=1,
+                        close_date="2026-10-10", open_date="2026-10-10", close_today="0"),
+                  "futures", "ex") - 3.01) < 1e-9, '')
+
+# 集成: 落库 → 手选影响费用合计; 编辑不带该字段要保留; 显式传空串回到自动
+_u74 = "e2ev74"
+trade_upsert({'mode': 'futures', 'underlying': _u74, 'contract': 'CF2701', 'batch': 'Bv74',
+              'op_type': 'open', 'direction': 'buy', 'open_date': '2026-10-10', 'open_time': '09:30',
+              'open_price': 15000, 'qty': 2, 'premium': 0})
+_cid74 = trade_upsert({'mode': 'futures', 'underlying': _u74, 'contract': 'CF2701', 'batch': 'Bv74',
+                       'op_type': 'close', 'direction': 'sell', 'close_date': '2026-10-10',
+                       'close_time': '14:00', 'close_qty': 2, 'close_price': 15100, 'pnl': 100})
+_g74 = [x for x in trade_groups(mode="futures", fee_mode="ex") if x["underlying"] == _u74]
+check("平今平昨集成(v50.74): 自动(同交易日)→ 平今, 开 8.62 + 平 0.02 = 8.64",
+      _g74 and abs(_g74[0]["fee_total"] - 8.64) < 1e-6, str(_g74 and _g74[0]["fee_total"]))
+_cid74 = trade_upsert({'id': _cid74, 'mode': 'futures', 'underlying': _u74, 'contract': 'CF2701',
+                       'batch': 'Bv74', 'op_type': 'close', 'direction': 'sell',
+                       'close_date': '2026-10-10', 'close_time': '14:00', 'close_qty': 2,
+                       'close_price': 15100, 'pnl': 100, 'close_today': '0'}) or _cid74
+_g74b = [x for x in trade_groups(mode="futures", fee_mode="ex") if x["underlying"] == _u74]
+check("平今平昨集成(v50.74): 改成手选「平昨」→ 平仓那笔变 8.62, 合计 8.62+8.62 = 17.24",
+      _g74b and abs(_g74b[0]["fee_total"] - 17.24) < 1e-6, str(_g74b and _g74b[0]["fee_total"]))
+_d74 = trade_detail(_u74, mode="futures", batch="Bv74", fee_mode="ex")
+_c74 = [o for o in _d74["operations"] if o["op_type"] == "close"][0]
+check("平今平昨集成(v50.74): 详情返回 close_today='0' + fee_is_today=False + fee_today_manual=True",
+      _c74["close_today"] == "0" and _c74["fee_is_today"] is False and _c74["fee_today_manual"] is True,
+      str({k: _c74[k] for k in ("close_today", "fee_is_today", "fee_today_manual")}))
+# 编辑时不带 close_today(null) → 保留原值(显式空串才是改回自动)
+trade_upsert({'id': _cid74, 'mode': 'futures', 'underlying': _u74, 'contract': 'CF2701', 'batch': 'Bv74',
+              'op_type': 'close', 'direction': 'sell', 'close_date': '2026-10-10', 'close_time': '14:00',
+              'close_qty': 2, 'close_price': 15100, 'pnl': 120})
+_c74b = [o for o in trade_detail(_u74, mode="futures", batch="Bv74", fee_mode="ex")["operations"]
+         if o["op_type"] == "close"][0]
+check("平今平昨集成(v50.74): 编辑不带该字段 → 保留手选(不被抹成自动)",
+      _c74b["close_today"] == "0" and _c74b["pnl"] == 120, str(_c74b["close_today"]))
+trade_upsert({'id': _cid74, 'mode': 'futures', 'underlying': _u74, 'contract': 'CF2701', 'batch': 'Bv74',
+              'op_type': 'close', 'direction': 'sell', 'close_date': '2026-10-10', 'close_time': '14:00',
+              'close_qty': 2, 'close_price': 15100, 'pnl': 120, 'close_today': ''})
+_c74c = [o for o in trade_detail(_u74, mode="futures", batch="Bv74", fee_mode="ex")["operations"]
+         if o["op_type"] == "close"][0]
+check("平今平昨集成(v50.74): 显式传空串 → 改回「自动」(同日 → 平今)",
+      _c74c["close_today"] == "" and _c74c["fee_is_today"] is True and _c74c["fee_today_manual"] is False,
+      str({k: _c74c[k] for k in ("close_today", "fee_is_today", "fee_today_manual")}))
+_e74 = fund_export_backup()
+_b74 = [x for x in _e74["trades"] if x.get("underlying") == _u74 and x["op_type"] == "close"]
+check("平今平昨(v50.74): 导出备份带上 close_today(不带上 → 恢复后手选档位丢失)",
+      _b74 and "close_today" in _b74[0], str(_b74[:1]))
+for _o in trade_detail(_u74, mode="futures", batch="Bv74")["operations"]:
+    trade_delete(_o["id"])
+
 # 集成: 一组记录(开+平) → fee_total / net_pnl
 _fu = "e2efee70"
 trade_upsert({'mode': 'futures', 'underlying': _fu, 'contract': 'al2612', 'batch': 'Bfee70',

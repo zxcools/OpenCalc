@@ -117,6 +117,19 @@ try:
                                 'close_date': '2026-10-10', 'close_time': '10:05',
                                 'close_qty': 2, 'close_price': 3140, 'pnl': 1200}, BASE_A)
 
+    # v50.74: 平今/平昨 的手选标记也要进备份(不带上 → 恢复后档位丢失, 手续费会按自动判定重算)
+    #   这里故意「同一天平 + 手选平昨」, 恢复后必须仍是平昨(自动会判成平今)
+    _ct = 'B20261012000074ct'
+    post('/api/trades/upsert', {'mode': 'futures', 'underlying': 'hc2610', 'contract': 'hc2610',
+                                'batch': _ct, 'op_type': 'open', 'direction': 'buy',
+                                'open_date': '2026-10-12', 'open_time': '09:30',
+                                'open_price': 3300, 'qty': 1, 'premium': 0}, BASE_A)
+    post('/api/trades/upsert', {'mode': 'futures', 'underlying': 'hc2610', 'contract': 'hc2610',
+                                'batch': _ct, 'op_type': 'close', 'direction': 'sell',
+                                'close_date': '2026-10-12', 'close_time': '14:00',
+                                'close_qty': 1, 'close_price': 3310, 'pnl': 100,
+                                'close_today': '0'}, BASE_A)
+
     # ---------- 2) A 导出(模拟前端: 附上 localStorage 里的最近方案) ----------
     exp = get('/api/funds/export', BASE_A)
     assert exp.get('ok'), exp.get('error')
@@ -209,6 +222,14 @@ try:
     check('平今判定随备份保留(v50.70): 夜盘 21:20 开、次日 10:05 平 = 同一交易日',
           bool(_o70) and _o70[1].get('fee_is_today') is True,
           str(_o70 and _o70[1].get('fee_is_today')))
+
+    # v50.74: 平今/平昨 手选进备份 → 恢复后仍按手选的档位(同一天平的记录被强制成「平昨」)
+    _dt74 = get('/api/trades/detail?mode=futures&underlying=hc2610&batch=%s&fee=ex' % _ct, BASE_B)
+    _o74 = _dt74.get('operations') or []
+    check('平今/平昨手选进备份(v50.74): 手选「平昨」原样保留 + fee_is_today=False + 标记手选',
+          len(_o74) == 2 and _o74[1].get('close_today') == '0'
+          and _o74[1].get('fee_is_today') is False and _o74[1].get('fee_today_manual') is True,
+          str([(o.get('close_today'), o.get('fee_is_today'), o.get('fee_today_manual')) for o in _o74]))
 
     # 方案(前端层, 这里只验证备份文件里带着)
     pl = exp.get('plans') or {}

@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5073            # 与 README 版本号 v50.73 对齐(数值比较用于单实例接管)
+APP_VERSION = 5074            # 与 README 版本号 v50.74 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -284,6 +284,31 @@ def norm_fee_mode(v):
     return v if v in FEE_MODES else FEE_MODE_DEFAULT
 
 
+# v50.74: 平今 / 平昨 手工标记 —— None=自动(按开仓↔平仓的交易日判), 1=平今, 0=平昨
+CLOSE_TODAY_AUTO = ""
+CLOSE_TODAY_YES = "1"
+CLOSE_TODAY_NO = "0"
+
+
+def norm_close_today(v):
+    """把「平今/平昨」标记归一成 1 / 0 / None(自动)。
+    存库时用 CLOSE_TODAY_* 字符串('' / '1' / '0'), 便于备份与 IFNULL 比较。"""
+    s = str(v).strip().lower() if v is not None else ""
+    if s in ("1", "true", "today", "今", "平今"):
+        return 1
+    if s in ("0", "false", "yesterday", "昨", "平昨"):
+        return 0
+    return None
+
+
+def close_today_str(v):
+    """归一成存库字符串: '' 自动 / '1' 平今 / '0' 平昨"""
+    n = norm_close_today(v)
+    if n is None:
+        return CLOSE_TODAY_AUTO
+    return CLOSE_TODAY_YES if n == 1 else CLOSE_TODAY_NO
+
+
 def fee_product(underlying, contract=""):
     """从「标的」或「合约」里解析出品种代码(用于查手续费表).
     标的可能是 rb / rb2610 / rb2610空 / fg2701-P-800 这类写法。"""
@@ -343,6 +368,8 @@ def row_fee(row, mode, fee_mode, open_day=None):
     ⚠ 平仓记录的 open_date 是空的(库里 close 行的 open_date 约定为 ""),
       所以要判平今必须由调用方用 FIFO 配出「这笔平的是哪个开仓」→ 传 open_day 进来。
       没传就退回用该行自己的 open_date/open_time(手工造的 close 行可能带)。
+    ⚠ v50.74: 记录上的 `close_today` 手工标记优先于上面的自动判定
+      ('' 自动 / '1' 强制平今 / '0' 强制平昨), 有些品种平今与平昨差很多钱, 得能手选。
     ⚠ 比例费率按成交金额算: 价格 × 乘数 × 手数 —— 期权记录的价格是单价口径(见 v50.67)。"""
     fee_mode = norm_fee_mode(fee_mode)
     if fee_mode == FEE_MODE_OFF:
@@ -358,9 +385,17 @@ def row_fee(row, mode, fee_mode, open_day=None):
     base, today = (opt_rate, opt_today) if is_opt else (fut_rate, fut_today)
     rate = base
     if is_close and today is not None:
-        o_day = open_day if open_day is not None else trade_day(row.get("open_date"), row.get("open_time"))
-        c_day = trade_day(row.get("close_date"), row.get("close_time"))
-        if o_day and c_day and o_day == c_day:
+        # v50.74: 弹窗里手选的「平今 / 平昨」优先; 没选(自动)才按交易日推
+        forced = norm_close_today(row.get("close_today"))
+        if forced == 1:
+            want_today = True
+        elif forced == 0:
+            want_today = False
+        else:
+            o_day = open_day if open_day is not None else trade_day(row.get("open_date"), row.get("open_time"))
+            c_day = trade_day(row.get("close_date"), row.get("close_time"))
+            want_today = bool(o_day and c_day and o_day == c_day)
+        if want_today:
             rate = today
     price = row.get("close_price") if is_close else row.get("open_price")
     qty = row.get("close_qty") if is_close else row.get("qty")
@@ -1773,6 +1808,7 @@ def _db_ensure_schema(conn):
         ("iv_pct", "REAL"),                             # v50.61 期权: 当时 IV 所处百分位(%)
         ("open_time", "TEXT"),                          # v50.70 开仓时间 HH:MM (判平今/平昨)
         ("close_time", "TEXT"),                         # v50.70 平仓时间 HH:MM
+        ("close_today", "TEXT"),                        # v50.74 平今/平昨 手选: ''自动 / '1'平今 / '0'平昨
     ])
     _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
     _ensure_cols("trade_reviews", [
@@ -2398,6 +2434,8 @@ def _trade_record_to_dict(r):
         "iv_pct": (r["iv_pct"] if "iv_pct" in r.keys() else None),
         "open_time": ((r["open_time"] if "open_time" in r.keys() else "") or ""),
         "close_time": ((r["close_time"] if "close_time" in r.keys() else "") or ""),
+        # v50.74: 平今/平昨 手选标记('' 自动 / '1' 平今 / '0' 平昨)
+        "close_today": ((r["close_today"] if "close_today" in r.keys() else "") or ""),
         "created_at": r["created_at"] or "",
         "updated_at": r["updated_at"] or "",
     }
@@ -2501,6 +2539,8 @@ def trade_upsert(payload):
         "iv", "iv_pct",
         # v50.70: 开/平仓时间(分钟级) —— 判「平今 / 平昨」用; 老记录为空 → 按日盘处理
         "open_time", "close_time",
+        # v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨) —— 有些品种这两档费率差很多
+        "close_today",
     )
     payload["open_time"] = (payload.get("open_time") or "").strip()[:5]
     payload["close_time"] = (payload.get("close_time") or "").strip()[:5]
@@ -2535,6 +2575,13 @@ def trade_upsert(payload):
         _old_td = db.execute("SELECT target_delta FROM trade_records WHERE id=?", (rec_id,)).fetchone()
         if _old_td is not None and _old_td["target_delta"] is not None:
             payload["target_delta"] = _old_td["target_delta"]
+    # ⚠ v50.74: 平今/平昨 手选 —— 编辑时没传(null)就保留原值, 显式传空串 '' 表示改回「自动」
+    if rec_id and payload.get("close_today") is None:
+        _old_ct = db.execute("SELECT close_today FROM trade_records WHERE id=?", (rec_id,)).fetchone()
+        if _old_ct is not None and (_old_ct["close_today"] or "").strip():
+            payload["close_today"] = _old_ct["close_today"]
+    # 归一成 '' / '1' / '0'(非字符串也在这一步收口, 免得存进 1.0 这种脏值)
+    payload["close_today"] = close_today_str(payload.get("close_today"))
     vals = [payload.get(f) for f in fields]
     if rec_id:
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
@@ -2833,7 +2880,15 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
         _cd = trade_day(_x.get("close_date"), _x.get("close_time"))
         _x["open_day"] = _od or ""
         _x["close_day"] = _cd
-        _x["fee_is_today"] = bool(_x["op_type"] == "close" and _od and _cd and _od == _cd)
+        # v50.74: 手选的平今/平昨优先于自动判定; `fee_today_manual` 让前端在提示里标出「手选」
+        _forced = norm_close_today(_x.get("close_today")) if _x["op_type"] == "close" else None
+        if _forced == 1:
+            _x["fee_is_today"] = True
+        elif _forced == 0:
+            _x["fee_is_today"] = False
+        else:
+            _x["fee_is_today"] = bool(_x["op_type"] == "close" and _od and _cd and _od == _cd)
+        _x["fee_today_manual"] = _forced is not None
     fee_total = round(sum(x["fee"] for x in ops), 2)
 
     # ⚠ v50.51: 这五项必须由**本批次自己**算出来返回给前端。
@@ -2953,6 +3008,8 @@ _TRADE_IMPORT_COLS = (
     "iv", "iv_pct",
     # v50.70: 开/平仓时间(不带上 → 备份恢复后平今/平昨判不出来, 手续费会算成平昨)
     "open_time", "close_time",
+    # v50.74: 平今/平昨 的手选标记(不带上 → 恢复后手选的档位丢失, 手续费会按自动判定重算)
+    "close_today",
 )
 
 
@@ -3092,6 +3149,8 @@ def trade_import_record(r):
         "iv_pct": r.get("iv_pct"),
         "open_time": (r.get("open_time") or ""),
         "close_time": (r.get("close_time") or ""),
+        # v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
+        "close_today": close_today_str(r.get("close_today")),
     }
     db = _fund_db()
     if row["id"] is None:
@@ -4147,6 +4206,15 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .fee-sel .fee-opt:hover{background:var(--panel2);color:var(--text)}
 .fee-sel .fee-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .fee-sel .fee-opt.active:hover{color:#fff}
+/* v50.74: 弹窗里的「平今 / 平昨」分段控件 —— 与上面手续费口径同一套视觉(两处别各写一套) */
+.seg.pick{display:flex;gap:3px;padding:2px;border:1px solid var(--border);border-radius:10px;
+  background:var(--panel);align-self:flex-start}
+.seg.pick > .pick-opt{padding:4px 11px;border:0;border-radius:8px;background:transparent;color:var(--sub);
+  font-family:inherit;font-size:var(--fz-btn);font-weight:600;line-height:1.3;white-space:nowrap;
+  cursor:pointer;transition:all .2s}
+.seg.pick > .pick-opt:hover{background:var(--panel2);color:var(--text)}
+.seg.pick > .pick-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
+.seg.pick > .pick-opt.active:hover{color:#fff}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
 /* 期货/期权模式切换: 带 .opt-only 的元素只在期权模式显示(v50.39) */
@@ -5232,6 +5300,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </label>
         <label>平仓时间
           <input id="tmCloseTime" type="time" step="60" title="与开仓时间同一交易日 → 按「平今」费率算手续费">
+        </label>
+        <!-- v50.74: 平今 / 平昨 手选(仅平仓) —— 有些品种这两档费率差很多钱, 自动判不准时能强制 -->
+        <label id="tmCloseTodayWrap" title="只影响手续费按「平今」还是「平昨」档算；不影响盈亏">平今 / 平昨
+          <span class="seg pick" id="tmCloseToday" role="group" aria-label="手续费按平今还是平昨算">
+            <button type="button" class="pick-opt active" data-ct="" aria-pressed="true">自动</button>
+            <button type="button" class="pick-opt" data-ct="1" aria-pressed="false">平今</button>
+            <button type="button" class="pick-opt" data-ct="0" aria-pressed="false">平昨</button>
+          </span>
+          <span id="tmCloseTodayHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
 
         <label class="opt-only">看涨/看跌
@@ -6709,6 +6786,7 @@ const TradeUI = {
   showAll: false,       // 是否展开全部(>10)
   feeMode: 'ex',        // v50.70 手续费口径: 'ex' 交易所+0.01 / 'off' 不计算
   _closeModal: false,   // v50.72 当前弹窗是不是「平仓」(决定要不要自动算平仓盈亏)
+  _closeToday: '',      // v50.74 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
 
   // 预处理: 空白是打字随手敲的 → 直接删; _ / 视为有意分段 → 统一成 '-'; 合并连续'-'; 去首尾'-'
   //   'br 2610 C 15800' -> 'br-2610-C-15800' ; 'lc2611_C_144000' -> 'lc2611-C-144000'
@@ -6972,6 +7050,16 @@ const TradeUI = {
         if (this._closeModal) this.syncModalPnl(true);
       }
     }));
+    // v50.74: 平今/平昨 分段控件(按钮走 click, 不在上面的 input/change 委托里)
+    $('tradeModalBg').addEventListener('click', e => {
+      const b = e.target.closest ? e.target.closest('#tmCloseToday .pick-opt') : null;
+      if (!b) return;
+      const v = b.dataset.ct || '';
+      if (v === (this._closeToday || '')) return;
+      this._closeToday = v;
+      this.syncCloseTodaySeg();
+      this.syncCloseTodayHint(null);
+    });
     // 回车保存: 在 tradeModalBg 内任意 input/select 按 Enter 直接保存(shift+enter/textarea 不触发)
     $('tradeModalBg').addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
@@ -7544,7 +7632,7 @@ const TradeUI = {
         <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${premiumTxt}</td>
         <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':(o.pnl<0?'-CN¥':'CN¥'))+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
-        <td class="op-fee"${o.fee > 0 ? ' title="' + (isOpen ? '开仓' : (o.fee_is_today ? '平今' : '平昨')) + '手续费"' : ''}${feeUnknown ? ' title="手续费费率表里没有收录这个品种的期权费率，需要的话补进 FEE_TABLE"' : ''}>${feeTxt}</td>
+        <td class="op-fee"${o.fee > 0 ? ' title="' + (isOpen ? '开仓' : ((o.fee_is_today ? '平今' : '平昨') + (o.fee_today_manual ? ' · 手选' : ''))) + '手续费"' : ''}${feeUnknown ? ' title="手续费费率表里没有收录这个品种的期权费率，需要的话补进 FEE_TABLE"' : ''}>${feeTxt}</td>
         <td><span class="tag ${st.cls}">${st.txt}</span></td>
         <td class="op-note"><span class="op-note-txt"${o.note ? ' title="' + escHtml(o.note) + '"' : ''}>${o.note ? escHtml(o.note) : '—'}</span></td>
         <td class="row-actions">
@@ -7782,6 +7870,8 @@ const TradeUI = {
     $('tmCallPut').value = preset.call_put || '';
     $('tmDirection').value = preset.direction || 'buy';
     $('tmOpType').value = type;
+    // v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨) —— 编辑时沿用记录里的选择
+    this._closeToday = preset.close_today ? String(preset.close_today) : '';
     $('tmError').textContent = '';
     // 标记「从详情页发起」: 详情页的新建开仓不显示初次止损/止盈(v50.40)
     bg.dataset.fromDetail = preset.fromDetail ? '1' : '';
@@ -7953,6 +8043,10 @@ const TradeUI = {
     if ($('tmPnlHint')) $('tmPnlHint').textContent = '';
     this._closeModal = !isOpen;
     if (!isOpen) this.syncModalPnl(!preset.id);
+    // v50.74: 平今/平昨 手选(仅平仓) —— 编辑已有平仓时把「自动会判成什么」也提示出来
+    if ($('tmCloseTodayWrap')) $('tmCloseTodayWrap').style.display = isOpen ? 'none' : '';
+    this.syncCloseTodaySeg();
+    this.syncCloseTodayHint(preset);
     bg.classList.remove('hidden');
     bg.dataset.editing = preset.id || '';
   },
@@ -8067,6 +8161,28 @@ const TradeUI = {
     return null;
   },
 
+  /* v50.74: 平今 / 平昨 手选 —— 只影响「手续费」按哪一档费率算, 不影响盈亏。
+     有些品种平今与平昨差很多(平今 0 / 平昨 4.3 元/手这种), 自动按时间判不准时能强制。 */
+  syncCloseTodaySeg(){
+    document.querySelectorAll('#tmCloseToday .pick-opt').forEach(b=>{
+      const on = (b.dataset.ct || '') === (this._closeToday || '');
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  },
+  syncCloseTodayHint(preset){
+    const el = $('tmCloseTodayHint');
+    if (!el) return;
+    const ct = this._closeToday || '';
+    if (ct === '1'){ el.textContent = '强制按「平今」档费率算手续费'; return; }
+    if (ct === '0'){ el.textContent = '强制按「平昨」档费率算手续费'; return; }
+    // 自动档: 编辑已有平仓记录时, 把后端自动判出来的结果显示出来(前端不重算交易日)
+    const auto = (preset && preset.id) ? (preset.fee_is_today ? '平今' : '平昨') : '';
+    el.textContent = auto
+      ? ('自动判定：' + auto + '（按开仓 ↔ 平仓的交易日，夜盘 21:00 后算下一交易日）')
+      : '自动：按开仓 ↔ 平仓的交易日推；判不准/想强制时选平今或平昨';
+  },
+
   /* 从标的(品种代码)或手填合约里解析品种, 用来取最小变动价位 */
   _tickContract(){
     const uEl = $('tmUnderlying'), cEl = $('tmContract');
@@ -8165,6 +8281,8 @@ const TradeUI = {
       close_price: $('tmClosePrice').value === '' ? null : parseFloat($('tmClosePrice').value),
       pnl: $('tmPnl').value === '' ? null : parseFloat($('tmPnl').value),
       close_date: $('tmCloseDate').value,
+      // v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨) —— 只影响手续费按哪档算
+      close_today: this._closeToday || '',
       note: $('tmNote').value,
       mode: this.mode,
       batch: ($('tradeModalBg').dataset.batch || ''),   // v50.47: 跟随批次, 平仓/加仓落进同一条主页记录
