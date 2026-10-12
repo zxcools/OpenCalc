@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5074            # 与 README 版本号 v50.74 对齐(数值比较用于单实例接管)
+APP_VERSION = 5075            # 与 README 版本号 v50.75 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1040,6 +1040,8 @@ def norm_strategy(name, default=None):
 AUTO_BACKUP_KEEP = 10
 BACKUP_DIRNAME = "backup"
 _last_backup_ts = 0.0
+# 被 min_interval 合并掉的那些「变更原因」, 攒到下一次真正落盘时一起写进说明
+_pending_backup_meta = []
 
 
 def data_dir_risky():
@@ -1065,19 +1067,155 @@ def suggest_safe_data_dir():
     return os.path.join(parent, "OpenCalc数据")
 
 
-def fund_auto_backup(reason="", force=False, min_interval=2.0):
+def _backup_meta_path(db_path):
+    """备份的说明文件路径: funds_xxx.db → funds_xxx.db.meta.json"""
+    return db_path + ".meta.json"
+
+
+def _write_backup_meta(db_path, reason, detail=""):
+    """给这份备份写一份 sidecar 说明(变更原因), 供恢复时判断「要退回到哪一步」.
+    ⚠ 故意写在 .db 之外: 不污染备份本体, 恢复时也不会把说明带进库里。
+    失败静默——说明是辅助信息, 不能因为它备份失败"""
+    try:
+        st = os.stat(db_path)
+        conn = None
+        counts = {}
+        try:
+            conn = sqlite3.connect("file:%s?mode=ro" % db_path.replace("?", "%3f"), uri=True)
+            for key, sql in (("records", "SELECT COUNT(*) FROM records"),
+                             ("trades", "SELECT COUNT(*) FROM trade_records"),
+                             ("pools", "SELECT COUNT(*) FROM trade_pool_snapshots"),
+                             ("reviews", "SELECT COUNT(*) FROM trade_reviews")):
+                try:
+                    counts[key] = conn.execute(sql).fetchone()[0]
+                except Exception:  # noqa: BLE001
+                    counts[key] = None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        meta = {
+            "reason": (reason or "").strip(),
+            "detail": (detail or "").strip(),
+            "ts": st.st_mtime,
+            "time": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "app_version": APP_VERSION,
+            "version_name": _version_name(APP_VERSION),
+            "counts": counts,
+        }
+        tmp = _backup_meta_path(db_path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, _backup_meta_path(db_path))
+        return meta
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_backup_meta(db_path):
+    """读备份说明; 老备份没有说明文件 → 返回 None"""
+    try:
+        with open(_backup_meta_path(db_path), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return meta if isinstance(meta, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _trade_change_detail(rec, verb="保存"):
+    """把一条交易记录压成一句话, 作为备份说明(如「期权买方 · 铁矿石 i2701 · 开仓买 6 手」).
+    rec 传 None/空 → 返回空串。容错: 任何缺字段都不抛"""
+    try:
+        if not rec:
+            return ""
+        if isinstance(rec, dict):
+            get = rec.get
+        else:
+            get = lambda k, dv=None: (rec[k] if k in rec.keys() else dv)  # noqa: E731
+        mode = get("mode") or "options"
+        mode_name = {"options": "期权买方", "dual": "期权双买", "futures": "期货"}.get(mode, mode)
+        u = (get("underlying") or "").strip()
+        ct = (get("contract") or "").strip()
+        cp = (get("call_put") or "").strip()
+        dr = (get("direction") or "").strip()
+        qty = get("qty")
+        close_qty = get("close_qty")
+        is_close = bool(close_qty)
+        seg = [mode_name]
+        if u:
+            seg.append(u + (" " + ct if ct and ct.lower() != u.lower() else ""))
+        # 如「开仓卖 6 手」「平仓买 3 手」—— 方向译成中文, 与记录页口径一致
+        act = "平仓" if is_close else "开仓"
+        if verb == "删除":
+            act = "删除" + act
+        parts = [act]
+        if cp:
+            parts.append(cp)
+        if dr:
+            parts.append({"buy": "买", "sell": "卖", "long": "多", "short": "空"}.get(str(dr).lower(), dr))
+        n = close_qty if is_close else qty
+        seg.append("".join(parts) + (" %s 手" % _fmt_qty(n) if n else ""))
+        return " · ".join(s for s in seg if s)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _fmt_qty(n):
+    """手数显示: 整数不带小数点"""
+    try:
+        f = float(n)
+        return str(int(f)) if abs(f - int(f)) < 1e-9 else ("%g" % f)
+    except Exception:  # noqa: BLE001
+        return str(n)
+
+
+def _pool_change_detail(rec):
+    """监控池快照压成一句话(如「期权买方 · 2026-10-12 · 3 个合约」)
+    ⚠ 不列合约名: 侧栏弹窗的备份列表只有 ~330px 宽, 列出来必被截断"""
+    try:
+        if not rec:
+            return ""
+        get = rec.get if isinstance(rec, dict) else (lambda k, dv=None: (rec[k] if k in rec.keys() else dv))
+        mode = get("mode") or "options"
+        mode_name = {"options": "期权买方", "dual": "期权双买", "futures": "期货"}.get(mode, mode)
+        cs = get("contracts") or []
+        if isinstance(cs, str):
+            try:
+                cs = json.loads(cs)
+            except Exception:  # noqa: BLE001
+                cs = []
+        when = (get("snapshot_date") or "").strip()
+        seg = [mode_name]
+        if when:
+            seg.append(when)
+        if cs:
+            seg.append("%d 个合约" % len(cs))
+        return " · ".join(s for s in seg if s)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def fund_auto_backup(reason="", force=False, min_interval=2.0, detail=""):
     """把当前库快照到 <数据目录>/backup/funds_<时间戳>.db, 轮转只留最近 AUTO_BACKUP_KEEP 份.
     返回备份文件路径; 未备份返回 None.
     ⚠ 用 sqlite3 的 backup API 而非文件复制 — 库可能正被写入, 直接拷文件可能拿到半截状态
-    ⚠ min_interval 内的重复触发合并成一次(导入/批量保存时会连续调用, 避免备份风暴)"""
+    ⚠ min_interval 内的重复触发合并成一次(导入/批量保存时会连续调用, 避免备份风暴)
+    ⚠ 合并时把两次的 reason/detail 合并写进同一份说明, 别把后一次的原因丢掉"""
     # 测试/批量造数时可用 OC_NO_AUTO_BACKUP=1 关闭自动备份: 每次数据变动都做一次全库快照,
     # 批量删除(如 E2E 造数后清理)会连续触发备份+轮转, 既慢又会撞到文件批量删除保护
     if os.environ.get("OC_NO_AUTO_BACKUP") == "1" and not force:
         return None
 
-    global _last_backup_ts
+    global _last_backup_ts, _pending_backup_meta
+    if os.environ.get("OC_NO_AUTO_BACKUP") == "1" and not force:
+        return None
+
     now = time.time()
     if not force and min_interval and (now - _last_backup_ts) < min_interval:
+        # 合并窗口内: 把原因攒起来, 等下一次真正落盘时一并写进说明
+        _pending_backup_meta.append((reason or "", detail or ""))
         return None
     conn_in = conn_out = None
     out_path = None
@@ -1094,11 +1232,28 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0):
         conn_out.close()
         conn_in.close()
         conn_in = conn_out = None
+        # 写变更说明(本次 + 被合并掉的那些原因)
+        merged = _pending_backup_meta + [(reason or "", detail or "")]
+        _pending_backup_meta = []
+        seen, parts = set(), []
+        for r, d in merged:
+            txt = (r + ("：" + d if d else "")).strip()
+            if txt and txt not in seen:
+                seen.add(txt)
+                parts.append(txt)
+        _write_backup_meta(out_path, " / ".join(p for p in parts if p), "")
         # 轮转: 只保留最近 N 份(文件名内嵌时间戳, 按名排序即按时间排序)
         files = sorted(f for f in os.listdir(bdir) if f.startswith("funds_") and f.endswith(".db"))
         for f in files[:-AUTO_BACKUP_KEEP]:
             try:
                 os.remove(os.path.join(bdir, f))
+            except OSError:
+                pass
+            # 说明文件跟着走, 别留孤儿
+            try:
+                m = os.path.join(bdir, f + ".meta.json")
+                if os.path.exists(m):
+                    os.remove(m)
             except OSError:
                 pass
         _last_backup_ts = now
@@ -1120,7 +1275,7 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0):
 
 
 def fund_backup_list():
-    """返回备份文件列表(新→旧): [{name, path, size, mtime, records, trades}]"""
+    """返回备份文件列表(新→旧): [{name, path, size, mtime, records, trades, reason, detail, ...}]"""
     bdir = fund_backup_dir()
     out = []
     try:
@@ -1129,7 +1284,8 @@ def fund_backup_list():
                 p = os.path.join(bdir, f)
                 st = os.stat(p)
                 item = {"name": f, "path": p, "size": st.st_size, "mtime": st.st_mtime,
-                        "records": None, "trades": None}
+                        "records": None, "trades": None,
+                        "reason": "", "detail": "", "version_name": "", "pools": None, "reviews": None}
                 # 顺带读出条数, 让用户在恢复前能看清这份备份里有什么
                 try:
                     c = sqlite3.connect("file:%s?mode=ro" % p.replace("?", "%3f"), uri=True)
@@ -1138,6 +1294,17 @@ def fund_backup_list():
                     c.close()
                 except Exception:  # noqa: BLE001
                     pass
+                # 变更说明(老备份没有 → 留空, 前端显示「—」)
+                meta = _read_backup_meta(p)
+                if meta:
+                    item["reason"] = meta.get("reason") or ""
+                    item["detail"] = meta.get("detail") or ""
+                    item["version_name"] = meta.get("version_name") or ""
+                    counts = meta.get("counts") or {}
+                    if item["trades"] is None:
+                        item["trades"] = counts.get("trades")
+                    item["pools"] = counts.get("pools")
+                    item["reviews"] = counts.get("reviews")
                 out.append(item)
     except OSError:
         pass
@@ -2455,6 +2622,34 @@ def trade_list_records(strategy=None, mode=None):
     return [_trade_record_to_dict(r) for r in db.execute(sql + " ORDER BY id ASC", args).fetchall()]
 
 
+def trade_get(rec_id):
+    """按 id 取一条交易记录(不存在返回 None) — 删除前留底给备份说明用"""
+    try:
+        db = _fund_db()
+        r = db.execute("SELECT * FROM trade_records WHERE id=?", (int(rec_id),)).fetchone()
+        return _trade_record_to_dict(r) if r else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def trade_pool_get(rec_id):
+    """按 id 取一条监控池快照(不存在返回 None)"""
+    try:
+        db = _fund_db()
+        r = db.execute("SELECT * FROM trade_pool_snapshots WHERE id=?", (int(rec_id),)).fetchone()
+        if not r:
+            return None
+        return {
+            "id": r["id"],
+            "snapshot_date": r["snapshot_date"] or "",
+            "contracts": json.loads(r["contracts"]) if r["contracts"] else [],
+            "note": r["note"] or "",
+            "mode": (r["mode"] if "mode" in r.keys() else "options") or "options",
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def trade_upsert(payload):
     """新增/更新交易记录; 不传 id=新增; 传 id=更新. 自动维护 created_at/updated_at.
     ⚠ 先做一次合约归一化(品种小写 + C/P 大写), 并把「归一化后与本次保存内容完全相同的旧行」删掉 —
@@ -3432,7 +3627,9 @@ class Handler(BaseHTTPRequestHandler):
                 action = params.get("action", "upsert")
                 if action == "delete":
                     fund_delete(params["strategy"], int(params["year"]), int(params["month"]))
-                    fund_auto_backup("资金曲线-删除")
+                    fund_auto_backup("资金曲线-删除", detail="%s %s年%s月" % (
+                        norm_strategy(params.get("strategy"), params.get("strategy") or ""),
+                        params.get("year", ""), params.get("month", "")))
                     self._send(200, _json({"ok": True, "msg": "已删除"}))
                 else:
                     fund_upsert(
@@ -3445,7 +3642,9 @@ class Handler(BaseHTTPRequestHandler):
                         params.get("note", ""),
                         cash=params.get("cash", 0),
                     )
-                    fund_auto_backup("资金曲线-保存")
+                    fund_auto_backup("资金曲线-保存", detail="%s %s年%s月" % (
+                        norm_strategy(params.get("strategy"), params.get("strategy") or ""),
+                        params.get("year", ""), params.get("month", "")))
                     self._send(200, _json({"ok": True, "msg": "已保存"}))
                 return
             elif path == "/api/funds/import":
@@ -3470,7 +3669,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, _json({"ok": False, "error": info}))
                 return
             elif path == "/api/funds/backup":
-                p = fund_auto_backup("手动", force=True)
+                p = fund_auto_backup("手动备份", force=True)
                 if p:
                     self._send(200, _json({"ok": True, "path": p, "msg": "已备份"}))
                 else:
@@ -3495,22 +3694,32 @@ class Handler(BaseHTTPRequestHandler):
             # ---- 期权交易记录 (POST) ----
             elif path == "/api/trades/upsert":
                 rec_id = trade_upsert(params)
-                fund_auto_backup("交易记录-保存")
+                fund_auto_backup("交易记录-保存", detail=_trade_change_detail(params, "保存"))
                 self._send(200, _json({"ok": True, "id": rec_id, "msg": "已保存"}))
                 return
             elif path == "/api/trades/delete":
+                old = None
+                try:
+                    old = trade_get(int(params["id"]))
+                except Exception:  # noqa: BLE001
+                    old = None
                 trade_delete(int(params["id"]))
-                fund_auto_backup("交易记录-删除")
+                fund_auto_backup("交易记录-删除", detail=_trade_change_detail(old, "删除"))
                 self._send(200, _json({"ok": True, "msg": "已删除"}))
                 return
             elif path == "/api/trades/pool/upsert":
                 rec_id = trade_pool_upsert(params)
-                fund_auto_backup("监控池-保存")
+                fund_auto_backup("监控池-保存", detail=_pool_change_detail(params))
                 self._send(200, _json({"ok": True, "id": rec_id, "msg": "已保存"}))
                 return
             elif path == "/api/trades/pool/delete":
+                old = None
+                try:
+                    old = trade_pool_get(int(params["id"]))
+                except Exception:  # noqa: BLE001
+                    old = None
                 trade_pool_delete(int(params["id"]))
-                fund_auto_backup("监控池-删除")
+                fund_auto_backup("监控池-删除", detail=_pool_change_detail(old))
                 self._send(200, _json({"ok": True, "msg": "已删除"}))
                 return
 
@@ -4099,6 +4308,17 @@ select{cursor:pointer;appearance:none;
   border-radius:14px;padding:12px 16px;font-size:13px;color:var(--warn);line-height:1.7}
 .errorbox{border:1px solid rgba(255,107,107,.4);background:rgba(255,107,107,.08);
   border-radius:14px;padding:12px 16px;font-size:13px;color:var(--bad);line-height:1.7}
+
+/* 备份列表: 每份快照的变更说明 */
+.bk-row{display:flex;align-items:center;gap:10px;padding:8px 10px}
+.bk-row.sep{border-top:1px solid var(--line)}
+/* ⚠ 全局 label{margin:14px 0 6px} 会把非 label 的自建块推低 → 这里显式归零 */
+.bk-chg{margin:3px 0 1px;font-size:12.5px;line-height:1.45;color:var(--accent2);font-weight:600;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all}
+.bk-chg .bk-dt{color:var(--sub);font-weight:400}
+.bk-chg.bk-none{color:var(--sub);font-weight:400;opacity:.75}
+.bk-ver{margin-left:6px;padding:1px 6px;border-radius:6px;font-size:11px;font-weight:600;
+  color:var(--sub);background:var(--panel2);border:1px solid var(--border)}
 
 /* 搜索选择器 */
 .searchbox{position:relative}
@@ -5231,8 +5451,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         已有备份：<b id="setBkCnt" style="color:var(--accent)">—</b> 份
         <span id="setBkLast" style="opacity:.75"></span>
         <button class="btn xs" id="setBkNow" style="margin-left:6px">立即备份</button>
-        <div class="tip" style="margin-top:6px">点任意一份右侧的「恢复」即可把数据退回到那一刻（恢复前会自动把当前状态再存一份，可以再退回来）。</div>
-        <div id="setBkList" style="margin-top:8px;max-height:190px;overflow:auto;border:1px solid var(--line);border-radius:8px"></div>
+        <div class="tip" style="margin-top:6px">每份备份都标着<b>它是在哪次变更之后</b>存的（如「交易记录-保存 · 期权买方 · 铁矿石 i2701 · 开仓买 6 手」），恢复前先看一眼就知道会退回到哪一步。点右侧「恢复」即可退回（恢复前会自动把当前状态再存一份，可以再退回来）。</div>
+        <div id="setBkList" style="margin-top:8px;max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:8px"></div>
       </div>
       <label>新的数据目录（建议填<u>网盘同步文件夹</u>，如 百度网盘/OneDrive/坚果云 的某个目录）</label>
       <div style="display:flex;gap:8px">
@@ -8723,27 +8943,41 @@ const FundUI = {
         const t = new Date(b.mtime * 1000).toLocaleString('zh-CN', {hour12:false});
         const info = (b.records == null) ? '' :
           ('资金 ' + b.records + ' 条 · 交易 ' + (b.trades==null?'?':b.trades) + ' 条');
-        return '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;'
-          + (i ? 'border-top:1px solid var(--line);' : '') + '">'
+        // v50.75: 显示这份备份「是在哪次变更之后」存的, 恢复前一眼看清要退到哪一步
+        const chgTxt = b.reason ? (b.reason + (b.detail ? '（' + b.detail + '）' : '')) : '无变更说明（旧备份）';
+        const chg = b.reason
+          ? '<div class="bk-chg" title="' + escHtml(chgTxt) + '">' + escHtml(b.reason) + (b.detail ? ' <span class="bk-dt">' + escHtml(b.detail) + '</span>' : '') + '</div>'
+          : '<div class="bk-chg bk-none">— 无变更说明（旧备份）</div>';
+        return '<div class="bk-row' + (i ? ' sep' : '') + '">'
           + '<span style="flex:1;min-width:0">'
           + '<b style="font-size:12.5px">' + t + '</b>'
           + (i === 0 ? ' <span style="color:var(--accent);font-size:11.5px">最新</span>' : '')
-          + '<br><span style="color:var(--sub);font-size:11.5px">' + info + '</span>'
+          + (b.version_name ? ' <span class="bk-ver">' + escHtml(b.version_name) + '</span>' : '')
+          + chg
+          + '<div style="color:var(--sub);font-size:11.5px">' + info + '</div>'
           + '</span>'
           + '<button class="btn xs" data-bkrestore="' + b.name + '">恢复</button>'
           + '</div>';
       }).join('');
       box.querySelectorAll('[data-bkrestore]').forEach(btn => {
-        btn.addEventListener('click', () => this.restoreBackup(btn.dataset.bkrestore));
+        const b = list.find(x => x.name === btn.dataset.bkrestore);
+        btn.addEventListener('click', () => this.restoreBackup(btn.dataset.bkrestore, b));
       });
     } catch (e) {
       box.innerHTML = '<div style="padding:10px;color:var(--sub);font-size:12.5px">读取备份失败：' + e + '</div>';
     }
   },
 
-  async restoreBackup(name){
-    if (!confirm('⚠ 将用这份备份【覆盖当前数据】：\n' + name
-      + '\n\n当前的数据会先自动备份一份，所以还能再退回来。\n\n确定恢复吗？')) return;
+  async restoreBackup(name, info){
+    const t = info && info.mtime ? new Date(info.mtime * 1000).toLocaleString('zh-CN', {hour12:false}) : '';
+    let lines = ['⚠ 将用这份备份【覆盖当前数据】：', name];
+    if (t) lines.push('备份时间：' + t);
+    // 变更说明: 让用户恢复前就知道会退回到「哪一步之后」
+    if (info && info.reason) lines.push('最后变更：' + info.reason + (info.detail ? '（' + info.detail + '）' : ''));
+    else lines.push('最后变更：无说明（旧备份）');
+    if (info && info.records != null) lines.push('内含：资金 ' + info.records + ' 条 · 交易 ' + (info.trades==null?'?':info.trades) + ' 条');
+    lines.push('', '当前的数据会先自动备份一份，所以还能再退回来。', '', '确定恢复吗？');
+    if (!confirm(lines.join('\n'))) return;
     try {
       const r = await fetchT('/api/funds/restore', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({name})}, 30000);

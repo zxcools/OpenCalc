@@ -858,6 +858,58 @@ async function main() {
   })())`);
   const bkU = JSON.parse(bkUi);
   check('备份列表展示「恢复」按钮与最新标记', bkU.hasRestore && bkU.hasLatest && bkU.hasCount, bkUi);
+
+  // ---- v50.75: 备份记录带「最后的变更内容」, 恢复前能看清退回到哪一步 ----
+  // ⚠ E2E 全程开着 OC_NO_AUTO_BACKUP=1(避免备份风暴撞批量删除保护) → 写记录不会自动产生快照,
+  //    所以这里改走「手动备份」接口造一份, 并顺带验证 reason/detail 能落盘且被界面画出来
+  const bkChg = await evalJs(ws, `(async () => {
+    // 先用真实写库接口造一条记录, 确认写库链路本身没问题
+    const up = await (await fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mode:'options', strategy:'期权买方', underlying:'bktest', contract:'bktest2610C5000',
+        op_type:'open', direction:'buy', open_date:'2026-10-12', call_put:'C', open_price:88, qty:3, premium:264})})).json();
+    // 再显式备份一次(manual), 这会写 reason/detail
+    const mk = await (await fetch('/api/funds/backup', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})).json();
+    await new Promise(r => setTimeout(r, 300));
+    const d = await (await fetch('/api/funds/backups')).json();
+    const list = d.backups || [];
+    const first = list[0] || {};
+    await FundUI.loadBackups();
+    const box = document.getElementById('setBkList');
+    return JSON.stringify({
+      saved: !!up.ok, id: up.id, mkOk: !!mk.ok,
+      n: list.length,
+      reason: first.reason || '', detail: first.detail || '',
+      ver: first.version_name || '',
+      hasMetaField: ('reason' in first) && ('pools' in first),
+      domHasChg: box.querySelectorAll('.bk-chg').length >= 1,
+      domText: (box.querySelector('.bk-chg') || {}).innerText || ''
+    });
+  })()`);
+  await sleep(400);
+  const bkC = JSON.parse(bkChg);
+  check('写记录 + 手动备份都成功', bkC.saved && bkC.mkOk, bkChg);
+  check('新备份带变更说明(reason 非空)', bkC.reason.length > 0, bkChg);
+  check('变更说明标出「手动备份」', /手动/.test(bkC.reason), bkChg);
+  check('备份列表带 reason/pools 字段', bkC.hasMetaField, bkChg);
+  check('备份列表带版本号标记', /^v\d/.test(bkC.ver), bkChg);
+  check('界面真的画出变更说明(.bk-chg)', bkC.domHasChg && bkC.domText.length > 0, bkChg);
+  // 恢复确认框必须把「最后变更」念出来, 否则用户还是不知道要退到哪
+  const bkConfirm = await evalJs(ws, `JSON.stringify((() => {
+    const msg = [];
+    const old = window.confirm; window.confirm = (t) => { msg.push(t); return false; };
+    FundUI.restoreBackup('funds_不存在_测试.db', {reason:'交易记录-保存', detail:'期权买方 · bktest2610C5000 · 开仓买 3 手', mtime: Math.floor(Date.now()/1000), records:1, trades:3});
+    window.confirm = old;
+    return {txt: msg.join('|')};
+  })())`);
+  await sleep(300);
+  const bkCf = JSON.parse(bkConfirm);
+  check('恢复确认框显示备份时间', /备份时间/.test(bkCf.txt), bkConfirm);
+  check('恢复确认框显示「最后变更」与手数', /最后变更：交易记录-保存/.test(bkCf.txt) && /3 手/.test(bkCf.txt), bkConfirm);
+  check('恢复确认框显示备份内含条数', /内含：资金 1 条/.test(bkCf.txt), bkConfirm);
+  // 清掉这条测试记录
+  await evalJs(ws, `(async () => { await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:${bkC.id}})}); })()`);
+  await sleep(300);
+
   await evalJs(ws, `document.getElementById('setBg').classList.add('hidden')`);
 
   // 2) 文件夹浏览器: 打开后能列出盘符/目录, 双击目录可进入, 选好后回填路径

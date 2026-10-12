@@ -1491,6 +1491,95 @@ check("恢复前会自动备份(可回退)", len(fund_backup_list()) >= 1, str(l
 _bl = fund_backup_list()
 check("备份列表含条数字段", _bl and ("records" in _bl[0]) and ("trades" in _bl[0]), str(_bl[:1]))
 
+print("\n== 备份变更说明 (v50.75) ==")
+from main import (_backup_meta_path, _read_backup_meta, _write_backup_meta,
+                  _trade_change_detail, _pool_change_detail, trade_get, trade_pool_get)
+
+# 11.6.1 说明落在 .db 之外的 sidecar 文件, 不污染备份本体
+_snap = fund_auto_backup("交易记录-保存", force=True, detail="期权买方 · 铁矿石 i2701 · 开仓买 6 手")
+check("备份说明文件是 sidecar(.db.meta.json)", _snap and _os.path.exists(_backup_meta_path(_snap)),
+      str(_backup_meta_path(_snap)))
+# ⚠ 说明绝不能进库里, 否则恢复会把说明带进去
+_ck = sqlite3.connect(_snap)
+_tabs = {r[0] for r in _ck.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+_ck.close()
+check("备份本体不含 meta 表(说明不污染数据)", not any("meta" in t.lower() for t in _tabs), str(sorted(_tabs)))
+_m1 = _read_backup_meta(_snap)
+check("说明可读回 reason(含 detail 合并)",
+      _m1 and _m1.get("reason") == "交易记录-保存：期权买方 · 铁矿石 i2701 · 开仓买 6 手", str(_m1))
+check("说明含版本号", _m1 and _m1.get("version_name"), str(_m1 and _m1.get("version_name")))
+check("说明含各表条数", _m1 and isinstance(_m1.get("counts"), dict) and "trades" in _m1["counts"], str(_m1))
+# 列表接口应带上说明字段, 且第一份就是刚存的
+_bl2 = fund_backup_list()
+check("备份列表带 reason 字段", _bl2 and "reason" in _bl2[0], str(_bl2[:1]))
+check("列表首条 reason 与写入一致", _bl2 and "铁矿石" in (_bl2[0].get("reason") or ""), str(_bl2[0].get("reason")))
+check("列表带 pools/reviews 条数", _bl2 and "pools" in _bl2[0], str(_bl2[:1]))
+
+# 11.6.2 二次写入覆盖旧说明; 读不存在说明返回 None(老备份兼容)
+_write_backup_meta(_snap, "只写 reason", "")
+check("二次写入覆盖(不留旧文本)",
+      (lambda m: m and m.get("reason") == "只写 reason" and "铁矿石" not in m.get("reason", ""))(_read_backup_meta(_snap)))
+check("读不存在的说明返回 None(老备份)", _read_backup_meta(_os.path.join(fund_backup_dir(), "funds_不存在.db")) is None)
+
+# 11.6.3 被 min_interval 合并掉的原因要一起写进说明(否则「删了东西却显示上一次的保存」)
+_ck2 = _ms.FUND_DB_CONN
+_p_keep = _os.path.join(fund_backup_dir(), "funds_20880101_000000_000.db")
+# 先制造一次真实落盘, 让 _last_backup_ts 变成「刚刚」
+_snap_a = fund_auto_backup("第一次", force=True)
+_snap_b = fund_auto_backup("被合并的原因A")                    # 2s 内 → 合并, 不落盘
+fund_auto_backup("被合并的原因B")                              # 再合并
+_snap_c = fund_auto_backup("第三次落盘", force=True)           # 强制落盘 → 应把 A/B 一起写进去
+_rc = (_read_backup_meta(_snap_c) or {}).get("reason", "")
+check("合并掉的原因不丢", ("被合并的原因A" in _rc) and ("被合并的原因B" in _rc) and ("第三次落盘" in _rc), _rc)
+check("合并去重(同一个原因只留一次)",
+      (_read_backup_meta(_snap_c) or {}).get("reason", "").count("被合并的原因A") == 1, _rc)
+
+# 11.6.4 单条描述函数: 空输入 / 开仓 / 平仓 / 监控池
+check("描述: 空记录返回空串", _trade_change_detail(None) == "" and _trade_change_detail({}) == "")
+_d_open = _trade_change_detail({"mode": "futures", "underlying": "i", "contract": "i2701",
+                                "direction": "sell", "qty": 5, "close_qty": 0})
+check("描述: 期货开仓含品种/方向(中文化)/手数",
+      ("期货" in _d_open) and ("i2701" in _d_open) and ("开仓卖" in _d_open) and ("5 手" in _d_open), _d_open)
+_d_close = _trade_change_detail({"mode": "options", "underlying": "i", "contract": "i2701C800",
+                                 "call_put": "C", "direction": "buy", "qty": 5, "close_qty": 2,
+                                 "close_price": 100, "pnl": 10})
+check("描述: 按 close_qty 判定为平仓", "平仓C买" in _d_close and "2 手" in _d_close, _d_close)
+_d_del = _trade_change_detail({"mode": "dual", "underlying": "lc", "contract": "lc2611-C-144000"}, "删除")
+check("描述: 删除时标注", ("期权双买" in _d_del) and ("删除开仓" in _d_del), _d_del)
+check("描述: 未知字段不抛异常", isinstance(_trade_change_detail({"mode": "x"}), str))
+check("描述: 监控池含合约数",
+      "3 个合约" in _pool_change_detail({"mode": "options", "snapshot_date": "2026-10-12",
+                                          "contracts": ["a", "b", "c"]}),
+      _pool_change_detail({"mode": "options", "snapshot_date": "2026-10-12", "contracts": ["a", "b", "c"]}))
+check("描述: 监控池空合约不抛", isinstance(_pool_change_detail({}), str))
+
+# 11.6.5 trade_get / trade_pool_get (删除前留底)
+_newid = trade_upsert({'underlying': 'bkmeta', 'contract': 'cu2610C80000', 'op_type': 'open',
+                       'direction': 'buy', 'open_date': '2026-08-01', 'call_put': 'C',
+                       'open_price': 100, 'qty': 2, 'premium': 200, 'mode': 'options'})
+_g = trade_get(_newid)
+check("trade_get 按 id 取回", _g and _g.get("underlying") == "bkmeta", str(_g))
+check("trade_get 不存在返回 None", trade_get(99999999) is None)
+check("trade_get 非法 id 返回 None(不抛)", trade_get("abc") is None)
+_pid = trade_pool_upsert({'contracts': ['cu2610C80000'], 'note': 'bkmeta池'})
+_pg = trade_pool_get(_pid)
+check("trade_pool_get 按 id 取回", _pg and _pg.get("note") == "bkmeta池", str(_pg))
+check("trade_pool_get 不存在返回 None", trade_pool_get(99999999) is None)
+trade_delete(_newid)
+trade_pool_delete(_pid)
+
+# 11.6.6 轮转时说明文件跟着走, 不留孤儿
+for _i in range(AUTO_BACKUP_KEEP + 3):
+    _p = _os.path.join(fund_backup_dir(), "funds_20890101_0000%02d_000.db" % _i)
+    with open(_p, "wb") as _f:
+        _f.write(b"x")
+    with open(_p + ".meta.json", "w", encoding="utf-8") as _f:
+        _f.write('{"reason":"孤儿测试"}')
+fund_auto_backup("触发轮转2", force=True)
+_orphan = [f for f in os.listdir(fund_backup_dir())
+           if f.endswith(".meta.json") and not _os.path.exists(_os.path.join(fund_backup_dir(), f[:-len(".meta.json")]))]
+check("轮转后不留孤儿说明文件", len(_orphan) == 0, str(_orphan))
+
 print("\n== 主表搜索(分组带合约列表) ==")
 # 主表搜索要能按合约号命中 → 分组结果必须带 contracts
 _gs_before = trade_groups()
