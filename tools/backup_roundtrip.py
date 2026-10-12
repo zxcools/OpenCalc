@@ -107,14 +107,16 @@ try:
                                        'review_at': '2026-10-07T10:00', 'content': '双买这条的复盘'}, BASE_A)
 
     # v50.70: 补一条带开/平仓时间的期货记录 —— time 列不进备份的话, 恢复后「平今/平昨」就判不出来了
+    # ⚠ v50.77 起用交易日历: 夜盘属于「下一个交易日」。这里刻意用**周四夜盘 → 周五早盘**
+    #   (周四 21:20 的交易日是周五), 不要用周五夜盘 —— 那会跳到下周一, 跟"次日早盘"不是同一天
     _bt = 'B20261010000070tt'
     post('/api/trades/upsert', {'mode': 'futures', 'underlying': 'rb2610', 'contract': 'rb2610',
                                 'batch': _bt, 'op_type': 'open', 'direction': 'sell',
-                                'open_date': '2026-10-09', 'open_time': '21:20',
+                                'open_date': '2026-10-08', 'open_time': '21:20',
                                 'open_price': 3200, 'qty': 2, 'premium': 0}, BASE_A)
     post('/api/trades/upsert', {'mode': 'futures', 'underlying': 'rb2610', 'contract': 'rb2610',
                                 'batch': _bt, 'op_type': 'close', 'direction': 'buy',
-                                'close_date': '2026-10-10', 'close_time': '10:05',
+                                'close_date': '2026-10-09', 'close_time': '10:05',
                                 'close_qty': 2, 'close_price': 3140, 'pnl': 1200}, BASE_A)
 
     # v50.74: 平今/平昨 的手选标记也要进备份(不带上 → 恢复后档位丢失, 手续费会按自动判定重算)
@@ -219,7 +221,7 @@ try:
     check('开仓/平仓时间进备份(v50.70)',
           len(_o70) == 2 and _o70[0].get('open_time') == '21:20' and _o70[1].get('close_time') == '10:05',
           str([(o.get('open_time'), o.get('close_time')) for o in _o70]))
-    check('平今判定随备份保留(v50.70): 夜盘 21:20 开、次日 10:05 平 = 同一交易日',
+    check('平今判定随备份保留(v50.70): 周四夜盘 21:20 开、周五 10:05 平 = 同一交易日',
           bool(_o70) and _o70[1].get('fee_is_today') is True,
           str(_o70 and _o70[1].get('fee_is_today')))
 

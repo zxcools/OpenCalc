@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5076            # 与 README 版本号 v50.76 对齐(数值比较用于单实例接管)
+APP_VERSION = 5077            # 与 README 版本号 v50.77 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -326,11 +326,88 @@ def fee_product(underlying, contract=""):
     return ""
 
 
+def _import_fail(kind, idx, exc):
+    """把「第 N 条导入失败」压成一句话(供前端展示)。
+    ⚠ 导入/迁移以前是 except: pass 静默跳过 —— 用户看到「导入成功」却少了几条,
+      完全无从查起。现在统一收集成明细, 至少让人知道少了什么、为什么。"""
+    msg = str(exc).replace("\n", " ").strip()
+    if len(msg) > 120:
+        msg = msg[:120] + "…"
+    return "%s 第 %d 条：%s" % (kind, idx, msg)
+
+
+def _date_range(a, b):
+    """[a, b] 闭区间内的所有日期字符串(用于写节假日表, 免得一天天手抄)"""
+    out, d0 = [], datetime.strptime(a, "%Y-%m-%d")
+    d1 = datetime.strptime(b, "%Y-%m-%d")
+    while d0 <= d1:
+        out.append(d0.strftime("%Y-%m-%d"))
+        d0 += timedelta(days=1)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 交易日历 (v50.77)
+# 期货市场交易日 = 周一~周五 且 **非法定节假日**
+#   ⚠ 调休补班的周六/周日, 期货市场**不开市**(不按"上班日"算), 所以只看"工作日 + 非节假日"
+#   ⚠ 为什么需要它: 夜盘(21:00 后)属于**下一个交易日** —— 周五 21:30 属于**下周一**(不是周六),
+#     节前一晚属于**节后第一个工作日**。以前只做 "+1 天", 于是周五夜盘开的仓会被判成平昨, 手续费算错。
+#   ⚠ 这张表**每年要更新一次**(国务院办公厅每年 11 月前后发布次年安排)。表里没有的年份会
+#     自动退化成"只跳周末" —— 不报错, 只是那些年份的节假日判定回到旧行为, 所以别忘了更新。
+#   来源: 国务院办公厅《关于2025年部分节假日安排的通知》《关于2026年部分节假日安排的通知》
+# ---------------------------------------------------------------------------
+MARKET_HOLIDAYS = frozenset(
+    ["2025-01-01"]                                                   # 元旦
+    + _date_range("2025-01-28", "2025-02-04")                        # 春节
+    + _date_range("2025-04-04", "2025-04-06")                        # 清明
+    + _date_range("2025-05-01", "2025-05-05")                        # 劳动节
+    + _date_range("2025-05-31", "2025-06-02")                        # 端午
+    + _date_range("2025-10-01", "2025-10-08")                        # 国庆 + 中秋
+    + _date_range("2026-01-01", "2026-01-03")                        # 元旦
+    + _date_range("2026-02-15", "2026-02-23")                        # 春节(含调休, 连休 9 天)
+    + _date_range("2026-04-04", "2026-04-06")                        # 清明
+    + _date_range("2026-05-01", "2026-05-05")                        # 劳动节
+    + _date_range("2026-06-19", "2026-06-21")                        # 端午
+    + _date_range("2026-09-25", "2026-09-27")                        # 中秋
+    + _date_range("2026-10-01", "2026-10-07")                        # 国庆
+)
+# 表里已收录的年份 —— 不在其中的年份只有周末判定生效(便于 UI/测试提示"该更新日历了")
+MARKET_HOLIDAY_YEARS = frozenset(int(d[:4]) for d in MARKET_HOLIDAYS)
+
+
+def is_trading_day(date_str):
+    """该日是否为期货交易日(周一~周五 且 非法定节假日); 解析不了返回 False"""
+    d = str(date_str or "").strip()[:10]
+    try:
+        dt = datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        return False
+    if dt.weekday() >= 5:            # 5=周六 6=周日
+        return False
+    return d not in MARKET_HOLIDAYS
+
+
+def next_trading_day(date_str):
+    """下一个交易日(不含当天); 解析不了就原样返回"""
+    d = str(date_str or "").strip()[:10]
+    try:
+        dt = datetime.strptime(d, "%Y-%m-%d")
+    except ValueError:
+        return d
+    for _ in range(30):              # 春节最长连休 9 天 + 周末, 30 天足够覆盖任何连休
+        dt += timedelta(days=1)
+        s = dt.strftime("%Y-%m-%d")
+        if is_trading_day(s):
+            return s
+    return d
+
+
 def trade_day(date_str, time_str=""):
     """把「日期 + 时间」换算成期货**交易日**。
-    ⚠ 夜盘(21:00 之后)属于**下一个**交易日: 周四 21:30 开的仓, 交易日是周五;
-      凌晨 00:00~02:30 是当晚夜盘的延续, 交易日就是当天(不用再往后挪)。
-      没填时间就按日盘处理(日期即交易日)。
+    ⚠ 夜盘(21:00 之后)属于**下一个交易日**: 周四 21:30 开的仓, 交易日是周五;
+      周五 21:30 属于**下周一**(跳周末), 节前一晚属于节后第一个工作日。
+      凌晨 00:00~02:30 是当晚夜盘的延续, 交易日就是当天(周五夜盘跨到周六 → 顺延到周一)。
+      没填时间就按日盘处理(日期即交易日, 不做交易日推算 —— 那是用户手填的日期)。
     """
     d = str(date_str or "").strip()[:10]
     if not d:
@@ -339,12 +416,13 @@ def trade_day(date_str, time_str=""):
     m = re.match(r"^(\d{1,2}):(\d{2})", t)
     if not m:
         return d
-    if int(m.group(1)) >= 21:          # 21:00 之后 → 下一交易日
-        try:
-            return (datetime.strptime(d, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-        except ValueError:
-            return d
-    return d
+    hh = int(m.group(1))
+    if hh >= 21:                       # 夜盘开市 → 下一个交易日
+        return next_trading_day(d)
+    if hh < 3:                         # 凌晨: 当晚夜盘延续 → 交易日是当天
+        # 当天本身不是交易日(周五夜盘跨到周六凌晨) → 顺延到下一个交易日
+        return d if is_trading_day(d) else next_trading_day(d)
+    return d                           # 日盘 → 当天即交易日
 
 
 def _fee_amount(rate, price, mult, qty, markup):
@@ -1042,6 +1120,8 @@ BACKUP_DIRNAME = "backup"
 _last_backup_ts = 0.0
 # 被 min_interval 合并掉的那些「变更原因」, 攒到下一次真正落盘时一起写进说明
 _pending_backup_meta = []
+# v50.77: 上面两个是跨线程共享状态(ThreadingHTTPServer) → 读写统一用这把锁
+_BACKUP_LOCK = threading.Lock()
 
 
 def data_dir_risky():
@@ -1209,14 +1289,14 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0, detail=""):
         return None
 
     global _last_backup_ts, _pending_backup_meta
-    if os.environ.get("OC_NO_AUTO_BACKUP") == "1" and not force:
-        return None
-
     now = time.time()
-    if not force and min_interval and (now - _last_backup_ts) < min_interval:
-        # 合并窗口内: 把原因攒起来, 等下一次真正落盘时一并写进说明
-        _pending_backup_meta.append((reason or "", detail or ""))
-        return None
+    # ⚠ 下面这段是「读-判断-写」共享状态, ThreadingHTTPServer 下多线程会并发进来 → 必须加锁,
+    #   否则两个请求可能都判定"该备份"→ 重复生成两份快照(白占一个轮转位), 或丢掉被合并的 reason
+    with _BACKUP_LOCK:
+        if not force and min_interval and (now - _last_backup_ts) < min_interval:
+            # 合并窗口内: 把原因攒起来, 等下一次真正落盘时一并写进说明
+            _pending_backup_meta.append((reason or "", detail or ""))
+            return None
     conn_in = conn_out = None
     out_path = None
     try:
@@ -1233,8 +1313,10 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0, detail=""):
         conn_in.close()
         conn_in = conn_out = None
         # 写变更说明(本次 + 被合并掉的那些原因)
-        merged = _pending_backup_meta + [(reason or "", detail or "")]
-        _pending_backup_meta = []
+        with _BACKUP_LOCK:
+            merged = _pending_backup_meta + [(reason or "", detail or "")]
+            _pending_backup_meta = []
+            _last_backup_ts = now
         seen, parts = set(), []
         for r, d in merged:
             txt = (r + ("：" + d if d else "")).strip()
@@ -1256,7 +1338,6 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0, detail=""):
                     os.remove(m)
             except OSError:
                 pass
-        _last_backup_ts = now
         return out_path
     except Exception:  # noqa: BLE001
         for h in (conn_in, conn_out):
@@ -1287,13 +1368,21 @@ def fund_backup_list():
                         "records": None, "trades": None,
                         "reason": "", "detail": "", "version_name": "", "pools": None, "reviews": None}
                 # 顺带读出条数, 让用户在恢复前能看清这份备份里有什么
+                # ⚠ 必须 finally 关连接: 老备份可能缺 trade_records 表, 第二条 execute 抛错时
+                #   原来的写法会跳过 close() → 每列一次目录就泄漏一个只读连接
+                c = None
                 try:
                     c = sqlite3.connect("file:%s?mode=ro" % p.replace("?", "%3f"), uri=True)
                     item["records"] = c.execute("SELECT COUNT(*) FROM records").fetchone()[0]
                     item["trades"] = c.execute("SELECT COUNT(*) FROM trade_records").fetchone()[0]
-                    c.close()
                 except Exception:  # noqa: BLE001
                     pass
+                finally:
+                    if c is not None:
+                        try:
+                            c.close()
+                        except Exception:  # noqa: BLE001
+                            pass
                 # 变更说明(老备份没有 → 留空, 前端显示「—」)
                 meta = _read_backup_meta(p)
                 if meta:
@@ -1319,7 +1408,6 @@ def fund_restore_backup(name):
     ⚠ 用 sqlite3 backup API 反向写入, 不直接拷文件(库可能有关联的 -wal/-journal)
     返回 {records, trades, pools, restored}
     """
-    global FUND_DB_CONN
     safe = os.path.basename((name or "").strip())
     if not safe or not safe.startswith("funds_") or not safe.endswith(".db"):
         raise ValueError("备份文件名不合法")
@@ -1337,23 +1425,19 @@ def fund_restore_backup(name):
             raise ValueError("该文件不是本软件的完整备份（缺少 %s 表）" % t)
     # 1) 恢复前保底: 当前状态再存一份
     fund_auto_backup("恢复前", force=True)
-    # 2) 关连接, 用 backup API 把快照写回当前库
-    if FUND_DB_CONN is not None:
+    # 2) 换库: 关连接 → 用 backup API 把快照写回当前库 → 重新打开
+    #    ⚠ 整段持 _DB_LOCK: 换库期间不能让另一个请求线程在建表/用旧连接
+    with _DB_LOCK:
+        _close_fund_conn()
+        src_conn = sqlite3.connect(src)
+        dst_conn = sqlite3.connect(FUND_DB_PATH)
         try:
-            FUND_DB_CONN.close()
-        except Exception:  # noqa: BLE001
-            pass
-        FUND_DB_CONN = None
-    _DB_SCHEMA_FOR["path"] = None   # 换库后需要重新建表/补列
-    src_conn = sqlite3.connect(src)
-    dst_conn = sqlite3.connect(FUND_DB_PATH)
-    try:
-        with dst_conn:
-            src_conn.backup(dst_conn)
-    finally:
-        src_conn.close()
-        dst_conn.close()
-    _fund_db()   # 重新打开并确保表结构
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            src_conn.close()
+            dst_conn.close()
+        _fund_db()   # 重新打开并确保表结构
     return {
         "restored": safe,
         "records": len(fund_list_records()),
@@ -1610,9 +1694,10 @@ def update_open_folder(path=""):
 
 def fund_set_data_dir(new_dir):
     """设置新的数据目录(可指向网盘同步文件夹), 并把现有记录合并迁移过去
-    返回 (迁移条数, 说明文字); 相同目录返回 (0, "same")
+    返回 (迁移条数, 说明文字, 失败明细列表); 相同目录返回 (0, "same", [])
     ⚠ 必须迁移「全部三张表」: 资金曲线 records + 交易记录 trade_records + 监控池 trade_pool_snapshots.
       早期版本只迁移了 records → 换数据目录后交易记录全没了(用户会以为数据丢了)
+    ⚠ 单条失败不能静默跳过(v50.77): 失败明细要带回前端, 让用户知道少了几条、为什么
     """
     global FUND_DB_PATH, FUND_DB_CONN
     if _env_data_dir:
@@ -1622,24 +1707,19 @@ def fund_set_data_dir(new_dir):
         raise ValueError("数据目录不能为空")
     cur_dir = os.path.dirname(FUND_DB_PATH)
     if os.path.normcase(new_dir) == os.path.normcase(cur_dir):
-        return 0, "same"
+        return 0, "same", []
     # 读旧库全部数据(迁移用, 在关闭连接前) — 三张表都要
     old_records = fund_list_records()
     old_trades = trade_list_records()
     old_pools = trade_pool_list()
     # 切换前先给旧库留一份完整快照(切完即分离, 出问题可回退)
     fund_auto_backup("切换数据目录前", force=True)
-    # 关闭旧连接, 避免文件锁
-    if FUND_DB_CONN is not None:
-        try:
-            FUND_DB_CONN.close()
-        except Exception:  # noqa: BLE001
-            pass
-        FUND_DB_CONN = None
-    _DB_SCHEMA_FOR["path"] = None   # 换库后需要重新建表/补列
-    # 切到新目录并确保新库存在
-    FUND_DB_PATH = os.path.join(new_dir, "funds.db")
-    _fund_db()
+    # 换库: 关旧连接 → 指向新库 → 打开并建表
+    # ⚠ 整段持 _DB_LOCK, 别让别的请求线程在建表/用旧连接
+    with _DB_LOCK:
+        _close_fund_conn()
+        FUND_DB_PATH = os.path.join(new_dir, "funds.db")
+        _fund_db()
     # 合并迁移(逐条 upsert; 目标库已有且本机没有的记录保留)
     migrated = 0
     for r in old_records:
@@ -1650,23 +1730,25 @@ def fund_set_data_dir(new_dir):
         )
         migrated += 1
     # 交易记录 / 监控池: 用保留原 id 的导入函数(幂等, 重复切换不会翻倍)
-    for t in old_trades:
+    # ⚠ 失败必须记下来(以前是静默 pass) —— 迁移条数虚高、还悄悄少了数据
+    failures = []
+    for i, t in enumerate(old_trades, 1):
         try:
             trade_import_record(t)
             migrated += 1
-        except Exception:  # noqa: BLE001
-            pass
-    for p in old_pools:
+        except Exception as e:  # noqa: BLE001
+            failures.append(_import_fail("交易记录", i, e))
+    for i, p in enumerate(old_pools, 1):
         try:
             trade_pool_import_record(p)
             migrated += 1
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            failures.append(_import_fail("监控池", i, e))
     # 持久化配置
     cfg = _load_config()
     cfg["data_dir"] = new_dir
     _save_config(cfg)
-    return migrated, "migrated"
+    return migrated, "migrated", failures
 
 def fund_data_info():
     """返回当前数据位置信息(UI 显示用)"""
@@ -1844,6 +1926,22 @@ def fs_list_dirs(path=""):
 _DB_LOCAL = threading.local()      # 每线程一个连接
 _DB_LOCK = threading.RLock()       # 建表/补列串行化
 _DB_SCHEMA_FOR = {"path": None}    # 已完成建表/补列的库路径
+
+
+def _close_fund_conn():
+    """关掉并清空全局库连接 + 标记表结构待重建。
+    ⚠ 连接其实是「每线程一个」(_DB_LOCAL), 这里只关当前线程这个;
+      它是给「恢复备份 / 切换数据目录」这种换库动作用的 —— 换完必须重新打开并重建结构。
+    ⚠ 调用方应持有 _DB_LOCK(RLock), 让换库动作与建表/补列互斥"""
+    global FUND_DB_CONN
+    if FUND_DB_CONN is not None:
+        try:
+            FUND_DB_CONN.close()
+        except Exception:  # noqa: BLE001
+            pass
+        FUND_DB_CONN = None
+    # 换库后需要重新建表/补列
+    _DB_SCHEMA_FOR["path"] = None
 
 
 def _fund_db():
@@ -2138,10 +2236,12 @@ def fund_delete(strategy, year, month):
 
 
 def fund_clear_all():
-    """一键清除所有记录(双策略都清)"""
+    """一键清除所有**资金曲线**记录(三策略都清); 返回剩余条数(应为 0)
+    ⚠ 只删 records, 不动 trade_records / trade_pool_snapshots / trade_reviews
+      (tests.py 就在验证这条契约; 界面走的是下面的 fund_clear_all_safe)"""
     db = _fund_db()
     db.execute("DELETE FROM records")
-    return db.execute("SELECT COUNT(*) FROM records").fetchone()[0]  # 返回剩余(应为0)
+    return db.execute("SELECT COUNT(*) FROM records").fetchone()[0]
 
 
 def fund_clear_all_safe():
@@ -2328,13 +2428,21 @@ def fund_export_backup():
 
 def fund_import_backup(payload):
     """导入备份: 资金曲线 + 期货/期权交易记录 + 监控池快照 + 复盘笔记 逐条 upsert 合并(同主键覆盖, 其余保留).
-    ⚠ plans(计算器最近方案)不经后端 —— 前端在导入时自己写回 localStorage(v50.57)。"""
+
+    返回 (导入条数, 命中的策略名列表, 失败明细列表)
+
+    ⚠ plans(计算器最近方案)不经后端 —— 前端在导入时自己写回 localStorage(v50.57)。
+    ⚠ v50.77: 交易记录/监控池/复盘 单条失败**不再静默 pass**, 而是收集成 "交易记录 第 3 条：原因"
+      的明细返回给前端。以前失败被吞掉、UI 仍提示「导入成功 N 条」→ 少了几条根本查不出来。
+      资金曲线那部分保持原样: 格式错就直接报错(避免把半份脏数据写进去)。
+    """
     if not isinstance(payload, dict):
         raise ValueError("备份文件格式不正确")
     if not isinstance(payload.get("records"), list):
         raise ValueError("备份文件格式不正确（缺少 records 列表）")
     strategies = set()
     imported = 0
+    failures = []
     if isinstance(payload.get("records"), list):
         for r in payload["records"]:
             if not isinstance(r, dict):
@@ -2354,28 +2462,28 @@ def fund_import_backup(payload):
             strategies.add(norm_strategy(r.get("strategy"), STRATEGY_OPTIONS_BUY))
             imported += 1
     if isinstance(payload.get("trades"), list):
-        for r in payload["trades"]:
+        for i, r in enumerate(payload["trades"], 1):
             try:
                 trade_import_record(r)   # 保留原 id 直接写入(不是 trade_upsert — 带 id 会走 UPDATE 而失败)
                 imported += 1
-            except Exception:
-                pass   # 单条记录不合法则跳过, 不中断整批
+            except Exception as e:  # noqa: BLE001
+                failures.append(_import_fail("交易记录", i, e))
     if isinstance(payload.get("trade_pools"), list):
-        for r in payload["trade_pools"]:
+        for i, r in enumerate(payload["trade_pools"], 1):
             try:
                 trade_pool_import_record(r)
                 imported += 1
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                failures.append(_import_fail("监控池", i, e))
     # 复盘笔记(v50.50): 之前完全不进备份 → 换电脑/恢复备份会静默丢失全部复盘内容
     if isinstance(payload.get("trade_reviews"), list):
-        for r in payload["trade_reviews"]:
+        for i, r in enumerate(payload["trade_reviews"], 1):
             try:
                 trade_review_import_record(r)
                 imported += 1
-            except Exception:
-                pass
-    return imported, sorted(strategies)
+            except Exception as e:  # noqa: BLE001
+                failures.append(_import_fail("复盘", i, e))
+    return imported, sorted(strategies), failures
 
 
 def fund_combined_dashboard():
@@ -2502,12 +2610,6 @@ def find_cp_index(s):
     return found
 
 
-def _looks_variety(block):
-    """block 去掉分隔符后是否是纯字母(可能是品种代码), 且至少 1 个字母"""
-    t = block.replace("-", "").replace("_", "").replace("/", "").strip()
-    return bool(t) and t.isalpha()
-
-
 # 分隔符统一为 "-"(用户实际写法), 避免同一合约因 _ / / 空格 不同又分裂
 #   ⚠ 空白是「打字随手敲的」, 一律删掉; 只有 - _ / 才视为分段符
 _SPACE_RE = re.compile(r"\s+")
@@ -2558,7 +2660,8 @@ def normalize_contract(c):
 
 
 def detect_call_put(c):
-    """从合约代码推断看涨(C)/看跌(P); 识别不出返回 ''"""
+    """从合约代码推断看涨(C)/看跌(P); 识别不出返回 ''
+    ⚠ 前端 TradeUI.detectCallPut 有一份同名实现 —— 两者必须同步改(tests.py 直接测这一份)"""
     if not isinstance(c, str):
         return ""
     s = _tidy_seps(c).lower()
@@ -3342,8 +3445,10 @@ def trade_import_record(r):
         "batch": (r.get("batch") or "").strip(),
         "iv": r.get("iv"),
         "iv_pct": r.get("iv_pct"),
-        "open_time": (r.get("open_time") or ""),
-        "close_time": (r.get("close_time") or ""),
+        # ⚠ v50.77: 与 trade_upsert 保持同一口径 —— 时间统一截成 HH:MM,
+        #   否则 21:20:00 这种带秒的值会经备份往返存回来, 同一字段两种存法
+        "open_time": (r.get("open_time") or "").strip()[:5],
+        "close_time": (r.get("close_time") or "").strip()[:5],
         # v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
         "close_today": close_today_str(r.get("close_today")),
     }
@@ -3650,13 +3755,16 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/funds/import":
                 # 导入前先留一份(万一导入的内容不对还能退回)
                 fund_auto_backup("导入前", force=True)
-                imported, strategies = fund_import_backup(params)
+                imported, strategies, failures = fund_import_backup(params)
                 fund_auto_backup("导入后", force=True)
                 self._send(200, _json({
                     "ok": True,
                     "msg": "导入完成",
                     "imported": imported,
                     "strategies": strategies,
+                    # v50.77: 有单条写不进去时必须让用户知道(以前静默跳过)
+                    "failed": len(failures),
+                    "failed_samples": failures[:5],
                 }))
                 return
             elif path == "/api/funds/clear-all":
@@ -3676,12 +3784,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, _json({"ok": False, "error": "备份失败：数据文件不存在或不可写"}))
                 return
             elif path == "/api/funds/data-dir":
-                migrated, status = fund_set_data_dir(params.get("dir", ""))
+                migrated, status, failures = fund_set_data_dir(params.get("dir", ""))
                 self._send(200, _json({
                     "ok": True,
                     "data_dir": os.path.dirname(FUND_DB_PATH),
                     "migrated": migrated,
                     "status": status,
+                    # v50.77: 迁移中单条失败也要报出来, 别让条数虚高
+                    "failed": len(failures),
+                    "failed_samples": failures[:5],
                     "msg": "数据位置已更新" if status != "same" else "当前已是该位置，无需迁移",
                 }))
                 return
@@ -3915,7 +4026,7 @@ def main():
         except Exception:  # noqa: BLE001
             pass
 
-    print("服务已启动: %s  (关闭窗口后 15 分钟无操作自动退出)" % url)
+    print("服务已启动: %s  (窗口关闭后 %d 分钟无操作自动退出)" % (url, IDLE_EXIT_SECONDS // 60))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -5189,7 +5300,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <span class="wchip" id="wdAll">汇总 ¥0</span>
       </div>
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:nowrap">
-        <button class="btn danger sm" id="btnClearAll" title="一键清除资金曲线记录(不影响交易记录)">🗑 清除全部</button>
+        <button class="btn danger sm" id="btnClearAll" title="一键清除资金曲线的月度记录（交易记录 / 监控池 / 复盘不受影响）">🗑 清除资金曲线</button>
         <button class="btn primary sm" id="btnAddRecord">＋ 记录月度</button>
         <input type="file" id="importFile" accept=".opcalc,.json,application/json" class="hidden">
       </div>
@@ -6654,6 +6765,17 @@ function escHtml(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+/* 导入/迁移的失败明细提示 (v50.77)
+   ⚠ 后端以前把单条写库失败静默 pass 掉, UI 只说"成功 N 条" → 少了几条根本查不出来。
+     现在后端把失败明细带回来, 这里统一拼成可直接展示的一段话。 */
+function failNotice(d){
+  const n = d && d.failed;
+  const s = (d && d.failed_samples) || [];
+  if (!n) return '';
+  return '\n\n失败明细：\n· ' + s.join('\n· ')
+    + (n > s.length ? '\n…（共 ' + n + ' 条，这里只列前 ' + s.length + ' 条）' : '')
+    + '\n\n这些条目已跳过（其余已写入）。备份文件请先留好、别删。';
+}
 /* 生成一个新的批次号(v50.49): 时间戳14位 + 2位随机(同一秒连点也不会撞号)
    ⚠ 这是全局函数, 不能嵌在 init()/别的作用域里 —— openEditModal 与 addToTradeRecord 都要用 */
 function newBatch(){
@@ -7465,6 +7587,10 @@ const TradeUI = {
      ⚠ 但**受统计区间影响** —— 区间是口径本身(用户要按区间看战绩), 卡片刻意跟着走 */
   calcStats(){
     const gs = this.scopedGroups();
+    // ⚠ v50.77: 持仓数**始终按全量算**, 不跟着统计区间走。
+    //   区间是「已实现战绩」的口径; 而「按平仓时间」那条区间会把未平仓记录整条滤掉
+    //   (它们没有平仓日) → 用区间算就会恒为 0, 卡片写「持仓中: 0」而用户实际有持仓, 自相矛盾。
+    const all = this.groups || [];
     const pnlOf = g => (g.total_pnl || 0);
     // v50.71: 净盈亏口径(扣掉手续费) —— 后端按当前手续费口径算好放在 net_pnl 里
     const netOf = g => (g.net_pnl != null ? g.net_pnl : pnlOf(g));
@@ -7478,8 +7604,10 @@ const TradeUI = {
     const netWin = closed.reduce((s, g) => s + Math.max(netOf(g), 0), 0);
     const netLoss = closed.reduce((s, g) => s + Math.min(netOf(g), 0), 0);   // 负数
     const flat = gs.filter(g => g.close_status === '已平仓').length;
+    // 持仓中: 全量口径(见上); 区间外的未平仓也算持仓
+    const holdingAll = all.filter(g => g.close_status !== '已平仓').length;
     return {
-      n: gs.length, flat, holding: gs.length - flat,
+      n: gs.length, nAll: all.length, flat, holding: holdingAll,
       closedN: closed.length, wins: wins.length, losses: losses.length,
       grossWin, grossLoss, realized,
       netWin, netLoss,
@@ -7572,13 +7700,19 @@ const TradeUI = {
     const scopeTip = '统计区间：' + this.rangeLabel()
       + (this.range === 'all' ? '' : '（' + this.rangeFrom() + ' 起 · '
          + (this.rangeBasis === 'close' ? '按最后一笔平仓时间' : '按开仓时间') + '）')
-      + ' · 区间内 ' + s.n + ' 条';
+      + ' · 区间内 ' + s.n + ' 条'
+      // v50.77: 持仓数不受区间影响, 说明一下免得跟"区间内 N 条"对不上
+      + (this.range === 'all' ? '' : '\n持仓中 ' + s.holding + ' 条按**全部记录**算（持仓不受统计区间影响）');
+    // 第 3 卡的小字: 区间非「全部」时, 「持仓中」是全量、「条数」是区间内 → 分别写明口径
+    const card3sub = (this.range === 'all')
+      ? ('持仓中: ' + s.holding + ' · 共 ' + s.n + ' 条')
+      : ('持仓中 ' + s.holding + '（全部） · 区间内 ' + s.n + ' 条');
     box.innerHTML =
       card(1, '累计盈亏', s.closedN ? money(s.realized) : '—',
            s.closedN ? ('已实现 · ' + s.closedN + ' 笔') : '暂无已平仓记录', cls(s.realized), scopeTip)
       + card(2, '胜率', s.winRate == null ? '—' : (s.winRate * 100).toFixed(1) + '%',
            s.closedN ? (s.wins + ' 胜 / ' + s.losses + ' 负') : '暂无已平仓记录', '', scopeTip)
-      + card(3, '已平仓', String(s.flat), '持仓中: ' + s.holding + ' · 共 ' + s.n + ' 条', '', scopeTip)
+      + card(3, '已平仓', String(s.flat), card3sub, '', scopeTip)
       // v50.71: 「盈亏比」扩成「盈亏比 / 净盈亏比」—— 净 = 扣掉手续费后的同一口径
       + card(4, '盈亏比 / 净盈亏比',
            s.closedN ? (rTxt(s.plRatio, s.grossWin) + ' / ' + rTxt(s.netRatio, s.netWin)) : '—',
@@ -9035,9 +9169,12 @@ const FundUI = {
         const d = await r.json();
         if (!d.ok) { alert('导入失败：' + (d.error||'备份文件格式不正确')); return; }
         const nPlan = plansRestore(payload.plans);      // v50.57: 方案在前端 localStorage, 这里单独写回
-        alert('✅ 导入成功：共 ' + d.imported + ' 条（资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记，同主键覆盖合并）'
+        alert((d.failed ? ('⚠ 导入完成：成功 ' + d.imported + ' 条，失败 ' + d.failed + ' 条')
+                        : ('✅ 导入成功：共 ' + d.imported + ' 条'))
+          + '（资金曲线 + 期货/期权交易记录 + 监控池 + 复盘笔记，同主键覆盖合并）'
           + (nPlan ? '\n计算器最近方案：' + nPlan + ' 组已恢复' : '')
-          + (d.strategies && d.strategies.length ? '\n资金曲线策略：' + d.strategies.join('、') : ''));
+          + (d.strategies && d.strategies.length ? '\n资金曲线策略：' + d.strategies.join('、') : '')
+          + failNotice(d));
         this.refreshAll();
         if (typeof TradeUI !== 'undefined' && TradeUI.refresh) TradeUI.refresh();   // 交易记录页同步刷新
       } catch (e) {
@@ -9114,7 +9251,7 @@ const FundUI = {
           + chg
           + '<div style="color:var(--sub);font-size:11.5px">' + info + '</div>'
           + '</span>'
-          + '<button class="btn xs" data-bkrestore="' + b.name + '">恢复</button>'
+          + '<button class="btn xs" data-bkrestore="' + escHtml(b.name) + '">恢复</button>'
           + '</div>';
       }).join('');
       box.querySelectorAll('[data-bkrestore]').forEach(btn => {
@@ -9160,26 +9297,27 @@ const FundUI = {
       this.pickCur = d.path || '';
       $('pickPath').value = this.pickCur;
       // 盘符快捷区
+      // ⚠ 必须转义: 这些字符串直接拼进属性与标签体(目录名来自文件系统, 可能含 " 或 <img onerror>)
       $('pickDrives').innerHTML = (d.drives || []).map(function (dr) {
-        return '<button class="btn xs" data-pickdrive="' + dr + '">' + dr + '</button>';
+        return '<button class="btn xs" data-pickdrive="' + escHtml(dr) + '">' + escHtml(dr) + '</button>';
       }).join('');
       $('pickDrives').querySelectorAll('[data-pickdrive]').forEach(btn => {
         btn.addEventListener('click', () => this.pickLoad(btn.dataset.pickdrive));
       });
       // 目录列表
       const rows = (d.dirs || []).map(function (n) {
-        return '<div data-pickdir="' + n + '" style="display:flex;align-items:center;gap:8px;padding:7px 10px;'
-          + 'border-bottom:1px solid var(--line);cursor:pointer">📁 <span style="flex:1">' + n + '</span></div>';
+        return '<div data-pickdir="' + escHtml(n) + '" style="display:flex;align-items:center;gap:8px;padding:7px 10px;'
+          + 'border-bottom:1px solid var(--line);cursor:pointer">📁 <span style="flex:1">' + escHtml(n) + '</span></div>';
       });
       $('pickList').innerHTML = rows.length ? rows.join('')
         : '<div style="padding:12px;color:var(--sub);font-size:12.5px">'
-          + (d.error ? ('读取失败：' + d.error) : '该目录下没有子文件夹') + '</div>';
+          + (d.error ? ('读取失败：' + escHtml(d.error)) : '该目录下没有子文件夹') + '</div>';
       $('pickList').querySelectorAll('[data-pickdir]').forEach(el => {
         el.addEventListener('click', () => this.pickLoad(this.pickJoin(this.pickCur, el.dataset.pickdir)));
         el.addEventListener('dblclick', () => this.pickLoad(this.pickJoin(this.pickCur, el.dataset.pickdir)));
       });
     } catch (e) {
-      $('pickList').innerHTML = '<div style="padding:12px;color:var(--sub);font-size:12.5px">读取失败：' + e + '</div>';
+      $('pickList').innerHTML = '<div style="padding:12px;color:var(--sub);font-size:12.5px">读取失败：' + escHtml(e) + '</div>';
     }
   },
 
@@ -9202,7 +9340,7 @@ const FundUI = {
         body: JSON.stringify({dir: suggested})}, 30000);
       const d = await r.json();
       if (d.ok) {
-        alert('✅ 已迁出到：\n' + d.data_dir + '\n\n共迁移 ' + d.migrated + ' 条记录。\n以后更新软件不会再动到这份数据。');
+        alert('✅ 已迁出到：\n' + d.data_dir + '\n\n共迁移 ' + d.migrated + ' 条记录。\n以后更新软件不会再动到这份数据。' + failNotice(d));
         this.openDataDir();
         this.refreshAll();
       } else {
@@ -9212,8 +9350,14 @@ const FundUI = {
   },
 
   async clearAllRecords(){
-    if (!confirm('⚠ 确定要清除所有策略的所有月度记录吗？\n此操作不可恢复！\n建议先「⬇ 导出备份」再清除。')) return;
-    if (!confirm('再次确认：所有数据将被永久删除（不可恢复）！')) return;
+    // ⚠ v50.77 修正文案: 这里**只删资金曲线(records)**, 交易记录/监控池/复盘都不动。
+    //   原文案写「所有数据将被永久删除」是错的 —— 容易被误解成交易记录也没了。
+    if (!confirm('⚠ 确定要清除【资金曲线】的全部月度记录吗？\n\n'
+      + '· 影响范围：所有策略的月度记录（期初/期末权益、出入金、备注）\n'
+      + '· 不受影响：交易记录、监控池、复盘笔记都不会动\n\n'
+      + '此操作不可恢复，建议先「⬆ 导出备份」再清除。')) return;
+    if (!confirm('再次确认：资金曲线的全部月度记录将被永久删除（不可恢复）！\n\n'
+      + '交易记录 / 监控池 / 复盘不受影响。')) return;
     try {
       const r = await fetchT('/api/funds/clear-all', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
       const d = await r.json();
@@ -9247,7 +9391,7 @@ const FundUI = {
       if (!d.ok) { alert('设置失败：' + (d.error||'')); return; }
       alert(d.status === 'same'
         ? '当前已是该位置，无需迁移。'
-        : '✅ 已迁移 ' + d.migrated + ' 条记录到：\n' + d.data_dir + '\n\n以后数据都保存在这里，网盘会自动同步。');
+        : '✅ 已迁移 ' + d.migrated + ' 条记录到：\n' + d.data_dir + '\n\n以后数据都保存在这里，网盘会自动同步。' + failNotice(d));
       $('setBg').classList.add('hidden');
       this.refreshAll();
     } catch (e) {

@@ -183,18 +183,115 @@ check("手续费(v50.70): 鸡蛋按 元/500千克 口径 → 3500×10×1.5/10000
 check("手续费(v50.70): 从「标的」或「合约」都能解析品种(fg2701空 / fg2701-P-800)",
       fee_product("fg2701空", "") == "FG" and fee_product("", "fg2701-P-800") == "FG", '')
 check("交易日夜盘(v50.70): 21:30 开仓 → 算下一个交易日",
-      trade_day("2026-10-09", "21:30") == "2026-10-10", trade_day("2026-10-09", "21:30"))
-check("交易日(v50.70): 凌晨 01:00 是夜盘延续 → 交易日就是当天",
-      trade_day("2026-10-10", "01:00") == "2026-10-10", trade_day("2026-10-10", "01:00"))
-check("交易日(v50.70): 没填时间 → 日期即交易日(日盘)",
+      trade_day("2026-10-08", "21:30") == "2026-10-09", trade_day("2026-10-08", "21:30"))
+# v50.77: 接入交易日历 —— 夜盘要跳到「下一个交易日」, 不是简单 +1 天
+check("交易日历(v50.77): 周五 21:30 → 下周一(不是周六)",
+      trade_day("2026-10-09", "21:30") == "2026-10-12", trade_day("2026-10-09", "21:30"))
+check("交易日历(v50.77): 周五夜盘跨到周六凌晨 → 交易日仍是下周一",
+      trade_day("2026-10-10", "01:00") == "2026-10-12", trade_day("2026-10-10", "01:00"))
+check("交易日(v50.70): 没填时间 → 日期即交易日(日盘, 不推算)",
       trade_day("2026-10-10", "") == "2026-10-10", trade_day("2026-10-10", ""))
-# 夜盘开的仓, 次日早盘平 —— 日期跨天但同一交易日 → 平今
+# 夜盘开的仓, 下一个交易日早盘平 —— 日期跨天但同一交易日 → 平今
 _cf_night = dict(underlying="CF", contract="CF2701", op_type="close", close_price=15000,
-                 close_qty=1, close_date="2026-10-10", close_time="09:30")
-check("平今判定(v50.70): 夜盘(10-09 21:30)开的仓, 次日 09:30 平 = 平今(只 0.01)",
+                 close_qty=1, close_date="2026-10-12", close_time="09:30")
+check("平今判定(v50.77): 周五夜盘(10-09 21:30)开的仓, 下周一 09:30 平 = 平今(只 0.01)",
       abs(row_fee(_frow(**_cf_night), "futures", "ex", open_day=trade_day("2026-10-09", "21:30")) - 0.01) < 1e-9, '')
 check("平今判定(v50.70): 09:30 开、当天 21:30 平 → 一个日盘一个夜盘, 是平昨",
       trade_day("2026-10-09", "09:30") != trade_day("2026-10-09", "21:30"), '')
+
+# ===== v50.77: 最小交易日历(周末 + 法定节假日) =====
+print("\n== 交易日历 v50.77 ==")
+from main import (is_trading_day, next_trading_day, MARKET_HOLIDAYS,  # noqa: E402
+                  MARKET_HOLIDAY_YEARS, _import_fail)
+
+check("交易日历(v50.77): 节假日表覆盖 2025/2026(每年要更新一次)",
+      {2025, 2026} <= MARKET_HOLIDAY_YEARS, str(sorted(MARKET_HOLIDAY_YEARS)))
+
+# 周末判定
+check("交易日历(v50.77): 周六/周日不是交易日",
+      is_trading_day("2026-10-10") is False and is_trading_day("2026-10-11") is False,
+      '%s/%s' % (is_trading_day("2026-10-10"), is_trading_day("2026-10-11")))
+check("交易日历(v50.77): 普通工作日是交易日",
+      is_trading_day("2026-10-12") is True and is_trading_day("2026-10-13") is True, '')
+# 法定节假日(含调休: 2026 春节 2/15~2/23 连休 9 天)
+check("交易日历(v50.77): 元旦/春节/清明/劳动节/端午/中秋/国庆 都休市",
+      all(is_trading_day(d) is False for d in
+          ("2026-01-01", "2026-02-16", "2026-04-06", "2026-05-01",
+           "2026-06-19", "2026-09-25", "2026-10-01")), '')
+check("交易日历(v50.77): 2025 春节(含除夕)/国庆+中秋 也休市",
+      all(is_trading_day(d) is False for d in ("2025-01-28", "2025-10-08")), '')
+check("交易日历(v50.77): 节假日表里周末之外的调休工作日仍**不开市**(期货只看工作日)",
+      is_trading_day("2026-02-14") is False and is_trading_day("2026-10-10") is False, '')
+# 非法输入不炸
+check("交易日历(v50.77): 空串/乱码输入不抛异常",
+      is_trading_day("") is False and is_trading_day("bad") is False
+      and next_trading_day("") == "" and next_trading_day("bad") == "bad", '')
+
+# next_trading_day: 跨周末、跨节假日、跨整段长假
+check("交易日历(v50.77): 周五的下一个交易日 = 下周一",
+      next_trading_day("2026-10-09") == "2026-10-12", next_trading_day("2026-10-09"))
+check("交易日历(v50.77): 长假前一天 → 跳过整段假期(9/30 → 10/8)",
+      next_trading_day("2026-09-30") == "2026-10-08", next_trading_day("2026-09-30"))
+check("交易日历(v50.77): 春节前最后一个交易日 → 节后第一个交易日(2/13 → 2/24)",
+      next_trading_day("2026-02-13") == "2026-02-24", next_trading_day("2026-02-13"))
+check("交易日历(v50.77): 节假日中间也能算出节后第一个交易日",
+      next_trading_day("2026-10-03") == "2026-10-08", next_trading_day("2026-10-03"))
+
+# 夜盘落在长假前 → 交易日是节后第一天(不是假期间某天)
+check("交易日历(v50.77): 国庆前夜(9/30 21:30) → 交易日 10/08",
+      trade_day("2026-09-30", "21:30") == "2026-10-08", trade_day("2026-09-30", "21:30"))
+check("交易日历(v50.77): 周四 21:30 → 周五(普通夜盘, 不变)",
+      trade_day("2026-10-08", "21:30") == "2026-10-09", trade_day("2026-10-08", "21:30"))
+check("交易日历(v50.77): 日盘时间不受交易日历影响(只按日期)",
+      trade_day("2026-10-10", "09:30") == "2026-10-10", trade_day("2026-10-10", "09:30"))
+# 周五夜盘 vs 下周一早盘: 同一交易日 → 平今(这是这次修的核心场景)
+check("交易日历(v50.77): 周五夜盘与下周一早盘属同一交易日",
+      trade_day("2026-10-09", "21:30") == trade_day("2026-10-12", "09:30"), '')
+
+# ===== v50.77: 导入/迁移的失败明细(以前静默 pass) =====
+print("\n== 导入失败明细 v50.77 ==")
+_imp_ok, _imp_strat, _imp_fail = fund_import_backup(
+    {"records": [{"strategy": "期权买方", "year": 2032, "month": 3,
+                  "initial_equity": 1000, "end_equity": 1000}],
+     "trades": [{"underlying": "okrec", "contract": "okrecC1", "op_type": "open",
+                 "direction": "buy", "open_date": "2026-01-05", "open_price": 1, "qty": 1,
+                 "premium": 1, "mode": "options"},
+                {"op_type": "open"},                       # 缺 underlying/contract → 失败
+                {"underlying": "badop", "contract": "x", "op_type": "nope",
+                 "direction": "buy"}]})                    # op_type 非法 → 失败
+check("导入失败明细(v50.77): 返回三元组且成功条数正确",
+      _imp_ok == 2 and isinstance(_imp_fail, list), "ok=%s fail=%s" % (_imp_ok, _imp_fail))
+check("导入失败明细(v50.77): 失败条数 = 2 且带条号与原因",
+      len(_imp_fail) == 2 and all("交易记录 第" in x for x in _imp_fail), str(_imp_fail))
+check("导入失败明细(v50.77): 明细含可读原因(缺字段 / op_type 非法)",
+      any("缺少必填字段" in x for x in _imp_fail) and any("op_type" in x for x in _imp_fail),
+      str(_imp_fail))
+# 监控池 / 复盘 的失败也要收集
+_pf = fund_import_backup({"records": [], "trade_pools": [{"contracts": "not-a-list"},
+                                                        {"contracts": 123}]})[2]
+check("导入失败明细(v50.77): 监控池失败也收集", len(_pf) == 2 and all("监控池" in x for x in _pf), str(_pf))
+_rf = fund_import_backup({"records": [], "trade_reviews": [{"mode": "options"}]})[2]
+check("导入失败明细(v50.77): 复盘失败也收集(空内容)",
+      len(_rf) == 1 and "复盘" in _rf[0] and "不能为空" in _rf[0], str(_rf))
+# 全成功时明细为空
+_no_fail = fund_import_backup({"records": [], "trades": []})[2]
+check("导入失败明细(v50.77): 全部成功时明细为空", _no_fail == [], str(_no_fail))
+check("导入失败明细(v50.77): 明细文案经过截断(超长异常不撑爆提示)",
+      len(_import_fail("交易记录", 1, Exception("x" * 400))) <= 140,
+      str(len(_import_fail("交易记录", 1, Exception("x" * 400)))))
+# 时间字段统一截成 HH:MM(v50.77: trade_import_record 与 trade_upsert 同口径)
+from main import trade_import_record  # noqa: E402
+_tid = trade_import_record({"underlying": "tcut", "contract": "tcutC1", "op_type": "open",
+                            "direction": "buy", "open_date": "2026-02-24",
+                            "open_time": "21:20:00", "close_time": "09:05:59",
+                            "open_price": 1, "qty": 1, "premium": 1, "mode": "options"})
+_got = [x for x in trade_list_records() if x["underlying"] == "tcut"][0]
+check("导入(v50.77): open_time/close_time 统一截成 HH:MM",
+      _got["open_time"] == "21:20" and _got["close_time"] == "09:05",
+      "%r / %r" % (_got["open_time"], _got["close_time"]))
+for _x in [x for x in trade_list_records() if x["underlying"] in ("tcut", "okrec")]:
+    trade_delete(_x["id"])
+fund_delete("期权买方", 2032, 3)
 
 # ===== v50.71: 费率表更新到《保证金、手续费、申报费》20261009 =====
 print("\n== 手续费费率表 v50.71 ==")
@@ -548,7 +645,7 @@ _conn3 = sqlite3.connect(_main_mod.FUND_DB_PATH)
 for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
-n, strategies = fund_import_backup(backup)
+n, strategies, _f1 = fund_import_backup(backup)
 check("导入条数 = 2", n == 2)
 check("导入策略 = [abe, 威科夫]", set(strategies) == {"期权买方", "威科夫"})
 restored = fund_list_records()
@@ -557,7 +654,7 @@ check("导入重算盈亏(abe 8月=70000-60000+1000=11000)", [r for r in restore
 
 # 合并导入: 已有数据时导入新增
 fund_upsert("威科夫", 2025, 10, 50000, 55000, 0, "10月")
-n2, _ = fund_import_backup(backup)
+n2, _f2s, _f2 = fund_import_backup(backup)
 check("合并导入不丢已有记录(3条)", len(fund_list_records()) == 3)
 
 # 非法格式拒绝
@@ -594,7 +691,7 @@ _conn3 = sqlite3.connect(_main_mod.FUND_DB_PATH)
 for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
-n3, _ = fund_import_backup(bk2)
+n3, _f3s, _f3 = fund_import_backup(bk2)
 check("导入含三部分(资金3+交易2+池1=6)", n3 == 6, "实际 %s" % n3)
 _trl = trade_list_records()
 check("交易记录完整恢复", len(_trl) == 2 and _trl[0]["contract"] == "bk1C5000", str(len(_trl)))
@@ -602,7 +699,7 @@ check("平仓盈亏恢复", [x for x in _trl if x["op_type"] == "close"][0]["pnl
 check("监控池恢复", len(trade_pool_list()) == 1 and trade_pool_list()[0]["contracts"][0]["contract"] == "bk1C5000")
 check("资金曲线一并恢复", len(fund_list_records()) == 3, str(len(fund_list_records())))
 # 幂等: 再导入一次不应翻倍
-n4, _ = fund_import_backup(bk2)
+n4, _f4s, _f4 = fund_import_backup(bk2)
 check("重复导入幂等(不翻倍)", len(trade_list_records()) == 2 and len(fund_list_records()) == 3 and len(trade_pool_list()) == 1,
       "trades=%s records=%s pools=%s" % (len(trade_list_records()), len(fund_list_records()), len(trade_pool_list())))
 # 清理, 不影响后续用例
@@ -1436,7 +1533,7 @@ check("迁移前: 监控池已写入(1 条)", _before_pool == 1, str(_before_poo
 # 切换目录(⚠ fund_set_data_dir 会写 config.json → 先把 CONFIG_PATH 指到临时文件, 别动真实配置)
 _saved_cfg = _ms.CONFIG_PATH
 _ms.CONFIG_PATH = _os.path.join(_td, "cfg.json")
-_mig, _st = fund_set_data_dir(_dst_dir)
+_mig, _st, _migfail = fund_set_data_dir(_dst_dir)
 check("切换目录返回 migrated", _st == "migrated" and _mig > 0, "%s %s" % (_st, _mig))
 check("切换后库文件落在新目录", _os.path.exists(_os.path.join(_dst_dir, "funds.db")), _ms.FUND_DB_PATH)
 _after_fund = len([r for r in fund_list_records() if r['year'] == 2030])

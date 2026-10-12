@@ -107,6 +107,21 @@ async function main() {
   }
   check('页面加载 + 合约表就绪', ready);
 
+  // ⚠ v50.77: E2E 常复用同一个 Chrome profile 重跑 → 上一轮写入的「统计区间 / 统计卡显隐」偏好会带过来,
+  //   会让后面「统计卡(v50.53)」等按固定口径写的断言假失败。这里统一复位为默认(全部 + 按开仓时间 + 显示)。
+  await evalJs(ws, `(() => {
+    try {
+      localStorage.removeItem('oc-trade-range');
+      localStorage.removeItem('oc-trade-range-basis');
+      localStorage.removeItem('oc-trade-stats');
+    } catch (e) {}
+    if (typeof TradeUI !== 'undefined' && TradeUI.applyRangePref) {
+      TradeUI.applyRangePref();
+      TradeUI.applyStatsPref();
+    }
+    return true;
+  })()`);
+
   // ---- 场景A: 填表计算, 阶梯止盈应显示 ----
   await evalJs(ws, `
     (() => {
@@ -926,6 +941,19 @@ async function main() {
   })())`);
   const pk0 = JSON.parse(pk);
   check('文件夹浏览器: 弹窗打开并列出盘符/目录', pk0.shown && pk0.drives >= 1 && pk0.path.length > 0, pk);
+  // v50.77: 目录名必须转义 —— 数据目录下预置了一个名为 a&b'c 的子目录,
+  //   转义后 textContent 应原样还原, 且 data-pickdir 能正确往返(否则点进去会拼错路径)
+  const pkEsc = await evalJs(ws, `JSON.stringify((() => {
+    const els = [...document.querySelectorAll('#pickList [data-pickdir]')];
+    const hit = els.find(e => e.textContent.indexOf('a&b') >= 0);
+    return { found: !!hit, text: hit ? hit.textContent.trim() : '',
+             attr: hit ? hit.dataset.pickdir : '',
+             rawHtmlHasEntity: !!hit && /&amp;/.test(hit.outerHTML) };
+  })())`);
+  const pkE = JSON.parse(pkEsc);
+  // 行内是「📁 名字」, 所以用 indexOf 判断(别拿整串做全等)
+  check("文件夹浏览器(v50.77): 目录名含 & ' 时按实体转义且文本原样还原",
+        pkE.found && pkE.text.indexOf("a&b'c") >= 0 && pkE.attr === "a&b'c" && pkE.rawHtmlHasEntity === true, pkEsc);
   // 进入一个目录(点第一个盘符), 再「选择此文件夹」回填
   const pkNav = await evalJs(ws, `(async () => {
     const dr = document.querySelector('#pickDrives [data-pickdrive]');
@@ -3848,6 +3876,82 @@ async function main() {
         r76b.all === 8 && r76b.filtered === 1 && /筛选出 1 条/.test(r76b.hint), r76bRun);
   check('统计区间(v50.76): 改回「全部」时区间说明同步为全部记录',
         /全部记录/.test(r76b.rangeNote) && r76b.noteAfterClear === '', r76bRun);
+
+  // ---- v50.77: 区间不为「全部」时, 「持仓中」必须仍按全量算(以前恒为 0) ----
+  const r76AllGot = (r76.ranges.find(x => x.rg === 'all') || {}).got || {};
+  check('统计区间(v50.77): 「全部」时第 3 卡小字沿用原样式(持仓中: N · 共 M 条)',
+        /持仓中: 1 · 共 8 条/.test(r76AllGot.card3sub || ''), r76AllGot.card3sub);
+  check('统计区间(v50.77): 「按平仓时间」下「持仓中」仍按全量算(不再恒为 0)',
+        /持仓中 1（全部）/.test(r76.basis.closeBasis.card3sub || ''),
+        r76.basis.closeBasis.card3sub);
+
+  // ===== v50.77: 交易日历 / 导入失败明细 / 文案 =====
+  const v77Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const out = {};
+    // ① 交易日历: 周五 2026-10-09 21:30 开的仓 → 交易日是下周一 10-12;
+    //    下周一 09:30 平 = 同一交易日 → 自动判「平今」(旧版会算成 10-10 周六 → 平昨)
+    const o1 = await post({mode:'futures', underlying:'e2ecal', contract:'CF2701', batch:'Bcal77',
+      op_type:'open', direction:'buy', open_date:'2026-10-09', open_time:'21:30',
+      open_price:15000, qty:1, premium:0});
+    const c1 = await post({mode:'futures', underlying:'e2ecal', contract:'CF2701', batch:'Bcal77',
+      op_type:'close', direction:'sell', close_date:'2026-10-12', close_time:'09:30',
+      close_qty:1, close_price:15100, pnl:500});
+    const d1 = await (await fetch('/api/trades/detail?mode=futures&underlying=e2ecal&batch=Bcal77&fee=ex')).json();
+    const cl1 = (d1.operations || []).find(x => x.op_type === 'close') || {};
+    out.friNight = { feeIsToday: cl1.fee_is_today, fee: cl1.fee, ct: cl1.close_today };
+    // 反例: 周五夜盘开、下周二(10-13)平 → 不同交易日 → 平昨
+    const o2 = await post({mode:'futures', underlying:'e2ecal2', contract:'CF2701', batch:'Bcal77b',
+      op_type:'open', direction:'buy', open_date:'2026-10-09', open_time:'21:30',
+      open_price:15000, qty:1, premium:0});
+    const c2 = await post({mode:'futures', underlying:'e2ecal2', contract:'CF2701', batch:'Bcal77b',
+      op_type:'close', direction:'sell', close_date:'2026-10-13', close_time:'09:30',
+      close_qty:1, close_price:15100, pnl:500});
+    const d2 = await (await fetch('/api/trades/detail?mode=futures&underlying=e2ecal2&batch=Bcal77b&fee=ex')).json();
+    const cl2 = (d2.operations || []).find(x => x.op_type === 'close') || {};
+    out.tueClose = { feeIsToday: cl2.fee_is_today, fee: cl2.fee };
+    // 清掉这两组
+    for (const id of [o1.id, c1.id, o2.id, c2.id]) if (id) await del(id);
+    // ② 导入失败明细: 一条合法 + 一条坏记录 → 接口要带回 failed / failed_samples
+    const imp = await (await fetch('/api/funds/import', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({records: [], trades: [
+        {underlying:'e2eimpok', contract:'e2eimpokC1', op_type:'open', direction:'buy',
+         open_date:'2026-01-05', open_price:1, qty:1, premium:1, mode:'options'},
+        {op_type:'open'}]})})).json();
+    out.imp = { ok: imp.ok, imported: imp.imported, failed: imp.failed, samples: imp.failed_samples };
+    // 清掉刚导进去的那条
+    const g = await (await fetch('/api/trades/groups?mode=options')).json();
+    for (const it of (g.groups || [])) {
+      if (it.underlying !== 'e2eimpok') continue;
+      const dd = await (await fetch('/api/trades/detail?mode=options&underlying=e2eimpok&batch='
+        + encodeURIComponent(it.batch || ''))).json();
+      for (const op of (dd.operations || [])) await del(op.id);
+    }
+    // ③ 「清除全部」按钮文案: 只清资金曲线, 不该写成「全部」
+    const cb = document.getElementById('btnClearAll');
+    out.clearBtn = cb ? cb.textContent.trim() : '';
+    out.clearTip = cb ? cb.title : '';
+    return JSON.stringify(out);
+  })()`);
+  const v77 = JSON.parse(v77Run);
+  check('交易日历(v50.77): 周五夜盘(10-09 21:30)开 + 下周一(10-12)早盘平 → 自动判「平今」',
+        v77.friNight.feeIsToday === true && Math.abs(v77.friNight.fee - 0.01) < 1e-6,
+        JSON.stringify(v77.friNight));
+  check('交易日历(v50.77): 换到下周二(10-13)平就变「平昨」(4.31)',
+        v77.tueClose.feeIsToday === false && Math.abs(v77.tueClose.fee - 4.31) < 1e-6,
+        JSON.stringify(v77.tueClose));
+  check('导入失败明细(v50.77): 接口带回 failed 与明细(不再假装全成功)',
+        v77.imp.ok === true && v77.imp.imported === 1 && v77.imp.failed === 1
+        && Array.isArray(v77.imp.samples) && /交易记录 第 2 条/.test(v77.imp.samples[0] || ''),
+        JSON.stringify(v77.imp));
+  check('文案(v50.77): 清除按钮明说只清「资金曲线」',
+        /资金曲线/.test(v77.clearBtn) && !/清除全部/.test(v77.clearBtn)
+        && /交易记录/.test(v77.clearTip), v77.clearBtn + ' | ' + v77.clearTip);
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
