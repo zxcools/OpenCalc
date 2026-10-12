@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5075            # 与 README 版本号 v50.75 对齐(数值比较用于单实例接管)
+APP_VERSION = 5076            # 与 README 版本号 v50.76 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -4415,17 +4415,23 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .chk input{accent-color:var(--accent);margin:0}
 /* 手续费口径选择(v50.70; v50.71 从 <select> 改成「选项平铺」的分段控件):
    与工具栏其它控件同一行同一高; 视觉沿用资金曲线工具栏的 .seg(同一套组件语言)
-   ⚠ 自建控件 margin 必须归零 —— 全局 label{margin:14px 0 6px} 会把 flex item 按 margin box 居中推低 */
-.fee-sel{display:flex;align-items:center;gap:8px;margin:0;flex:none}
-.fee-sel .fee-lbl{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap}
-.fee-sel .seg{display:flex;gap:3px;padding:2px;border:1px solid var(--border);border-radius:10px;
+   ⚠ 自建控件 margin 必须归零 —— 全局 label{margin:14px 0 6px} 会把 flex item 按 margin box 居中推低
+   v50.76: 类名 .fee-sel → .segbar(通用化), 手续费口径 与 统计区间 两处共用同一套规则 */
+.segbar{display:flex;align-items:center;gap:8px;margin:0;flex:none}
+.segbar .fee-lbl{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap}
+.segbar .seg{display:flex;gap:3px;padding:2px;border:1px solid var(--border);border-radius:10px;
   background:var(--panel)}
-.fee-sel .fee-opt{padding:4px 11px;border:0;border-radius:8px;background:transparent;color:var(--sub);
+.segbar .fee-opt{padding:4px 11px;border:0;border-radius:8px;background:transparent;color:var(--sub);
   font-family:inherit;font-size:var(--fz-btn);font-weight:600;line-height:1.3;white-space:nowrap;
   cursor:pointer;transition:all .2s}
-.fee-sel .fee-opt:hover{background:var(--panel2);color:var(--text)}
-.fee-sel .fee-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
-.fee-sel .fee-opt.active:hover{color:#fff}
+.segbar .fee-opt:hover{background:var(--panel2);color:var(--text)}
+.segbar .fee-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
+.segbar .fee-opt.active:hover{color:#fff}
+/* v50.76: 统计区间工具条(在统计卡上方一行): 区间 + 口径 + 当前区间说明 */
+#rangeBar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px}
+.range-note{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap;line-height:1.5}
+.range-note b{color:var(--accent2);font-weight:600}
+.range-note .r-hint{opacity:.8}
 /* v50.74: 弹窗里的「平今 / 平昨」分段控件 —— 与上面手续费口径同一套视觉(两处别各写一套) */
 .seg.pick{display:flex;gap:3px;padding:2px;border:1px solid var(--border);border-radius:10px;
   background:var(--panel);align-self:flex-start}
@@ -4781,8 +4787,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>期货模式</small></div>
     <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>多策略</small></div>
     <div class="side-extras">
-      <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径设置）">⬆</button>
-      <button class="side-btn" id="btnImport" title="导入备份（合并资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径设置）">⬇</button>
+      <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径 / 统计区间设置）">⬆</button>
+      <button class="side-btn" id="btnImport" title="导入备份（合并资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径 / 统计区间设置）">⬇</button>
       <button class="side-btn" id="btnDataDir" style="position:relative" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙<span id="dataRiskDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnUpdate" style="position:relative" title="检查更新">⟳<span id="updateDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
@@ -5266,10 +5272,10 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <!-- 筛选开关统一成按钮外观(v50.55): 与右边「🙈 隐藏统计」同款 .btn.xs.ghost 尺寸/圆角 -->
           <label class="chk tgl" id="onlyOpenLbl"><input type="checkbox" id="tradesOnlyOpen"><span class="tgl-txt">只展示未平仓</span></label>
           <!-- 统计卡片显示/隐藏(v50.55): 状态存 localStorage, 下次打开保持上次的选择 -->
-          <button class="btn xs ghost" id="btnToggleStats" title="隐藏顶部统计卡片（状态会记住）">🙈 隐藏统计</button>
+          <button class="btn xs ghost" id="btnToggleStats" title="隐藏顶部统计卡片与「统计区间」设置行（状态会记住）">🙈 隐藏统计与区间</button>
           <!-- 手续费口径(v50.70): 只影响「净盈亏」列, 不改动原始平仓盈亏
                v50.71: 原来是个 <select> 下拉框, 选项藏起来了 → 改成把两个选项直接平铺出来 -->
-          <span class="fee-sel" id="feeSeg" title="手续费口径：影响主表「净盈亏」列与统计卡的「净盈亏比」（净盈亏 = 平仓盈亏 − 手续费）">
+          <span class="segbar" id="feeSeg" title="手续费口径：影响主表「净盈亏」列与统计卡的「净盈亏比」（净盈亏 = 平仓盈亏 − 手续费）">
             <span class="fee-lbl">手续费</span>
             <span class="seg" role="group" aria-label="手续费口径">
               <button type="button" class="fee-opt active" data-fee="ex" aria-pressed="true">交易所 + 0.01</button>
@@ -5280,6 +5286,26 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
         </div>
       </header>
+      <!-- 统计区间(v50.76): 三个模式共用; 选好后统计卡与下方主表一起收窄到该区间 -->
+      <div id="rangeBar">
+        <span class="segbar" title="统计区间：统计卡片与下方主表一起收窄到这段时间内的记录">
+          <span class="fee-lbl">统计区间</span>
+          <span class="seg" id="rangeSeg" role="group" aria-label="统计区间">
+            <button type="button" class="fee-opt" data-range="1m" aria-pressed="false">近一月</button>
+            <button type="button" class="fee-opt" data-range="3m" aria-pressed="false">近三月</button>
+            <button type="button" class="fee-opt" data-range="1y" aria-pressed="false">近一年</button>
+            <button type="button" class="fee-opt" data-range="ytd" aria-pressed="false">今年以来</button>
+            <button type="button" class="fee-opt active" data-range="all" aria-pressed="true">全部</button>
+          </span>
+        </span>
+        <span class="segbar" title="区间口径：按「开仓时间」还是「最后一笔平仓时间」判断这条记录是否落在区间内">
+          <span class="seg" id="basisSeg" role="group" aria-label="区间口径">
+            <button type="button" class="fee-opt active" data-basis="open" aria-pressed="true">按开仓时间</button>
+            <button type="button" class="fee-opt" data-basis="close" aria-pressed="false">按平仓时间</button>
+          </span>
+        </span>
+        <span class="range-note" id="rangeNote"></span>
+      </div>
       <!-- 交易统计卡片(v50.53): 全部按主表「记录」统计(一条记录=一笔), 不看分表逐笔操作 -->
       <div class="stat-cards" id="tradeStats"></div>
       <div class="trades-layout" data-tm="options">
@@ -6659,8 +6685,14 @@ function plansSnapshot(){
   // v50.70: 手续费口径也存 localStorage, 一并打包(否则换电脑后手续费设置丢)
   let feeMode = 'ex';
   try { feeMode = localStorage.getItem('oc-fee-mode') || 'ex'; } catch(e){}
+  // v50.76: 统计区间 + 区间口径也存 localStorage → 一并打包
+  let tradeRange = 'all', tradeRangeBasis = 'open';
+  try { tradeRange = localStorage.getItem('oc-trade-range') || 'all'; } catch(e){}
+  try { tradeRangeBasis = localStorage.getItem('oc-trade-range-basis') || 'open'; } catch(e){}
   return { futures: planList.slice(), options: planListO.slice(), dual: planListD.slice(),
-           feeMode: (feeMode === 'off') ? 'off' : 'ex' };
+           feeMode: (feeMode === 'off') ? 'off' : 'ex',
+           tradeRange: (['1m','3m','1y','ytd','all'].indexOf(tradeRange) >= 0) ? tradeRange : 'all',
+           tradeRangeBasis: (tradeRangeBasis === 'close') ? 'close' : 'open' };
 }
 /* 备份恢复: 把备份里的方案写回 localStorage 与本进程内存, 返回恢复的组数 */
 function plansRestore(pl){
@@ -6680,6 +6712,14 @@ function plansRestore(pl){
     try { localStorage.setItem('oc-fee-mode', pl.feeMode); } catch(e){}
     if (typeof TradeUI !== 'undefined' && TradeUI.applyFeePref) TradeUI.applyFeePref();
   }
+  // v50.76: 恢复统计区间 + 区间口径(老备份没有这两个键 → 不动本机设置; 同样不计入 n)
+  if (['1m','3m','1y','ytd','all'].indexOf(pl.tradeRange) >= 0){
+    try { localStorage.setItem('oc-trade-range', pl.tradeRange); } catch(e){}
+  }
+  if (pl.tradeRangeBasis === 'open' || pl.tradeRangeBasis === 'close'){
+    try { localStorage.setItem('oc-trade-range-basis', pl.tradeRangeBasis); } catch(e){}
+  }
+  if (typeof TradeUI !== 'undefined' && TradeUI.applyRangePref) TradeUI.applyRangePref();
   if (n){ loadPlans(); renderPlans(); }
   return n;
 }
@@ -7005,6 +7045,10 @@ const TradeUI = {
   mainQuery: '',        // 主表搜索关键词(空=不过滤)
   showAll: false,       // 是否展开全部(>10)
   feeMode: 'ex',        // v50.70 手续费口径: 'ex' 交易所+0.01 / 'off' 不计算
+  // v50.76 统计区间: '1m'/'3m'/'1y'/'ytd'/'all'; 区间口径 'open' 开仓时间 / 'close' 最后一笔平仓时间
+  range: 'all',         // 默认「全部」= 等价于原行为(不动任何数据口径)
+  rangeBasis: 'open',
+  RANGES: ['1m', '3m', '1y', 'ytd', 'all'],
   _closeModal: false,   // v50.72 当前弹窗是不是「平仓」(决定要不要自动算平仓盈亏)
   _closeToday: '',      // v50.74 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
 
@@ -7183,6 +7227,15 @@ const TradeUI = {
       if (b && b.dataset.fee !== this.feeMode) this.setFeeMode(b.dataset.fee);
     });
     this.applyFeePref();
+    // v50.76 统计区间 + 区间口径: 切换只改前端过滤 → 立刻重画(不用重拉接口)
+    const rangeBar = $('rangeBar');
+    if (rangeBar) rangeBar.addEventListener('click', e => {
+      const el = e.target.closest ? e.target.closest('.fee-opt') : null;
+      if (!el) return;
+      if (el.dataset.range) this.setRange(el.dataset.range);
+      else if (el.dataset.basis) this.setRangeBasis(el.dataset.basis);
+    });
+    this.applyRangePref();
     // 主表搜索框: 输入即筛选(与「只展示未平仓」叠加生效)
     $('tradesSearch').addEventListener('input', e => {
       this.mainQuery = e.target.value;
@@ -7316,12 +7369,102 @@ const TradeUI = {
     }
   },
 
-  /* ---------- 交易统计卡片 (v50.53) ----------
+  /* ===== v50.76 统计区间: 统计卡与主表共用同一份「区间内记录」 =====
+     口径: 区间按所选基准时间判断 —— open=该记录首次开仓日 / close=最后一笔平仓日
+     ⚠ 未平仓记录没有平仓日: 按 close 口径且区间≠全部时会被排除(说明文字里写明) */
+  rangeLabel(){
+    return { '1m': '近一月', '3m': '近三月', '1y': '近一年', 'ytd': '今年以来', 'all': '全部' }[this.range] || '全部';
+  },
+  /* 区间起点(YYYY-MM-DD); 全部 → ''(不过滤) */
+  rangeFrom(){
+    if (this.range === 'all') return '';
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth(), d = now.getDate();
+    const iso = dt => dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0')
+      + '-' + String(dt.getDate()).padStart(2, '0');
+    if (this.range === 'ytd') return y + '-01-01';
+    const back = { '1m': 1, '3m': 3, '1y': 12 }[this.range];
+    if (!back) return '';
+    // ⚠ 先落到当月 1 号再整体回退月份 → 避免 3/31 减一月时 Date 溢出成 3/3
+    const dt = new Date(y, m, 1);
+    dt.setMonth(dt.getMonth() - back);
+    // 再把「日号」夹到目标月的最后一天(3/31 的近一月 → 2/28)
+    const lastDay = new Date(dt.getFullYear(), dt.getMonth() + 1, 0).getDate();
+    dt.setDate(Math.min(d, lastDay));
+    return iso(dt);
+  },
+  /* 区间内的主表记录: 统计卡与主表都用它, 保证「看到的条数」与「算出来的战绩」一致 */
+  scopedGroups(){
+    const gs = this.groups || [];
+    if (this.range === 'all') return gs;
+    const from = this.rangeFrom();
+    if (!from) return gs;
+    const key = this.rangeBasis === 'close' ? 'last_close_date' : 'open_date';
+    return gs.filter(g => {
+      const d = String(g[key] || '').slice(0, 10);
+      return d ? d >= from : false;      // 没有该基准日期的记录不计入区间
+    });
+  },
+  syncRangeSeg(){
+    document.querySelectorAll('#rangeSeg .fee-opt').forEach(el => {
+      const on = el.dataset.range === this.range;
+      el.classList.toggle('active', on);
+      el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('#basisSeg .fee-opt').forEach(el => {
+      const on = el.dataset.basis === this.rangeBasis;
+      el.classList.toggle('active', on);
+      el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  },
+  applyRangePref(){
+    let r = 'all', b = 'open';
+    try { r = localStorage.getItem('oc-trade-range') || 'all'; } catch (e) {}
+    try { b = localStorage.getItem('oc-trade-range-basis') || 'open'; } catch (e) {}
+    this.range = (this.RANGES || []).indexOf(r) >= 0 ? r : 'all';
+    this.rangeBasis = (b === 'close') ? 'close' : 'open';
+    this.syncRangeSeg();
+  },
+  setRange(v){
+    if ((this.RANGES || []).indexOf(v) < 0 || v === this.range) return;
+    this.range = v;
+    try { localStorage.setItem('oc-trade-range', v); } catch (e) {}
+    this.syncRangeSeg();
+    this.showAll = false;      // 换区间后收回「显示全部」, 免得停在展开态看着奇怪
+    return this.renderMain();
+  },
+  setRangeBasis(v){
+    const b = (v === 'close') ? 'close' : 'open';
+    if (b === this.rangeBasis) return;
+    this.rangeBasis = b;
+    try { localStorage.setItem('oc-trade-range-basis', b); } catch (e) {}
+    this.syncRangeSeg();
+    return this.renderMain();
+  },
+  /* 区间说明: 起算日 + 口径 + 区间内条数(未平仓不计入时提示一句) */
+  renderRangeNote(scopedN){
+    const box = $('rangeNote');
+    if (!box) return;
+    if (this.range === 'all'){
+      box.innerHTML = '当前：<b>全部记录</b><span class="r-hint">（共 ' + (this.groups || []).length + ' 条）</span>';
+      return;
+    }
+    const n = (scopedN == null) ? this.scopedGroups().length : scopedN;
+    const basisTxt = this.rangeBasis === 'close' ? '按平仓时间' : '按开仓时间';
+    const extra = (this.rangeBasis === 'close')
+      ? '<span class="r-hint">（未平仓记录没有平仓时间，不计入）</span>' : '';
+    box.innerHTML = '当前：<b>' + escHtml(this.rangeLabel()) + '</b>'
+      + '<span class="r-hint">（' + escHtml(this.rangeFrom()) + ' 起 · ' + basisTxt + '）</span>'
+      + ' · 区间内 <b>' + n + '</b> 条 ' + extra;
+  },
+
+  /* ---------- 交易统计卡片 (v50.53; v50.76 起按「统计区间」收窄) ----------
      口径: 全部按**主表每条记录**(一条记录 = 一笔交易)统计, 不去汇总分表的逐笔操作。
      已实现盈亏 = 该记录 close 记录 pnl 之和(即主表「平仓盈亏」列)。
-     ⚠ 不受搜索 /「只展示未平仓」影响 —— 那俩只是表格显示过滤, 不该改变战绩口径 */
+     ⚠ 不受搜索 /「只展示未平仓」影响 —— 那俩只是表格显示过滤, 不该改变战绩口径
+     ⚠ 但**受统计区间影响** —— 区间是口径本身(用户要按区间看战绩), 卡片刻意跟着走 */
   calcStats(){
-    const gs = this.groups || [];
+    const gs = this.scopedGroups();
     const pnlOf = g => (g.total_pnl || 0);
     // v50.71: 净盈亏口径(扣掉手续费) —— 后端按当前手续费口径算好放在 net_pnl 里
     const netOf = g => (g.net_pnl != null ? g.net_pnl : pnlOf(g));
@@ -7358,7 +7501,9 @@ const TradeUI = {
   },
 
   /* 统计卡片显示/隐藏(v50.55): 状态存 localStorage(oc-trade-stats: '1'显示/'0'隐藏),
-     默认显示; 用户点过隐藏后, 下次打开软件仍是隐藏 —— 期权/期货模式共用一个开关 */
+     默认显示; 用户点过隐藏后, 下次打开软件仍是隐藏 —— 期权/期货模式共用一个开关
+     ⚠ v50.76: 「统计区间」那一行是统计卡的口径控件, 属于同一块 → 隐藏时必须跟着一起收起
+       (否则只剩一排区间按钮挂在主表上方, 不知道是给谁用的) */
   statsHidden: false,
   applyStatsPref(){
     try { this.statsHidden = localStorage.getItem('oc-trade-stats') === '0'; } catch (e) { this.statsHidden = false; }
@@ -7367,10 +7512,12 @@ const TradeUI = {
   syncStatsToggle(){
     const box = $('tradeStats');
     if (box) box.classList.toggle('hidden', !!this.statsHidden);
+    const rb = $('rangeBar');
+    if (rb) rb.classList.toggle('hidden', !!this.statsHidden);
     const btn = $('btnToggleStats');
     if (btn){
-      btn.textContent = this.statsHidden ? '👁 显示统计' : '🙈 隐藏统计';
-      btn.title = (this.statsHidden ? '显示' : '隐藏') + '顶部统计卡片（状态会记住）';
+      btn.textContent = this.statsHidden ? '👁 显示统计与区间' : '🙈 隐藏统计与区间';
+      btn.title = (this.statsHidden ? '显示' : '隐藏') + '顶部统计卡片与「统计区间」设置行（状态会记住）';
     }
   },
   toggleStats(){
@@ -7421,12 +7568,17 @@ const TradeUI = {
       + '<div class="ss" title="' + escHtml(sub) + '">' + escHtml(sub) + '</div></div>';
     // 比率文本: 有亏损才有比值; 只盈不亏 → ∞; 没数据 → —
     const rTxt = (r, win) => r != null ? r.toFixed(2) : (win > 0 ? '∞' : '—');
+    // v50.76: 卡片 tooltip 里写明当前统计区间, 免得只看卡片不知道口径
+    const scopeTip = '统计区间：' + this.rangeLabel()
+      + (this.range === 'all' ? '' : '（' + this.rangeFrom() + ' 起 · '
+         + (this.rangeBasis === 'close' ? '按最后一笔平仓时间' : '按开仓时间') + '）')
+      + ' · 区间内 ' + s.n + ' 条';
     box.innerHTML =
       card(1, '累计盈亏', s.closedN ? money(s.realized) : '—',
-           s.closedN ? ('已实现 · ' + s.closedN + ' 笔') : '暂无已平仓记录', cls(s.realized))
+           s.closedN ? ('已实现 · ' + s.closedN + ' 笔') : '暂无已平仓记录', cls(s.realized), scopeTip)
       + card(2, '胜率', s.winRate == null ? '—' : (s.winRate * 100).toFixed(1) + '%',
-           s.closedN ? (s.wins + ' 胜 / ' + s.losses + ' 负') : '暂无已平仓记录')
-      + card(3, '已平仓', String(s.flat), '持仓中: ' + s.holding + ' · 共 ' + s.n + ' 条')
+           s.closedN ? (s.wins + ' 胜 / ' + s.losses + ' 负') : '暂无已平仓记录', '', scopeTip)
+      + card(3, '已平仓', String(s.flat), '持仓中: ' + s.holding + ' · 共 ' + s.n + ' 条', '', scopeTip)
       // v50.71: 「盈亏比」扩成「盈亏比 / 净盈亏比」—— 净 = 扣掉手续费后的同一口径
       + card(4, '盈亏比 / 净盈亏比',
            s.closedN ? (rTxt(s.plRatio, s.grossWin) + ' / ' + rTxt(s.netRatio, s.netWin)) : '—',
@@ -7446,12 +7598,15 @@ const TradeUI = {
   renderMain(){
     const tb = document.querySelector('#tradesTable tbody');
     this.renderStats();          // v50.53: 顶部统计卡片随数据一起刷新
-    let rows = this.groups.slice();
+    // v50.76: 先用「统计区间」收窄(与统计卡同一份口径), 再叠加「只展示未平仓」与搜索
+    let rows = this.scopedGroups();
+    const scopedN = rows.length;
+    this.renderRangeNote(scopedN);
     if (this.onlyOpen) rows = rows.filter(g => g.close_status !== '已平仓');
     const q = (this.mainQuery || '').trim();
     if (q) rows = rows.filter(g => this.matchGroup(g, q));
     const total = rows.length;
-    // 搜索命中数提示
+    // 搜索命中数提示(区间条数由 #rangeNote 负责, 这里只报「筛选后」的)
     const hint = $('tradesSearchHint');
     if (hint) hint.textContent = q ? ('筛选出 ' + total + ' 条') : '';
     const limit = this.showAll ? total : this.MAX;
@@ -7463,7 +7618,10 @@ const TradeUI = {
     const tw = $('tradesTable').closest('.tblwrap');
     if (tw && !(this.showAll && total > this.MAX)) { tw.style.maxHeight = ''; tw.classList.remove('capped'); }
     if (!show.length){
-      const msg = q ? ('没有匹配「' + q + '」的记录') : '暂无记录，点上面「新建开仓」添加';
+      let msg;
+      if (q) msg = '没有匹配「' + q + '」的记录';
+      else if (this.range !== 'all') msg = '「' + this.rangeLabel() + '」区间内没有记录（点上方「全部」可查看所有记录）';
+      else msg = '暂无记录，点上面「新建开仓」添加';
       tb.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:18px;color:var(--sub)">'
         + escHtml(msg) + '</td></tr>';
       return;

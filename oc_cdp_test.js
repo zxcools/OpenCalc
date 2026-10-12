@@ -3612,6 +3612,243 @@ async function main() {
   check('平今/平昨(v50.74): 期权买方模式也有同一套三项控件',
         v74.optShown === true && v74.optLabels.join(',') === '自动,平今,平昨', JSON.stringify(v74.optLabels));
 
+  // ===== v50.76: 统计区间(近一月/近三月/近一年/今年以来/全部) + 区间口径(开仓/平仓) =====
+  // 口径: 区间收窄后统计卡与主表一起跟着变; 条数在统计卡上方与主表行数上都要对得上
+  const r76Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const wipe = async (mode) => {
+      const g = await (await fetch('/api/trades/groups?mode=' + mode)).json();
+      for (const it of (g.groups || [])) {
+        const d = await (await fetch('/api/trades/detail?mode=' + mode + '&underlying='
+          + encodeURIComponent(it.underlying) + '&batch=' + encodeURIComponent(it.batch || ''))).json();
+        for (const op of (d.operations || [])) await del(op.id);
+      }
+    };
+    await wipe('futures');
+    const pad = n => String(n).padStart(2, '0');
+    const dayStr = off => { const d = new Date(); d.setHours(12,0,0,0); d.setDate(d.getDate() - off);
+      return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()); };
+    // ⚠ 参考实现(独立写法: 手动归一化月份 + 夹取日号) 与页面的 rangeFrom() 交叉验证
+    const refFrom = rg => {
+      if (rg === 'all') return '';
+      const t = new Date(); t.setHours(12,0,0,0);
+      if (rg === 'ytd') return t.getFullYear() + '-01-01';
+      const back = { '1m':1, '3m':3, '1y':12 }[rg];
+      let y = t.getFullYear(), m = t.getMonth() - back;
+      y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+      const last = new Date(y, m + 1, 0).getDate();
+      return y + '-' + pad(m+1) + '-' + pad(Math.min(t.getDate(), last));
+    };
+    // 种子: o=开仓距今(天), c=平仓距今(天, null=未平仓), pnl 各不相同 → 金额和能区分区间
+    const S = [
+      {u:'e2er5',   o: dayStr(5),     c: dayStr(5),     pnl:100},
+      {u:'e2er40',  o: dayStr(40),    c: dayStr(40),    pnl:200},
+      {u:'e2er200', o: dayStr(200),   c: dayStr(200),   pnl:300},
+      {u:'e2er400', o: dayStr(400),   c: dayStr(400),   pnl:400},
+      {u:'e2er800', o: dayStr(800),   c: dayStr(800),   pnl:500},
+      // 正好落在「近一年」起算日当天(端点含在内) → 近一年要算它、今年以来不能算它
+      {u:'e2er1y',  o: refFrom('1y'), c: refFrom('1y'), pnl:700},
+      {u:'e2erx',   o: dayStr(500),   c: dayStr(3),     pnl:1000},   // 跨期: 老开仓 / 新平仓
+      {u:'e2ery',   o: dayStr(3),     c: null,          pnl:0},      // 未平仓
+    ];
+    for (const s of S) {
+      await post({underlying:s.u, contract:s.u+'2611', op_type:'open', direction:'buy',
+                  open_date: s.o, open_price: 100, qty: 1, premium: 0, mode: 'futures'});
+      if (s.c) await post({underlying:s.u, contract:s.u+'2611', op_type:'close', direction:'sell',
+                  close_date: s.c, close_qty: 1, close_price: 200, pnl: s.pnl, mode: 'futures'});
+    }
+    const chk = document.getElementById('tradesOnlyOpen');
+    if (chk.checked) { chk.checked = false; chk.dispatchEvent(new Event('change')); }
+    document.getElementById('tradesSearch').value = '';
+    TradeUI.mainQuery = '';
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(900);
+    await TradeUI.refresh();
+    await w(400);
+
+    const read = () => {
+      const cards = [...document.querySelectorAll('#tradeStats .stat-card')];
+      const txt = el => (el && el.textContent) || '';
+      const num = t => { const m = String(t).replace(/[^0-9.-]/g, ''); return m === '' ? null : parseFloat(m); };
+      return {
+        realized: num(txt(cards[0] && cards[0].querySelector('.sv'))),
+        card3sub: txt(cards[2] && cards[2].querySelector('.ss')),
+        note: txt(document.getElementById('rangeNote')),
+        rows: document.querySelectorAll('#tradesTable tbody tr.clickable').length
+      };
+    };
+    const setRange = async rg => { document.querySelector('#rangeSeg .fee-opt[data-range="'+rg+'"]').click(); await w(260); };
+    const setBasis = async b => { document.querySelector('#basisSeg .fee-opt[data-basis="'+b+'"]').click(); await w(260); };
+    const out = { ranges: [], basis: {}, meta: {} };
+
+    // ⚠ 先清掉本机偏好再断言「默认值」: E2E 可能复用同一个 Chrome profile 重跑,
+    //    上一轮留下的 oc-trade-range/-basis 会让「默认 = 全部 + 按开仓时间」假失败
+    localStorage.removeItem('oc-trade-range');
+    localStorage.removeItem('oc-trade-range-basis');
+    TradeUI.applyRangePref();
+    await w(200);
+
+    out.meta.rangeOpts = [...document.querySelectorAll('#rangeSeg .fee-opt')].map(e => e.textContent.trim());
+    out.meta.basisOpts = [...document.querySelectorAll('#basisSeg .fee-opt')].map(e => e.textContent.trim());
+    out.meta.defaultRange = (document.querySelector('#rangeSeg .fee-opt.active') || {dataset:{}}).dataset.range || '';
+    out.meta.defaultBasis = (document.querySelector('#basisSeg .fee-opt.active') || {dataset:{}}).dataset.basis || '';
+    const rb = document.getElementById('rangeBar');
+    out.meta.barOverflow = rb ? (rb.scrollWidth > rb.clientWidth + 1) : true;
+    out.meta.barRows = rb ? new Set([...rb.children].map(c => Math.round(c.getBoundingClientRect().top))).size : -1;
+    out.meta.cards = document.querySelectorAll('#tradeStats .stat-card').length;
+
+    for (const rg of ['all','1m','3m','1y','ytd']) {
+      await setRange(rg);
+      const from = refFrom(rg);
+      const exp = S.filter(s => !from || s.o >= from);
+      out.ranges.push({
+        rg, from, appFrom: TradeUI.rangeFrom(), got: read(),
+        expN: exp.length,
+        expRealized: exp.reduce((a, s) => a + s.pnl, 0)
+      });
+    }
+    // 口径: 固定「近一月」, 两种口径必须给出不同结果
+    await setRange('1m');
+    const openBasis = read();
+    await setBasis('close');
+    const closeBasis = read();
+    out.basis = { openBasis, closeBasis,
+                  tipOpen: '按开仓时间时未平仓应计入',
+                  noteClose: closeBasis.note,
+                  hasUnclosedHint: /未平仓记录没有平仓时间/.test(closeBasis.note) };
+    out.meta.lsRange = localStorage.getItem('oc-trade-range');
+    out.meta.lsBasis = localStorage.getItem('oc-trade-range-basis');
+    const snap = plansSnapshot();
+    out.meta.snap = { tradeRange: snap.tradeRange, tradeRangeBasis: snap.tradeRangeBasis };
+    // 模拟换机重开: 抹掉本机设置 → 从备份快照恢复 → 内存/选中态/localStorage 三处都要回来
+    localStorage.removeItem('oc-trade-range');
+    localStorage.removeItem('oc-trade-range-basis');
+    TradeUI.range = 'all'; TradeUI.rangeBasis = 'open'; TradeUI.syncRangeSeg();
+    const nPlans = plansRestore({ tradeRange: '3m', tradeRangeBasis: 'close' });
+    await w(250);
+    out.meta.restore = {
+      n: nPlans, range: TradeUI.range, basis: TradeUI.rangeBasis,
+      activeRange: (document.querySelector('#rangeSeg .fee-opt.active') || {dataset:{}}).dataset.range || '',
+      activeBasis: (document.querySelector('#basisSeg .fee-opt.active') || {dataset:{}}).dataset.basis || '',
+      lsRange: localStorage.getItem('oc-trade-range'), lsBasis: localStorage.getItem('oc-trade-range-basis')
+    };
+    // 三个模式共用一个区间设置
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+    await w(800);
+    out.meta.otherMode = {
+      range: TradeUI.range, basis: TradeUI.rangeBasis,
+      activeRange: (document.querySelector('#rangeSeg .fee-opt.active') || {dataset:{}}).dataset.range || '',
+      note: (document.getElementById('rangeNote') || {}).textContent || ''
+    };
+    // 统计卡 tooltip 写明区间
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click();
+    await w(700);
+    const c1s = document.querySelectorAll('#tradeStats .stat-card')[0];
+    out.meta.cardTip = (c1s && c1s.querySelector('.sv') ? c1s.querySelector('.sv').title : '') || '';
+    // v50.76: 「隐藏统计」必须把「统计区间」这一行一起收起(它属于同一块)
+    const tgBtn = document.getElementById('btnToggleStats');
+    const rbEl = document.getElementById('rangeBar');
+    const stBox = document.getElementById('tradeStats');
+    try { localStorage.removeItem('oc-trade-stats'); } catch (e) {}
+    TradeUI.applyStatsPref(); await w(250);
+    out.meta.hide = { shownFirst: rbEl.classList.contains('hidden') === false && stBox.classList.contains('hidden') === false };
+    tgBtn.click(); await w(350);
+    out.meta.hide.hiddenBoth = rbEl.classList.contains('hidden') === true && stBox.classList.contains('hidden') === true;
+    out.meta.hide.rbarH = Math.round(rbEl.getBoundingClientRect().height);
+    out.meta.hide.label = tgBtn.textContent.trim();
+    TradeUI.applyStatsPref(); await w(200);            // 模拟「下次打开」
+    out.meta.hide.reopenBoth = rbEl.classList.contains('hidden') === true && stBox.classList.contains('hidden') === true;
+    tgBtn.click(); await w(350);
+    out.meta.hide.backBoth = rbEl.classList.contains('hidden') === false && stBox.classList.contains('hidden') === false;
+    out.meta.hide.labelBack = tgBtn.textContent.trim();
+    try { localStorage.removeItem('oc-trade-stats'); } catch (e) {}
+    TradeUI.applyStatsPref(); await w(200);
+    return JSON.stringify(out);
+  })()`);
+  const r76 = JSON.parse(r76Run);
+  check('统计区间(v50.76): 5 个区间项 + 2 个口径项(文案与需求一致)',
+        r76.meta.rangeOpts.join(',') === '近一月,近三月,近一年,今年以来,全部'
+        && r76.meta.basisOpts.join(',') === '按开仓时间,按平仓时间', JSON.stringify(r76.meta));
+  check('统计区间(v50.76): 默认「全部 + 按开仓时间」(等价于原行为)',
+        r76.meta.defaultRange === 'all' && r76.meta.defaultBasis === 'open', JSON.stringify(r76.meta));
+  check('统计区间(v50.76): 工具条不出横向滚动且排布紧凑(≤2 行)',
+        r76.meta.barOverflow === false && r76.meta.barRows <= 2,
+        'overflow=' + r76.meta.barOverflow + ' rows=' + r76.meta.barRows);
+  check('统计区间(v50.76): 新增工具条不影响 5 张统计卡', r76.meta.cards === 5, String(r76.meta.cards));
+  for (const r of r76.ranges) {
+    // 「全部」时说明写「全部记录（共 N 条）」, 其余区间写「区间内 N 条」
+    const wantTxt = (r.rg === 'all') ? ('共 ' + r.expN + ' 条') : ('区间内 ' + r.expN + ' 条');
+    check('统计区间(v50.76)【' + r.rg + '】条数一致: 说明文字 + 主表行数 = ' + r.expN,
+          r.got.rows === r.expN && r.got.note.indexOf(wantTxt) >= 0,
+          JSON.stringify({rows: r.got.rows, note: r.got.note, exp: r.expN, want: wantTxt}));
+    check('统计区间(v50.76)【' + r.rg + '】累计盈亏只算区间内 = ' + r.expRealized,
+          r.got.realized === r.expRealized, 'got=' + r.got.realized + ' exp=' + r.expRealized);
+    check('统计区间(v50.76)【' + r.rg + '】起算日与独立实现一致',
+          r.appFrom === r.from, 'app=' + r.appFrom + ' ref=' + r.from);
+  }
+  const r76_1y = r76.ranges.find(x => x.rg === '1y') || {};
+  const r76_ytd = r76.ranges.find(x => x.rg === 'ytd') || {};
+  check('统计区间(v50.76): 「近一年」与「今年以来」确实不同(跨年那笔只进近一年, 起算日各按各的)',
+        r76_1y.expN > r76_ytd.expN && r76_1y.appFrom !== r76_ytd.appFrom,
+        '1y=' + r76_1y.expN + '@' + r76_1y.appFrom + ' ytd=' + r76_ytd.expN + '@' + r76_ytd.appFrom);
+  check('统计区间(v50.76): 按开仓时间【近一月】= 老开仓那笔不计入 / 未平仓计入(2 条, 累计 +100)',
+        r76.basis.openBasis.rows === 2 && r76.basis.openBasis.realized === 100,
+        JSON.stringify(r76.basis.openBasis));
+  check('统计区间(v50.76): 按平仓时间【近一月】= 老开仓新平仓计入 / 未平仓排除(2 条, 累计 +1100)',
+        r76.basis.closeBasis.rows === 2 && r76.basis.closeBasis.realized === 1100,
+        JSON.stringify(r76.basis.closeBasis));
+  check('统计区间(v50.76): 按平仓时间时说明里提示「未平仓不计入」',
+        r76.basis.hasUnclosedHint === true, r76.basis.noteClose);
+  check('统计区间(v50.76): 选择写入 localStorage 持久化',
+        r76.meta.lsRange === '1m' && r76.meta.lsBasis === 'close',
+        'range=' + r76.meta.lsRange + ' basis=' + r76.meta.lsBasis);
+  check('统计区间(v50.76): 备份快照带上区间与口径',
+        r76.meta.snap.tradeRange === '1m' && r76.meta.snap.tradeRangeBasis === 'close',
+        JSON.stringify(r76.meta.snap));
+  check('统计区间(v50.76): 导入备份能恢复区间与口径, 且不计入「方案组数」',
+        r76.meta.restore.range === '3m' && r76.meta.restore.basis === 'close'
+        && r76.meta.restore.activeRange === '3m' && r76.meta.restore.activeBasis === 'close'
+        && r76.meta.restore.lsRange === '3m' && r76.meta.restore.n === 0,
+        JSON.stringify(r76.meta.restore));
+  check('统计区间(v50.76): 三个模式共用同一份区间设置(切到期权买方仍生效)',
+        r76.meta.otherMode.range === '3m' && r76.meta.otherMode.activeRange === '3m'
+        && r76.meta.otherMode.note.indexOf('区间内') >= 0, JSON.stringify(r76.meta.otherMode));
+  check('统计区间(v50.76): 统计卡 tooltip 写明当前统计区间',
+        /统计区间：/.test(r76.meta.cardTip), r76.meta.cardTip);
+  check('统计区间(v50.76): 「隐藏统计」把「统计区间」那一行一起收起(不占高度)',
+        r76.meta.hide.shownFirst === true && r76.meta.hide.hiddenBoth === true && r76.meta.hide.rbarH === 0,
+        JSON.stringify(r76.meta.hide));
+  check('统计区间(v50.76): 隐藏后「下次打开」两行仍一起隐藏, 再点一起回来(按钮文案跟着切)',
+        r76.meta.hide.reopenBoth === true && r76.meta.hide.backBoth === true
+        && /显示统计与区间/.test(r76.meta.hide.label) && /隐藏统计与区间/.test(r76.meta.hide.labelBack),
+        JSON.stringify(r76.meta.hide));
+
+  // 区间 + 搜索叠加(搜索只在区间内收窄), 顺带复位
+  const r76bRun = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(700);
+    document.querySelector('#rangeSeg .fee-opt[data-range="all"]').click(); await w(300);
+    const all = document.querySelectorAll('#tradesTable tbody tr.clickable').length;
+    const inp = document.getElementById('tradesSearch');
+    inp.value = 'e2er5'; inp.dispatchEvent(new Event('input', {bubbles:true}));
+    await w(300);
+    const out = { all, filtered: document.querySelectorAll('#tradesTable tbody tr.clickable').length,
+                  hint: (document.getElementById('tradesSearchHint')||{}).textContent || '',
+                  rangeNote: (document.getElementById('rangeNote')||{}).textContent || '' };
+    document.getElementById('tradesSearchClear').click(); await w(250);
+    out.noteAfterClear = (document.getElementById('tradesSearchHint')||{}).textContent || '';
+    return JSON.stringify(out);
+  })()`);
+  const r76b = JSON.parse(r76bRun);
+  check('统计区间(v50.76): 区间与搜索叠加生效(全部 8 条 → 搜「e2er5」命中 1 条)',
+        r76b.all === 8 && r76b.filtered === 1 && /筛选出 1 条/.test(r76b.hint), r76bRun);
+  check('统计区间(v50.76): 改回「全部」时区间说明同步为全部记录',
+        /全部记录/.test(r76b.rangeNote) && r76b.noteAfterClear === '', r76bRun);
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
