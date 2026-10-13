@@ -4055,6 +4055,132 @@ async function main() {
   check('备份差异(v50.78): 非法文件名返回 ok=false + 人话错误',
         v78.diffBad.ok === false && /不合法/.test(v78.diffBad.error), JSON.stringify(v78.diffBad));
 
+  // ===== v50.79: 开仓手续费核算(弹窗金额 + 详情页合计) + 点合约代码复制 =====
+  const v79Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const setV = (id, v) => { const el = document.getElementById(id);
+      el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); };
+    const out = {};
+    // 棉花: 期货 4.3 元/手 + 0.01 申报费 = 4.31/手
+    const o = await post({mode:'futures', underlying:'CF', contract:'CF2701', batch:'Bfee79',
+      op_type:'open', direction:'buy', open_date:'2026-09-01', open_time:'10:00',
+      open_price:15000, qty:3, premium:0, init_stop:14800});
+    const c = await post({mode:'futures', underlying:'CF', contract:'CF2701', batch:'Bfee79',
+      op_type:'close', direction:'sell', close_date:'2026-09-10', close_time:'10:00',
+      close_qty:1, close_price:15200, pnl:1000});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(900);
+    await TradeUI.loadDetail('CF', 'Bfee79'); await w(700);
+
+    // ---- ① 详情页 meta: 手续费合计 / 净盈亏 ----
+    const metaEl = document.getElementById('tdMeta');
+    out.metaText = metaEl ? metaEl.textContent.replace(/\\s+/g, ' ') : '';
+    out.metaHtml = metaEl ? metaEl.innerHTML : '';
+    const dApi = await (await fetch('/api/trades/detail?underlying=CF&mode=futures&batch=Bfee79&fee=ex')).json();
+    out.detailFee = { fee: dApi.fee_total, net: dApi.net_pnl, gross: dApi.total_pnl };
+
+    // ---- ② 开仓弹窗也显示手续费金额(走真实入口: 详情页「新建开仓」) ----
+    const ab = [...document.querySelectorAll('#tradesArea button')]
+      .find(b => /新建开仓/.test(b.textContent));
+    if (ab) { ab.click(); await w(500); }
+    out.isOpenModal = TradeUI._closeModal === false;
+    setV('tmContract', 'CF2701');
+    setV('tmOpenPrice', '15000');
+    setV('tmQty', '3');
+    await w(900);
+    const fh = document.getElementById('tmFeeHint');
+    out.openFeeText = fh ? fh.textContent : '';
+    out.openFeeHtml = fh ? fh.innerHTML : '';
+    // ⚠ 提示必须真的**看得见**: 早先它写在 #tmCloseTodayWrap 里, 开仓弹窗把那个 label
+    //   整个 display:none → 文本设进去了但用户看不到(E2E 只看 textContent 会漏)
+    out.openFeeVisible = !!(fh && fh.offsetParent !== null);
+    out.openFeeInHiddenWrap = !!(fh && fh.closest('#tmCloseTodayWrap'));
+    // 「未填数量」时的引导语也要是开仓口径(不是"平今/平昨")
+    setV('tmQty', '');
+    await w(700);
+    out.openFeeEmpty = fh ? fh.textContent : '';
+    document.getElementById('tmCancel').click(); await w(400);
+    // 平仓弹窗仍是两档(不能被开仓口径串了)
+    const nb = [...document.querySelectorAll('#tradesArea button')]
+      .find(b => /新建平仓/.test(b.textContent));
+    if (nb) { nb.click(); await w(500); }
+    out.isCloseModal = TradeUI._closeModal === true;
+    setV('tmClosePrice', '15200');
+    setV('tmCloseQty', '1');
+    await w(900);
+    out.closeFeeText = fh ? fh.textContent : '';
+    out.closeFeeVisible = !!(fh && fh.offsetParent !== null);
+    document.getElementById('tmCancel').click(); await w(400);
+
+    // ---- ③ 点合约代码复制(持仓汇总 + 操作记录) ----
+    let copied = null;
+    out.clipStubOk = false;
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText: t => { copied = t; return Promise.resolve(); } }, configurable: true });
+      out.clipStubOk = true;
+    } catch (e) { out.clipStubErr = String(e); }
+    const holdCell = document.querySelector('#tdHoldings td .copyc');
+    const opCell = document.querySelector('#tdOps tr td .copyc');
+    out.copyTargets = { holding: holdCell ? holdCell.dataset.copy : '',
+                        op: opCell ? opCell.dataset.copy : '',
+                        opTitle: opCell ? opCell.title : '',
+                        opCursor: opCell ? getComputedStyle(opCell).cursor : '' };
+    if (opCell) { opCell.click(); await w(300); }
+    out.copiedOp = copied;
+    const tEl = document.getElementById('ocToast');
+    out.toast = tEl ? { on: tEl.classList.contains('on'), text: tEl.textContent } : null;
+    copied = null;
+    if (holdCell) { holdCell.click(); await w(300); }
+    out.copiedHold = copied;
+    // 复制不能误触「按合约筛选」下拉或行内编辑
+    out.filterAfter = document.getElementById('tdContractFilter').value;
+
+    await del(o.id); await del(c.id);
+    return JSON.stringify(out);
+  })()`);
+  const v79 = JSON.parse(v79Run);
+  const fmt2 = v => Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+  check('开仓手续费(v50.79): 详情页 meta 显示「手续费合计」(含开仓那笔)',
+        v79.detailFee.fee > 0 && v79.metaText.indexOf('手续费合计 CN¥' + fmt2(v79.detailFee.fee)) >= 0,
+        v79.metaText + ' || fee=' + v79.detailFee.fee);
+  check('开仓手续费(v50.79): 详情页 meta 的「净盈亏」= 平仓盈亏 − 手续费',
+        v79.metaText.indexOf('净盈亏') >= 0
+        && v79.metaText.indexOf(fmt2(v79.detailFee.net)) >= 0
+        && Math.abs(v79.detailFee.net - (v79.detailFee.gross - v79.detailFee.fee)) < 1e-6,
+        JSON.stringify(v79.detailFee));
+  check('开仓手续费(v50.79): 开仓弹窗显示「开仓手续费 ¥12.93」(棉花 3 手 = 3×4.31)',
+        v79.isOpenModal === true && /开仓手续费：¥12[.]93/.test(v79.openFeeText),
+        v79.openFeeText);
+  check('开仓手续费(v50.79): 开仓弹窗不出现「平今/平昨」字样(那是平仓口径)',
+        !/[平]今|[平]昨/.test(v79.openFeeText), v79.openFeeText);
+  check('开仓手续费(v50.79): 提示真的看得见(没被平今/平昨那格的 display:none 一起藏掉)',
+        v79.openFeeVisible === true && v79.openFeeInHiddenWrap === false,
+        'visible=' + v79.openFeeVisible + ' inHiddenWrap=' + v79.openFeeInHiddenWrap);
+  check('开仓手续费(v50.79): 没填数量时给的是开仓引导语',
+        /填了开仓数量/.test(v79.openFeeEmpty), v79.openFeeEmpty);
+  check('平仓两档(v50.79): 平仓弹窗仍是平今/平昨两档(开仓口径没串味)',
+        v79.isCloseModal === true && /平今/.test(v79.closeFeeText) && /平昨/.test(v79.closeFeeText),
+        v79.closeFeeText);
+  check('平仓两档(v50.79): 平仓时手续费提示同样可见',
+        v79.closeFeeVisible === true, String(v79.closeFeeVisible));
+  check('复制合约(v50.79): 持仓汇总 + 操作记录的合约都可点(带 data-copy 与手型光标)',
+        /^cf2701$/i.test(v79.copyTargets.holding) && v79.copyTargets.holding === v79.copyTargets.op
+        && /点击复制/.test(v79.copyTargets.opTitle) && v79.copyTargets.opCursor === 'pointer',
+        JSON.stringify(v79.copyTargets));
+  check('复制合约(v50.79): 点操作记录的合约 → 写入剪贴板的就是表里显示的合约代码',
+        !!v79.copiedOp && v79.copiedOp === v79.copyTargets.op, String(v79.copiedOp));
+  check('复制合约(v50.79): 复制后弹出轻提示「已复制：<合约>」',
+        !!v79.toast && v79.toast.on === true && v79.toast.text === ('已复制：' + v79.copyTargets.op),
+        JSON.stringify(v79.toast));
+  check('复制合约(v50.79): 点持仓汇总的合约同样能复制',
+        !!v79.copiedHold && v79.copiedHold === v79.copyTargets.holding, String(v79.copiedHold));
+  check('复制合约(v50.79): 点合约不误触其它交互(合约筛选保持「全部合约」)',
+        v79.filterAfter === '', v79.filterAfter);
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

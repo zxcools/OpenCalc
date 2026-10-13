@@ -318,6 +318,21 @@ check("费率估算(v50.78): 期权走期权费率(is_option=True 且金额>0)",
       _fe4["is_option"] is True and _fe4["fee_today"] > 0, str(_fe4))
 check("费率估算(v50.78): 0 手 → 0 元(不抛异常)",
       fee_estimate("CF", "CF2701", "futures", 15000, 0)["fee_today"] == 0.0, '')
+# v50.79: 开仓弹窗也要金额 —— 开仓不分平今/平昨, 永远走基准费率(数值上 = 平昨那档)
+check("费率估算(v50.79): 开仓档 = 基准费率(棉花 2 手 8.62, 与平昨同值)",
+      abs(_fe1["fee_open"] - 8.62) < 1e-9 and abs(_fe1["fee_open"] - _fe1["fee_prev"]) < 1e-9,
+      str(_fe1))
+check("费率估算(v50.79): 开仓档与 row_fee 的开仓行同源",
+      abs(_fe1["fee_open"] - row_fee(_frow(underlying="CF", contract="CF2701", op_type="open",
+                                           open_price=15000, qty=2),
+                                     "futures", "ex")) < 1e-9, str(_fe1))
+check("费率估算(v50.79): 比例费率的品种开仓档按 价格×乘数×手数(螺纹 3200×1 手)",
+      abs(fee_estimate("rb", "rb2701", "futures", 3200, 1)["fee_open"]
+          - row_fee(_frow(underlying="rb", contract="rb2701", op_type="open",
+                          open_price=3200, qty=1), "futures", "ex")) < 1e-9, '')
+check("费率估算(v50.79): 期权开仓档 > 0 且 0 手 = 0",
+      fee_estimate("", "fg2701-P-800", "options", 100, 2)["fee_open"] > 0
+      and fee_estimate("", "fg2701-P-800", "options", 100, 0)["fee_open"] == 0.0, '')
 
 # --- ② 未平仓头寸风险汇总(用独立策略名隔离, 不干扰其它用例) ---
 # ⚠ trade_upsert 把 strategy 固定成「期权买方」(自定义策略 UI 已撤除), 隔离不了;

@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5078            # 与 README 版本号 v50.78 对齐(数值比较用于单实例接管)
+APP_VERSION = 5079            # 与 README 版本号 v50.79 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -3380,7 +3380,9 @@ def open_risk_summary(strategy=None, mode="options"):
 
 
 def fee_estimate(underlying, contract="", mode="futures", price=0, qty=0):
-    """平仓弹窗用: 算「平今 / 平昨」两档手续费(v50.78)。
+    """弹窗用: 算这笔的手续费金额。
+      - 开仓: 只有一档(基准费率) → fee_open
+      - 平仓: 平今 / 平昨 两档 → fee_today / fee_prev (v50.78)
 
     ⚠ 品种解析与费率挑选全部交给 fee_product + row_fee —— 不把逻辑重写一遍,
       否则弹窗提示与详情页/主表的手续费迟早对不上。
@@ -3392,6 +3394,9 @@ def fee_estimate(underlying, contract="", mode="futures", price=0, qty=0):
             "close_price": price, "close_qty": qty}
     fee_today = row_fee(dict(base, close_today="1"), mode, FEE_MODE_EX)
     fee_prev = row_fee(dict(base, close_today="0"), mode, FEE_MODE_EX)
+    # v50.79: 开仓弹窗也要显示手续费金额(开仓不分平今/平昨, 永远走基准费率)
+    fee_open = row_fee({"mode": mode, "underlying": underlying, "contract": contract,
+                        "op_type": "open", "open_price": price, "qty": qty}, mode, FEE_MODE_EX)
     known = fee_known(base, mode)
     prod = fee_product(underlying, contract)
     mult = 1.0
@@ -3400,6 +3405,7 @@ def fee_estimate(underlying, contract="", mode="futures", price=0, qty=0):
         mult = (c["opt_mult"] if is_opt else c["mult"]) or 1
     return {
         "code": prod, "is_option": is_opt, "known": known, "mult": mult,
+        "fee_open": round(fee_open, 2),
         "fee_today": round(fee_today, 2), "fee_prev": round(fee_prev, 2),
         # 两档相同(该品种没单列平今, 或费率本来就一样) → 前端不用强调"两档"
         "same": abs(fee_today - fee_prev) < 1e-9,
@@ -4848,6 +4854,16 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* v50.78: 平仓弹窗里的「平今 / 平昨」两档金额 —— 当前选中的那一档高亮, 一眼看出差多少 */
 #tmFeeHint b{font-weight:600;color:var(--sub)}
 #tmFeeHint b.on{color:var(--accent2);text-decoration:underline}
+/* v50.79: 详情页点合约代码即复制 */
+.copyc{cursor:pointer;border-bottom:1px dashed transparent;transition:border-color .12s}
+.copyc:hover{border-bottom-color:currentColor}
+.copyc:active{opacity:.6}
+/* v50.79: 轻提示(复制成功反馈) */
+#ocToast{position:fixed;left:50%;bottom:54px;transform:translate(-50%,10px);z-index:9999;
+  background:rgba(0,0,0,.84);color:#fff;padding:7px 14px;border-radius:8px;
+  font-size:12.5px;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  opacity:0;pointer-events:none;transition:opacity .16s,transform .16s}
+#ocToast.on{opacity:1;transform:translate(-50%,0)}
 /* v50.78: 未平仓头寸风险汇总(交易记录页, 统计卡下方) */
 .riskbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 10px;padding:9px 12px;
   border:1px solid var(--line);border-radius:10px;background:var(--panel2);font-size:var(--fz-btn)}
@@ -5973,9 +5989,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <button type="button" class="pick-opt" data-ct="0" aria-pressed="false">平昨</button>
           </span>
           <span id="tmCloseTodayHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
-          <!-- v50.78: 直接把两档金额摆出来 —— 选之前就知道差多少钱(费率在后端算, 见 /api/fees/estimate) -->
-          <span id="tmFeeHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
+        <!-- v50.78/79: 手续费金额提示(开仓/平仓都要显示)
+             ⚠ 不能放在 #tmCloseTodayWrap 里面 —— 那个 label 在开仓弹窗里是 display:none,
+               提示会跟着一起看不见(文本设进去了但用户看不到) -->
+        <div class="full" id="tmFeeRow" style="margin-top:-6px;font-size:var(--fz-lbl);color:var(--sub)">
+          <span id="tmFeeHint"></span>
+        </div>
 
         <label class="opt-only">看涨/看跌
           <select id="tmCallPut">
@@ -7074,6 +7094,20 @@ function escHtml(s){
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
+/* v50.79: 轻提示 —— 页面里原本没有 toast, 点合约代码复制后需要一个即时反馈 */
+let _ocToastTimer = null;
+function ocToast(msg){
+  let el = document.getElementById('ocToast');
+  if (!el){
+    el = document.createElement('div');
+    el.id = 'ocToast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('on');
+  clearTimeout(_ocToastTimer);
+  _ocToastTimer = setTimeout(() => el.classList.remove('on'), 1500);
+}
 /* 导入/迁移的失败明细提示 (v50.77)
    ⚠ 后端以前把单条写库失败静默 pass 掉, UI 只说"成功 N 条" → 少了几条根本查不出来。
      现在后端把失败明细带回来, 这里统一拼成可直接展示的一段话。 */
@@ -7750,8 +7784,13 @@ const TradeUI = {
       if (id === 'tmOpenPrice' || id === 'tmQty' || id === 'tmUnderlying' || id === 'tmContract'){
         this.syncModalPremium();
       }
-      if (id === 'tmClosePrice' || id === 'tmCloseQty' || id === 'tmContract' || id === 'tmUnderlying'){
-        if (this._closeModal) { this.syncModalPnl(true); this.syncModalFee(); }
+      if (this._closeModal && (id === 'tmClosePrice' || id === 'tmCloseQty' || id === 'tmContract' || id === 'tmUnderlying')){
+        this.syncModalPnl(true);
+      }
+      // v50.79: 手续费金额 —— 开仓看「开仓价/数量」, 平仓看「平仓价/平仓数量」
+      if (id === 'tmOpenPrice' || id === 'tmQty' || id === 'tmClosePrice' || id === 'tmCloseQty'
+          || id === 'tmUnderlying' || id === 'tmContract'){
+        this.syncModalFee();
       }
     }));
     // v50.74: 平今/平昨 分段控件(按钮走 click, 不在上面的 input/change 委托里)
@@ -7777,6 +7816,15 @@ const TradeUI = {
     const se = $('btnExport'); const si = $('btnImport');
     if (se) se.addEventListener('click', () => FundUI.exportBackup());
     if (si) si.addEventListener('click', () => $('importFile').click());
+    // v50.79: 点合约代码即复制(详情页 持仓汇总 + 操作记录) —— 表格会重渲染,
+    //   所以用事件委托挂在 document 上, 不随每次 renderOps 重新绑
+    document.addEventListener('click', e => {
+      const el = (e.target && e.target.closest) ? e.target.closest('.copyc') : null;
+      if (!el) return;
+      const txt = String(el.dataset.copy || el.textContent || '').trim();
+      if (!txt) return;
+      this.copyText(txt).then(ok => ocToast(ok ? ('已复制：' + txt) : '复制失败，请手动选中后复制'));
+    });
     const contact = $('btnContact');
     if (contact) contact.addEventListener('click', () => {
       const bg = $('contactBg'); if (bg) bg.classList.remove('hidden');
@@ -8214,6 +8262,24 @@ const TradeUI = {
     return `<br>当前 IV <b>${f(d.iv)}</b>&nbsp;&nbsp;IV 百分位 <b>${f(d.iv_pct)}</b>`;
   },
 
+  /* v50.79: 整批的「手续费合计 / 净盈亏」(后端 trade_detail 已算好, 之前前端没用上)
+     ⚠ 未平仓时净盈亏 = 平仓盈亏(0) − 手续费 → 显示为负的手续费, tooltip 里写明口径 */
+  feeMetaExtra(d){
+    if (this.feeMode === 'off') return '';
+    const fee = d.fee_total || 0;
+    const gross = d.total_pnl || 0;
+    const net = (d.net_pnl != null) ? d.net_pnl : (gross - fee);
+    if (!fee && !gross) return '';     // 都没有就不占位置(老数据 / 费率表未收录)
+    const m2 = v => Math.abs(v).toLocaleString('en-US',{maximumFractionDigits:2});
+    const feeStr = fee ? ('CN¥' + m2(fee)) : '—';
+    const netCls = net > 0 ? 'pos' : (net < 0 ? 'neg' : '');
+    const tip = '手续费合计 = 开仓 + 平仓两笔之和'
+      + (d.close_status === '已平仓' ? '' : '（还没平完，只含已发生的那部分）')
+      + '；净盈亏 = 平仓盈亏 − 手续费';
+    return `<br>手续费合计 <b>${feeStr}</b>&nbsp;&nbsp;净盈亏 <b class="${netCls}"`
+      + ` title="${escHtml(tip)}">${(net > 0 ? '+' : (net < 0 ? '-' : '')) + 'CN¥' + m2(net)}</b>`;
+  },
+
   /* 期权双买: 持仓汇总上方的「止盈价测算」(v50.63)
      数据来自后端 trade_detail().dual_targets —— 计算器加入的和手动新建的用同一套口径现算 */
   renderDualTargets(d){
@@ -8414,6 +8480,7 @@ const TradeUI = {
       &nbsp;状态 <span class="tag ${d.close_status==='已平仓'?'closed':(d.close_status==='部分平仓'?'partial':'unclosed')}">${escHtml(d.close_status||'—')}</span>
       &nbsp;平仓盈亏 <b class="${pnl>0?'pos':(pnl<0?'neg':'')}">${pnlStr}</b>
       &nbsp;平仓时间 <b>${this.fmtDate(d.last_close_date)}</b>`
+      + this.feeMetaExtra(d)
       + (this.isFut() ? this.futMetaExtra(d) : '')
       + this.ivMetaExtra(d);
 
@@ -8424,7 +8491,7 @@ const TradeUI = {
     } else {
       hb.innerHTML = d.holdings.map(h => `<tr>
         <td>${escHtml(this.underlyingText(h.underlying || d.underlying))}</td>
-        <td><b>${escHtml(h.contract)}</b></td>
+        <td><b class="copyc" data-copy="${escHtml(h.contract)}" title="点击复制合约代码">${escHtml(h.contract)}</b></td>
         <td class="opt-only"><span class="tag ${h.call_put==='P'?'short':(h.call_put==='C'?'long':'')}">${h.call_put==='P'?'看跌':(h.call_put==='C'?'看涨':'—')}</span></td>
         <td><span class="tag ${h.direction==='buy'?'buy':'sell'}">${this.dirTxt(h.direction)}</span></td>
         <td>${h.open_price.toLocaleString('en-US',{maximumFractionDigits:4})}</td>
@@ -8450,6 +8517,33 @@ const TradeUI = {
     this.renderCalcCard(d);        // 期货: 顶部测算结果卡
     this.renderDualTargets(d);     // v50.63: 双买: 持仓汇总上方的止盈价测算
     this.loadReviews();            // 底部复盘笔记(两个模式都有)
+  },
+
+  /* v50.79: 把一段文字写进剪贴板 —— 优先异步 Clipboard API(127.0.0.1 属安全上下文),
+     不可用/被拒时退回隐藏 textarea + execCommand(老内核 / http 场景兜底) */
+  async copyText(txt){
+    const s = String(txt == null ? '' : txt).trim();
+    if (!s) return false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(s);
+        return true;
+      }
+    } catch (e) { /* 落到下面的兜底 */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = s;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, s.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return !!ok;
+    } catch (e) { return false; }
   },
 
   renderOps(){
@@ -8483,7 +8577,7 @@ const TradeUI = {
       const feeTxt = feeUnknown ? '—'
         : ((o.fee > 0) ? 'CN¥' + o.fee.toLocaleString('en-US',{maximumFractionDigits:2}) : '—');
       return `<tr class="row-${opTag}">
-        <td><b>${escHtml(o.contract)}</b></td>
+        <td><b class="copyc" data-copy="${escHtml(o.contract)}" title="点击复制合约代码">${escHtml(o.contract)}</b></td>
         <td>${this.fmtDateTime(dt, isOpen ? o.open_time : o.close_time)}</td>
         <td><span class="tag ${opTag}">${opTxt}</span></td>
         <td class="opt-only">${fmtDelta4(o.open_delta) || '—'}</td>
@@ -8910,7 +9004,7 @@ const TradeUI = {
     this.syncCloseTodayHint(preset);
     this._feeLast = null;              // v50.78: 换弹窗就丢掉上一次的两档金额
     if ($('tmFeeHint')) $('tmFeeHint').innerHTML = '';
-    if (!isOpen) this.syncModalFee();
+    this.syncModalFee();               // v50.79: 开仓弹窗也显示手续费(之前只在平仓时显示)
     bg.classList.remove('hidden');
     bg.dataset.editing = preset.id || '';
   },
@@ -9047,24 +9141,28 @@ const TradeUI = {
       : '自动：按开仓 ↔ 平仓的交易日推；判不准/想强制时选平今或平昨';
   },
 
-  /* v50.78: 平仓弹窗直接显示「平今 / 平昨」两档手续费**金额**
+  /* v50.78/79: 弹窗直接显示手续费**金额**
+       平仓 → 「平今 / 平昨」两档(可手选, 选中档高亮)
+       开仓 → 一档「开仓手续费」(顺带把手续费口径为「不计算」时的提示也交给它)
      费率挑选逻辑一律走后端 /api/fees/estimate(内部复用 row_fee) ——
      前端不重算, 否则弹窗提示与详情页/主表的手续费迟早对不上。 */
   syncModalFee(){
     const el = $('tmFeeHint');
     if (!el) return;
-    if (!this._closeModal){ el.innerHTML = ''; return; }
     const src = this._feeCode();
     if (!src.underlying && !src.contract){ el.innerHTML = ''; return; }
-    const price = parseFloat(($('tmClosePrice') || {}).value) || 0;
-    const qty = parseFloat(($('tmCloseQty') || {}).value) || 0;
+    const isOpen = !this._closeModal;
+    const price = parseFloat(($(isOpen ? 'tmOpenPrice' : 'tmClosePrice') || {}).value) || 0;
+    const qty = parseFloat(($(isOpen ? 'tmQty' : 'tmCloseQty') || {}).value) || 0;
     if (!(qty > 0)){
-      el.innerHTML = '<span style="opacity:.8">填了平仓数量就能算出平今 / 平昨各多少钱</span>';
+      el.innerHTML = '<span style="opacity:.8">' + (isOpen
+        ? '填了开仓数量就能算出这笔的手续费'
+        : '填了平仓数量就能算出平今 / 平昨各多少钱') + '</span>';
       return;
     }
     // 打字时别每按一键就发一次请求
     clearTimeout(this._feeTimer);
-    this._feeTimer = setTimeout(() => this._fetchModalFee(src.underlying, src.contract, price, qty), 150);
+    this._feeTimer = setTimeout(() => this._fetchModalFee(src.underlying, src.contract, price, qty, isOpen), 150);
   },
   /* 弹窗里的「标的 / 合约」原样取出 —— 两个都传给后端, 由 fee_product 解析品种
      ⚠ 只传其中一个会解析失败(记录里的标的可能写成 CF2701空 这类) → 会误报"费率表未收录" */
@@ -9075,7 +9173,7 @@ const TradeUI = {
     const contract = cEl ? String(cEl.value || '').trim() : '';
     return { underlying, contract };
   },
-  async _fetchModalFee(underlying, contract, price, qty){
+  async _fetchModalFee(underlying, contract, price, qty, isOpen){
     const el = $('tmFeeHint');
     if (!el) return;
     this._feeReqSeq = (this._feeReqSeq || 0) + 1;
@@ -9087,7 +9185,7 @@ const TradeUI = {
         + '&mode=' + encodeURIComponent(this.mode)
         + '&price=' + price + '&qty=' + qty)).json();
       if (seq !== this._feeReqSeq) return;      // 已有更新的请求, 丢弃这次结果
-      this._feeLast = d && d.ok ? d : null;
+      this._feeLast = (d && d.ok) ? Object.assign({}, d, { _isOpen: !!isOpen, _qty: qty }) : null;
       this._paintModalFee();
     } catch (e) { /* 算不出就不显示, 不打扰 */ }
   },
@@ -9102,6 +9200,13 @@ const TradeUI = {
       return;
     }
     const m = v => Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    // 开仓: 只有一档, 与平今/平昨无关
+    if (d._isOpen){
+      const q = Number(d._qty) || 0;
+      el.innerHTML = '开仓手续费：<b class="on">¥' + m(d.fee_open) + '</b>'
+        + ' <span style="opacity:.8">（' + q + ' 手合计' + (q > 1 ? '，¥' + m(d.fee_open / q) + '/手' : '') + '）</span>';
+      return;
+    }
     const cur = this._closeToday || '';
     if (d.same){
       el.innerHTML = '手续费：<b class="on">¥' + m(d.fee_today) + '</b>'
