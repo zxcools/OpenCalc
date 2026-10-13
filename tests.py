@@ -293,6 +293,110 @@ for _x in [x for x in trade_list_records() if x["underlying"] in ("tcut", "okrec
     trade_delete(_x["id"])
 fund_delete("期权买方", 2032, 3)
 
+# ===== v50.78: 平仓两档手续费估算 / 未平仓风险汇总 / 备份差异预览 =====
+print("\n== v50.78 新增能力 ==")
+from main import (fee_estimate, open_risk_summary, fund_backup_diff,  # noqa: E402
+                  fund_auto_backup, DEFAULT_MARGIN_RATE)
+
+# --- ① 平仓弹窗的两档手续费: 必须与 row_fee 同源(不能前后端各算一套) ---
+_fe1 = fee_estimate("CF", "CF2701", "futures", 15000, 2)
+check("费率估算(v50.78): 棉花 2 手 → 平今 0.02 / 平昨 8.62(两档不同)",
+      abs(_fe1["fee_today"] - 0.02) < 1e-9 and abs(_fe1["fee_prev"] - 8.62) < 1e-9
+      and _fe1["same"] is False and _fe1["known"] is True, str(_fe1))
+check("费率估算(v50.78): 与 row_fee 同源(同一笔平仓算出来一模一样)",
+      abs(_fe1["fee_prev"] - row_fee(_frow(underlying="CF", contract="CF2701", op_type="close",
+                                           close_price=15000, close_qty=2, close_today="0"),
+                                     "futures", "ex")) < 1e-9, str(_fe1))
+check("费率估算(v50.78): 没单列平今的品种(铝) → 两档相同(same=True)",
+      (lambda f: f["same"] is True and f["fee_today"] == f["fee_prev"])(fee_estimate("al2611", "", "futures", 20000, 1)),
+      str(fee_estimate("al2611", "", "futures", 20000, 1)))
+check("费率估算(v50.78): 费率表未收录 → known=False(前端提示按 ¥0 计, 不假装 0)",
+      fee_estimate("zzzz9999", "", "futures", 100, 1)["known"] is False,
+      str(fee_estimate("zzzz9999", "", "futures", 100, 1)))
+_fe4 = fee_estimate("", "fg2701-P-800", "options", 100, 2)
+check("费率估算(v50.78): 期权走期权费率(is_option=True 且金额>0)",
+      _fe4["is_option"] is True and _fe4["fee_today"] > 0, str(_fe4))
+check("费率估算(v50.78): 0 手 → 0 元(不抛异常)",
+      fee_estimate("CF", "CF2701", "futures", 15000, 0)["fee_today"] == 0.0, '')
+
+# --- ② 未平仓头寸风险汇总(用独立策略名隔离, 不干扰其它用例) ---
+# ⚠ trade_upsert 把 strategy 固定成「期权买方」(自定义策略 UI 已撤除), 隔离不了;
+#   这里走 trade_import_record —— 它会保留传入的 strategy
+_SU_RISK = "风险汇总测试"
+def _mk_open(u, contract, qty, price, stop=None, mode="futures", premium=0, calc=None):
+    return trade_import_record({"strategy": _SU_RISK, "underlying": u, "contract": contract,
+                                "op_type": "open", "direction": "buy", "open_date": "2026-09-01",
+                                "open_price": price, "qty": qty, "premium": premium,
+                                "mode": mode, "init_stop": stop, "calc_json": calc})
+
+_mi = get_contract("i")["mult"]
+_mrb = get_contract("rb")["mult"]
+_id_i = _mk_open("i", "i2701", 2, 700, stop=690)                      # 有初始止损
+_id_rb = _mk_open("rb", "rb2701", 3, 3200)                            # 没设止损
+_id_cu = _mk_open("cu", "cu2612C80000", 3, 55, mode="options", premium=1500)   # 期权买方
+_id_sm = _mk_open("sm", "sm2701", 4, 6200, calc='{"margin_rate": 0.10}')       # 自定义保证金率
+
+_rk = open_risk_summary(_SU_RISK, "futures")
+check("风险汇总(v50.78): 期货未平仓 3 笔 / 手数 2+3+4=9",
+      _rk["positions"] == 3 and _rk["lots"] == 9, str({k: _rk[k] for k in ("positions", "lots")}))
+_exp_occ = 700 * _mi * 2 * DEFAULT_MARGIN_RATE + 3200 * _mrb * 3 * DEFAULT_MARGIN_RATE + 6200 * get_contract("sm")["mult"] * 4 * 0.10
+check("风险汇总(v50.78): 占用保证金 = 各仓 均价×乘数×手数×保证金率(取 calc_json 里的 10%)",
+      abs(_rk["occupied"] - round(_exp_occ, 2)) < 0.02, 'got=%s exp=%s' % (_rk["occupied"], round(_exp_occ, 2)))
+check("风险汇总(v50.78): 理论最大亏损只算「有初始止损」的 i 仓 = |700−690|×乘数×2",
+      abs(_rk["max_loss"] - round(abs(700 - 690) * _mi * 2, 2)) < 0.02, str(_rk["max_loss"]))
+check("风险汇总(v50.78): 没设止损的手数被单列(3+4=7), 并标记 max_loss 只是下限",
+      _rk["no_stop_lots"] == 7 and _rk["max_loss_is_partial"] is True,
+      str({"no_stop": _rk["no_stop_lots"], "partial": _rk["max_loss_is_partial"]}))
+check("风险汇总(v50.78): 明细按占用资金从大到小",
+      [x["occupied"] for x in _rk["items"]] == sorted([x["occupied"] for x in _rk["items"]], reverse=True),
+      str([(x["underlying"], x["occupied"]) for x in _rk["items"]]))
+check("风险汇总(v50.78): 明细含合约与手数", all(x["contracts"] and x["lots"] > 0 for x in _rk["items"]),
+      str(_rk["items"]))
+
+_rko = open_risk_summary(_SU_RISK, "options")
+check("风险汇总(v50.78): 期权买方 → 占用 = 最大亏损 = 剩余权利金(1500)",
+      _rko["positions"] == 1 and abs(_rko["occupied"] - 1500) < 0.01
+      and abs(_rko["max_loss"] - 1500) < 0.01 and _rko["max_loss_is_partial"] is False,
+      str({k: _rko[k] for k in ("positions", "occupied", "max_loss")}))
+check("风险汇总(v50.78): 期权不该出现「未设止损手数」(权利金即最大亏损)",
+      _rko["no_stop_lots"] == 0, str(_rko["no_stop_lots"]))
+
+# 全平掉之后应该没有未平仓
+trade_import_record({"strategy": _SU_RISK, "underlying": "i", "contract": "i2701", "op_type": "close",
+                     "direction": "sell", "close_date": "2026-09-10", "close_qty": 2,
+                     "close_price": 720, "pnl": 400, "mode": "futures"})
+_rk2 = open_risk_summary(_SU_RISK, "futures")
+check("风险汇总(v50.78): 平掉 i 仓后 → 2 笔 / 7 手 / 不再有止损部分",
+      _rk2["positions"] == 2 and _rk2["lots"] == 7 and _rk2["max_loss"] == 0.0,
+      str({k: _rk2[k] for k in ("positions", "lots", "max_loss")}))
+
+# --- ③ 恢复备份前的差异预览 ---
+_bk78 = fund_auto_backup("差异预览测试", force=True)
+check("备份差异(v50.78): 先生成一份快照", bool(_bk78) and os.path.exists(_bk78), str(_bk78))
+_id_extra = _mk_open("extra78", "extra782701", 1, 100)
+_d78 = fund_backup_diff(os.path.basename(_bk78))
+_tr78 = [t for t in _d78["tables"] if t["key"] == "trade_records"][0]
+check("备份差异(v50.78): 备份比现在少 1 条交易记录(delta=−1)", _tr78["delta"] == -1, str(_tr78))
+check("备份差异(v50.78): 四张表都给条数(备份/当前/差值)",
+      len(_d78["tables"]) == 4 and all(("backup" in t and "current" in t) for t in _d78["tables"]),
+      str(_d78["tables"]))
+check("备份差异(v50.78): 给出可读差异行(含「交易记录」与「现在」)",
+      any("交易记录" in x and "现在" in x for x in _d78["lines"]), str(_d78["lines"]))
+check("备份差异(v50.78): 带备份时间与资金曲线跨度字段",
+      _d78["mtime"] > 0 and "records_from" in _d78["span"] and "trades_from" in _d78["span"],
+      str({k: _d78[k] for k in ("mtime", "span")}))
+for _bad78, _msg78 in (("../../funds.db", "非法文件名"), ("abc.db", "非法文件名"), ("funds_不存在78.db", "不存在")):
+    try:
+        fund_backup_diff(_bad78)
+        check("备份差异(v50.78): 拒绝[%s]" % _msg78, False, "未拒绝")
+    except ValueError:
+        check("备份差异(v50.78): 拒绝[%s]" % _msg78, True)
+
+# 清理本段造的数据(按独立策略名删)
+for _x in [x for x in trade_list_records() if x["strategy"] == _SU_RISK]:
+    trade_delete(_x["id"])
+check("v50.78: 测试数据清理干净", len([x for x in trade_list_records() if x["strategy"] == _SU_RISK]) == 0)
+
 # ===== v50.71: 费率表更新到《保证金、手续费、申报费》20261009 =====
 print("\n== 手续费费率表 v50.71 ==")
 check("费率表(v50.71): 共 91 个品种(含 16 个尚未进合约表的, 先留档)",

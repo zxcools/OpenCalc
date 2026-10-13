@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5077            # 与 README 版本号 v50.77 对齐(数值比较用于单实例接管)
+APP_VERSION = 5078            # 与 README 版本号 v50.78 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -1399,6 +1399,118 @@ def fund_backup_list():
         pass
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
+
+
+# 备份差异预览用到的表(顺序 = 展示顺序)
+_DIFF_TABLES = (
+    ("records", "资金曲线"),
+    ("trade_records", "交易记录"),
+    ("trade_pool_snapshots", "监控池"),
+    ("trade_reviews", "复盘笔记"),
+)
+
+
+def _table_counts(conn):
+    """各表条数; 表不存在(老备份) → None"""
+    out = {}
+    for t, _label in _DIFF_TABLES:
+        try:
+            out[t] = conn.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
+        except Exception:  # noqa: BLE001
+            out[t] = None
+    return out
+
+
+def _ym(v):
+    """202610 → '2026-10'"""
+    try:
+        n = int(v)
+        return "%04d-%02d" % (n // 100, n % 100) if n else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def _db_span(conn):
+    """数据的时间跨度(用于让人一眼看出这份备份是哪一段的)"""
+    r = {}
+    try:
+        row = conn.execute("SELECT MIN(year*100+month), MAX(year*100+month) FROM records").fetchone()
+        r["records_from"], r["records_to"] = _ym(row[0]), _ym(row[1])
+    except Exception:  # noqa: BLE001
+        r["records_from"] = r["records_to"] = ""
+    try:
+        row = conn.execute(
+            "SELECT MIN(NULLIF(open_date,'')), MAX(NULLIF(open_date,'')) FROM trade_records").fetchone()
+        r["trades_from"], r["trades_to"] = (row[0] or ""), (row[1] or "")
+    except Exception:  # noqa: BLE001
+        r["trades_from"] = r["trades_to"] = ""
+    return r
+
+
+def fund_backup_diff(name):
+    """对比一份 .db 备份与**当前库**的差异(恢复前预览, v50.78)。
+
+    返回 {name, mtime, tables:[{key,label,backup,current,delta}], span, current_span, lines}
+    · delta = 备份 − 当前(负数=这份备份比现在少, 恢复后会"退回"掉这些记录)
+    · lines 是可直接显示给人看的几行说明
+    ⚠ 只读打开备份(绝不写); 缺表的老备份 counts 为 None, 不报错
+    """
+    safe = os.path.basename((name or "").strip())
+    if not safe or not safe.startswith("funds_") or not safe.endswith(".db"):
+        raise ValueError("备份文件名不合法")
+    src = os.path.join(fund_backup_dir(), safe)
+    if not os.path.isfile(src):
+        raise ValueError("备份不存在：%s" % safe)
+    bk = cur = None
+    try:
+        bk = sqlite3.connect("file:%s?mode=ro" % src.replace("?", "%3f"), uri=True)
+        bk_counts = _table_counts(bk)
+        bk_span = _db_span(bk)
+    finally:
+        if bk is not None:
+            try:
+                bk.close()
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        cur = sqlite3.connect("file:%s?mode=ro" % FUND_DB_PATH.replace("?", "%3f"), uri=True)
+        cur_counts = _table_counts(cur)
+        cur_span = _db_span(cur)
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    tables = []
+    lines = []
+    for t, label in _DIFF_TABLES:
+        b, c = bk_counts.get(t), cur_counts.get(t)
+        if b is None and c is None:
+            continue
+        delta = None if (b is None or c is None) else (b - c)
+        tables.append({"key": t, "label": label, "backup": b, "current": c, "delta": delta})
+        if delta is None:
+            lines.append("%s：备份 %s 条 / 现在 %s 条（这份备份缺这张表）"
+                         % (label, "?" if b is None else b, "?" if c is None else c))
+        else:
+            arrow = "不变" if delta == 0 else ("多 %+d 条" % delta if delta > 0 else "少 %d 条" % delta)
+            lines.append("%s：备份 %d 条 / 现在 %d 条（%s）" % (label, b, c, arrow))
+    if bk_span.get("records_from") or bk_span.get("records_to"):
+        lines.append("备份里的资金曲线跨度：%s ~ %s" % (bk_span.get("records_from") or "—",
+                                                      bk_span.get("records_to") or "—"))
+    if bk_span.get("trades_from") or bk_span.get("trades_to"):
+        lines.append("备份里的交易开仓日跨度：%s ~ %s" % (bk_span.get("trades_from") or "—",
+                                                      bk_span.get("trades_to") or "—"))
+    return {
+        "name": safe,
+        "mtime": os.path.getmtime(src),
+        "tables": tables,
+        "span": bk_span,
+        "current_span": cur_span,
+        "lines": lines,
+    }
 
 
 def fund_restore_backup(name):
@@ -3086,29 +3198,39 @@ def _dual_targets(underlying, mode, holdings, opens):
     }
 
 
-def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", batch="",
-                 fee_mode=FEE_MODE_DEFAULT):
-    """单个标的详情: 上方持仓汇总(按 contract 分组, 仅算未平仓部分加权均价), 下方操作记录(按日期升序).
-    batch: 批次号(v50.47), 只取该批次的操作记录; 空串=默认批次
-    fee_mode: v50.70 'off' 不算手续费 / 'ex' 交易所标准+0.01 → 每条操作带 fee, 整批带合计与净盈亏"""
-    db = _fund_db()
-    rows = db.execute(
-        "SELECT * FROM trade_records WHERE strategy=? AND underlying=? "
-        "AND IFNULL(mode,'options')=? AND IFNULL(batch,'')=? ORDER BY id ASC",
-        (strategy, underlying, mode, batch or ""),
-    ).fetchall()
-    items = [_trade_record_to_dict(r) for r in rows]
+def _holdings_from_items(underlying, items, with_risk=False):
+    """按合约 FIFO 算「未平仓持仓」: 每个合约一条(剩余手数 / 未平仓部分加权均价 / 剩余权利金)。
+
+    ⚠ 详情页(trade_detail) 与「未平仓风险汇总」(open_risk_summary) **共用这一份 FIFO** ——
+      两边各写一份迟早会漂移(一边改了扣减顺序、另一边没改, 持仓数就对不上)。
+    with_risk=True 时额外给出每仓的风险字段:
+      mult(乘数) / mr(保证金率, 取自 calc_json 或默认 16%) / risk_left(有初始止损那部分的最大亏损)
+      / no_stop_lots(没设初始止损的手数)
+    """
     opens = [x for x in items if x["op_type"] == "open"]
     closes = [x for x in items if x["op_type"] == "close"]
 
-    # 按合约分组: 每个 open 维护自己的剩余手数, close 按时间 FIFO 逐单扣减(不按比例摊薄, 确保均价只算未平仓部分)
     def _k(c): return (c or "").strip().upper()
-    groups = {}  # k -> {orig_contract, call_put, direction, opens:[{qty_left, price_each, premium_each}], left, cost_left, premium_left, last_open_date}
+
+    def _calc_mr(x):
+        """保证金率: 优先用当年测算时记在 calc_json 里的那个值, 取不到就用默认"""
+        try:
+            cj = x.get("calc_json")
+            if cj:
+                v = json.loads(cj).get("margin_rate")
+                if v:
+                    return float(v)
+        except Exception:  # noqa: BLE001
+            pass
+        return DEFAULT_MARGIN_RATE
+
+    groups = {}  # k -> {orig_contract, call_put, direction, opens:[...], left, cost_left, premium_left, last_open_date}
     for x in opens:
         k = _k(x["contract"])
         g = groups.setdefault(k, {
             "orig_contract": x["contract"], "call_put": x["call_put"], "direction": x["direction"],
             "opens": [], "left": 0, "cost_left": 0.0, "premium_left": 0.0, "last_open_date": "",
+            "mult": 1.0, "mr": None, "risk_left": 0.0, "no_stop_lots": 0,
         })
         qty = x["qty"] or 0
         if qty <= 0:
@@ -3118,12 +3240,18 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             "qty_left": qty,
             "price_each": (x["open_price"] or 0),
             "premium_each": (x["premium"] or 0) / qty if qty else 0,
+            "stop_each": x.get("init_stop"),
         })
         g["left"] += qty
         g["cost_left"] += (x["open_price"] or 0) * qty
         g["premium_left"] += x["premium"] or 0
         if (x["open_date"] or "") > g["last_open_date"]:
             g["last_open_date"] = x["open_date"] or g["last_open_date"]
+        if with_risk:
+            _c = get_contract(fee_product(x.get("underlying"), x.get("contract")))
+            if _c:
+                g["mult"] = (_c["opt_mult"] if x.get("mode") in ("options", "dual") else _c["mult"]) or 1
+            g["mr"] = _calc_mr(x)
 
     # close 按时间 FIFO(按 close_date 升序逐单扣减, 同一合约内按 open_date 升序的 opens 顺序扣)
     closes_sorted = sorted(closes, key=lambda x: x.get("close_date") or "")
@@ -3151,7 +3279,7 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
         if g["left"] <= 0:
             continue
         avg = round(g["cost_left"] / g["left"], 4) if g["left"] > 0 else 0
-        holdings.append({
+        h = {
             "underlying": underlying,    # v50.45: 持仓表要显示中文标的, 前端拿不到就退回 d.underlying
             "contract": g["orig_contract"],
             "call_put": g["call_put"],
@@ -3160,7 +3288,141 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             "qty": g["left"],
             "premium": round(g["premium_left"], 2),
             "last_open_date": g["last_open_date"],
+        }
+        if with_risk:
+            # 逐手累加「有止损那部分」的风险; 没设止损的手数单列(不能当成 0 风险)
+            risk = 0.0
+            no_stop = 0
+            for o in g["opens"]:
+                if o["qty_left"] <= 0:
+                    continue
+                st = o.get("stop_each")
+                if st is None or float(st) <= 0:
+                    no_stop += o["qty_left"]
+                else:
+                    risk += abs(o["price_each"] - float(st)) * g["mult"] * o["qty_left"]
+            h.update({
+                "mult": g["mult"],
+                "mr": g["mr"] if g["mr"] else DEFAULT_MARGIN_RATE,
+                "risk_left": round(risk, 2),
+                "no_stop_lots": no_stop,
+            })
+        holdings.append(h)
+    return holdings
+
+
+def open_risk_summary(strategy=None, mode="options"):
+    """未平仓头寸风险汇总(v50.78): 一把看清「现在压着多少钱、最坏亏多少」。
+
+    · positions  未平仓记录数(按 标的+批次 算一笔)
+    · lots       剩余手数合计
+    · occupied   占用资金: 期权买方/双买 = 剩余权利金; 期货 = 保证金(开仓均价 × 乘数 × 手数 × 保证金率)
+    · max_loss   理论最大亏损: 期权买方/双买 = 剩余权利金(买方最多亏光权利金);
+                 期货 = Σ|开仓均价 − 初始止损| × 乘数 × 手数
+    · max_loss_is_partial  期货里有没设止损的手数 → 上面的 max_loss 只是**下限**
+    · no_stop_lots  没设初始止损的手数
+    明细按 标的+批次 给出, 按占用资金从大到小排。
+    """
+    recs = trade_list_records(strategy, mode)
+    if not recs:
+        return {"mode": mode, "positions": 0, "lots": 0, "occupied": 0.0, "max_loss": 0.0,
+                "max_loss_is_partial": False, "no_stop_lots": 0,
+                "margin_rate": DEFAULT_MARGIN_RATE, "items": []}
+    is_opt = mode in ("options", "dual")
+    by_u = {}
+    for r in recs:
+        by_u.setdefault((r["underlying"], r.get("batch") or ""), []).append(r)
+
+    total = {"positions": 0, "lots": 0, "occupied": 0.0, "max_loss": 0.0, "no_stop_lots": 0}
+    items = []
+    for (u, batch), sub in by_u.items():
+        hs = _holdings_from_items(u, sub, with_risk=True)
+        if not hs:
+            continue
+        occ = loss = 0.0
+        lots = 0
+        nos = 0
+        for h in hs:
+            lots += h["qty"]
+            if is_opt:
+                # 买方: 占用 = 剩余权利金 = 最大亏损
+                occ += h["premium"]
+                loss += h["premium"]
+            else:
+                occ += h["open_price"] * h["mult"] * h["qty"] * h["mr"]
+                loss += h["risk_left"]
+                nos += h["no_stop_lots"]
+        total["positions"] += 1
+        total["lots"] += lots
+        total["occupied"] += occ
+        total["max_loss"] += loss
+        total["no_stop_lots"] += nos
+        items.append({
+            "underlying": u, "batch": batch,
+            "contracts": [h["contract"] for h in hs],
+            "lots": lots,
+            "occupied": round(occ, 2),
+            "max_loss": round(loss, 2),
         })
+    items.sort(key=lambda x: x["occupied"], reverse=True)
+    return {
+        "mode": mode,
+        "positions": total["positions"],
+        "lots": total["lots"],
+        "occupied": round(total["occupied"], 2),
+        "max_loss": round(total["max_loss"], 2),
+        # 期货里有没设止损的手数 → max_loss 只是下限, 前端要标明
+        "max_loss_is_partial": (not is_opt) and total["no_stop_lots"] > 0,
+        "no_stop_lots": total["no_stop_lots"],
+        "margin_rate": DEFAULT_MARGIN_RATE,
+        "items": items,
+    }
+
+
+def fee_estimate(underlying, contract="", mode="futures", price=0, qty=0):
+    """平仓弹窗用: 算「平今 / 平昨」两档手续费(v50.78)。
+
+    ⚠ 品种解析与费率挑选全部交给 fee_product + row_fee —— 不把逻辑重写一遍,
+      否则弹窗提示与详情页/主表的手续费迟早对不上。
+    ⚠ underlying 和 contract 都要传: 记录里的「标的」可能是 `CF2701空` 这种写法,
+      只传其中一个会解析不出品种(费率表查不到 → 误显示"未收录")。
+    """
+    is_opt = str(mode).lower() in ("options", "dual")
+    base = {"mode": mode, "underlying": underlying, "contract": contract, "op_type": "close",
+            "close_price": price, "close_qty": qty}
+    fee_today = row_fee(dict(base, close_today="1"), mode, FEE_MODE_EX)
+    fee_prev = row_fee(dict(base, close_today="0"), mode, FEE_MODE_EX)
+    known = fee_known(base, mode)
+    prod = fee_product(underlying, contract)
+    mult = 1.0
+    c = get_contract(prod)
+    if c:
+        mult = (c["opt_mult"] if is_opt else c["mult"]) or 1
+    return {
+        "code": prod, "is_option": is_opt, "known": known, "mult": mult,
+        "fee_today": round(fee_today, 2), "fee_prev": round(fee_prev, 2),
+        # 两档相同(该品种没单列平今, 或费率本来就一样) → 前端不用强调"两档"
+        "same": abs(fee_today - fee_prev) < 1e-9,
+    }
+
+
+def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", batch="",
+                 fee_mode=FEE_MODE_DEFAULT):
+    """单个标的详情: 上方持仓汇总(按 contract 分组, 仅算未平仓部分加权均价), 下方操作记录(按日期升序).
+    batch: 批次号(v50.47), 只取该批次的操作记录; 空串=默认批次
+    fee_mode: v50.70 'off' 不算手续费 / 'ex' 交易所标准+0.01 → 每条操作带 fee, 整批带合计与净盈亏"""
+    db = _fund_db()
+    rows = db.execute(
+        "SELECT * FROM trade_records WHERE strategy=? AND underlying=? "
+        "AND IFNULL(mode,'options')=? AND IFNULL(batch,'')=? ORDER BY id ASC",
+        (strategy, underlying, mode, batch or ""),
+    ).fetchall()
+    items = [_trade_record_to_dict(r) for r in rows]
+    opens = [x for x in items if x["op_type"] == "open"]
+    closes = [x for x in items if x["op_type"] == "close"]
+
+    # 持仓汇总: 与「未平仓风险汇总」共用同一份 FIFO(见 _holdings_from_items)
+    holdings = _holdings_from_items(underlying, items)
 
     # 操作记录: 按日期升序(open_date 或 close_date)
     def _op_dt(x):
@@ -3662,6 +3924,29 @@ class Handler(BaseHTTPRequestHandler):
             mode = _mode_arg(qs.get("mode"))
             self._send(200, _json({"ok": True, "snapshots": trade_pool_list(TRADE_STRATEGY_DEFAULT, mode)}))
 
+        elif path == "/api/trades/open-risk":
+            # v50.78: 未平仓头寸风险汇总(三个模式各看各的)
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            mode = _mode_arg(qs.get("mode"))
+            strategy = (qs.get("strategy") or [None])[0]
+            self._send(200, _json({"ok": True, **open_risk_summary(strategy, mode)}))
+
+        elif path == "/api/fees/estimate":
+            # v50.78: 平仓弹窗要显示「平今 / 平昨」两档金额 —— 复用 row_fee, 不另写一套算术
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            underlying = (qs.get("underlying") or [""])[0]
+            contract = (qs.get("contract") or [""])[0]
+            mode = _mode_arg(qs.get("mode"))
+            try:
+                price = float((qs.get("price") or ["0"])[0] or 0)
+                qty = float((qs.get("qty") or ["0"])[0] or 0)
+            except ValueError:
+                price, qty = 0.0, 0.0
+            if not (underlying or contract):
+                self._send(200, _json({"ok": False, "error": "缺少 underlying / contract"}))
+            else:
+                self._send(200, _json({"ok": True, **fee_estimate(underlying, contract, mode, price, qty)}))
+
         elif path == "/api/trades/reviews":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             mode = _mode_arg(qs.get("mode"))
@@ -3675,6 +3960,14 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/api/funds/backups":
             self._send(200, _json({"ok": True, "backups": fund_backup_list()}))
+
+        elif path == "/api/funds/backup-diff":
+            # v50.78: 恢复前先看差异(这份备份比现在多/少哪些记录)
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                self._send(200, _json({"ok": True, **fund_backup_diff((qs.get("name") or [""])[0])}))
+            except ValueError as e:
+                self._send(200, _json({"ok": False, "error": str(e)}))
 
         elif path == "/api/fs/list":
             # 内置文件夹浏览器: 列子目录 + 盘符(替代原来会静默失败的 Windows 原生对话框)
@@ -4552,6 +4845,18 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .seg.pick > .pick-opt:hover{background:var(--panel2);color:var(--text)}
 .seg.pick > .pick-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .seg.pick > .pick-opt.active:hover{color:#fff}
+/* v50.78: 平仓弹窗里的「平今 / 平昨」两档金额 —— 当前选中的那一档高亮, 一眼看出差多少 */
+#tmFeeHint b{font-weight:600;color:var(--sub)}
+#tmFeeHint b.on{color:var(--accent2);text-decoration:underline}
+/* v50.78: 未平仓头寸风险汇总(交易记录页, 统计卡下方) */
+.riskbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 10px;padding:9px 12px;
+  border:1px solid var(--line);border-radius:10px;background:var(--panel2);font-size:var(--fz-btn)}
+.riskbar .rb-k{color:var(--sub);white-space:nowrap}
+.riskbar .rb-v{font-weight:700;color:var(--text);white-space:nowrap}
+.riskbar .rb-v.warn{color:var(--warn)}
+.riskbar .rb-item{display:flex;align-items:baseline;gap:5px;white-space:nowrap}
+.riskbar .rb-spacer{flex:1}
+.riskbar .rb-tip{color:var(--sub);opacity:.85;white-space:nowrap;font-size:var(--fz-micro)}
 /* 交易记录页 - 主表保持原宽(拉宽窗口位置不变), 分页面 fixed 浮在右侧(不挤压主表) */
 .trades-layout{display:block;position:relative}
 /* 期货/期权模式切换: 带 .opt-only 的元素只在期权模式显示(v50.39) */
@@ -5419,6 +5724,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       </div>
       <!-- 交易统计卡片(v50.53): 全部按主表「记录」统计(一条记录=一笔), 不看分表逐笔操作 -->
       <div class="stat-cards" id="tradeStats"></div>
+      <!-- v50.78: 未平仓头寸风险汇总(占用资金 / 理论最大亏损)。不受统计区间与搜索影响 -->
+      <div class="riskbar hidden" id="openRisk"></div>
       <div class="trades-layout" data-tm="options">
         <div class="trades-main">
           <div class="card results">
@@ -5666,6 +5973,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <button type="button" class="pick-opt" data-ct="0" aria-pressed="false">平昨</button>
           </span>
           <span id="tmCloseTodayHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
+          <!-- v50.78: 直接把两档金额摆出来 —— 选之前就知道差多少钱(费率在后端算, 见 /api/fees/estimate) -->
+          <span id="tmFeeHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
 
         <label class="opt-only">看涨/看跌
@@ -7442,7 +7751,7 @@ const TradeUI = {
         this.syncModalPremium();
       }
       if (id === 'tmClosePrice' || id === 'tmCloseQty' || id === 'tmContract' || id === 'tmUnderlying'){
-        if (this._closeModal) this.syncModalPnl(true);
+        if (this._closeModal) { this.syncModalPnl(true); this.syncModalFee(); }
       }
     }));
     // v50.74: 平今/平昨 分段控件(按钮走 click, 不在上面的 input/change 委托里)
@@ -7454,6 +7763,7 @@ const TradeUI = {
       this._closeToday = v;
       this.syncCloseTodaySeg();
       this.syncCloseTodayHint(null);
+      this._paintModalFee();      // v50.78: 只换高亮, 不用重新请求
     });
     // 回车保存: 在 tradeModalBg 内任意 input/select 按 Enter 直接保存(shift+enter/textarea 不触发)
     $('tradeModalBg').addEventListener('keydown', e => {
@@ -7476,14 +7786,18 @@ const TradeUI = {
 
   async refresh(){
     try {
-      const [gr, pl] = await Promise.all([
+      const [gr, pl, rk] = await Promise.all([
         fetchT('/api/trades/groups?' + this.modeQ()).then(r => r.json()),
         fetchT('/api/trades/pool?' + this.modeQ()).then(r => r.json()),
+        // v50.78: 未平仓风险汇总(与手续费口径、统计区间都无关)
+        fetchT('/api/trades/open-risk?' + this.modeQ()).then(r => r.json()),
       ]);
       this.groups = gr.ok ? gr.groups : [];
       this.pool = pl.ok ? pl.snapshots : [];
-    } catch (e) { console.error('TradeUI refresh', e); this.groups = []; this.pool = []; }
+      this.risk = rk.ok ? rk : null;
+    } catch (e) { console.error('TradeUI refresh', e); this.groups = []; this.pool = []; this.risk = null; }
     this.renderMain();
+    this.renderRisk();
     this.renderPool();
     if (this.detail) {
       const u = this.detail.underlying;
@@ -7727,6 +8041,41 @@ const TradeUI = {
       + card(5, '平均盈亏', s.avg == null ? '—' : money(s.avg),
            s.closedN ? ('最大盈 ' + num(s.maxWin) + ' / 亏 ' + num(Math.abs(s.maxLoss))) : '—',
            cls(s.avg));
+  },
+
+  /* v50.78: 未平仓头寸风险汇总 —— 一把看清「现在压着多少钱、最坏亏多少」
+     口径(与后端 open_risk_summary 一致):
+       · 期权买方/双买: 占用 = 剩余权利金; 最大亏损 = 剩余权利金(买方最多亏光权利金)
+       · 期货: 占用 = 保证金(开仓均价 × 乘数 × 手数 × 保证金率); 最大亏损 = Σ|开仓均价 − 初始止损| × 乘数 × 手数
+     ⚠ 不受统计区间 / 搜索 /「只展示未平仓」影响 —— 它讲的是"当前真实持仓" */
+  renderRisk(){
+    const box = $('openRisk');
+    if (!box) return;
+    const r = this.risk;
+    if (!r || !r.positions){ box.classList.add('hidden'); box.innerHTML = ''; box.title = ''; return; }
+    const isOpt = this.mode === 'options' || this.mode === 'dual';
+    const money = v => 'CN¥' + Number(v || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
+    const occLabel = isOpt ? '占用权利金' : '占用保证金';
+    const lossLabel = isOpt ? '最大亏损' : '理论最大亏损';
+    const item = (k, v, cls) => '<span class="rb-item"><span class="rb-k">' + k + '</span>'
+      + '<span class="rb-v ' + (cls || '') + '">' + v + '</span></span>';
+    box.innerHTML =
+      item('未平仓', r.positions + ' 笔 · ' + r.lots + ' 手')
+      + item(occLabel, money(r.occupied))
+      + item(lossLabel, money(r.max_loss), 'warn')
+      + (r.max_loss_is_partial
+          ? '<span class="rb-tip">还有 ' + r.no_stop_lots + ' 手没设初始止损，实际可能更大</span>' : '')
+      + '<span class="rb-spacer"></span>'
+      + '<span class="rb-tip">' + (isOpt
+          ? '买方最大亏损 = 已付权利金'
+          : '保证金按 ' + Math.round((r.margin_rate || 0.16) * 100) + '% 估 · 止损按初始止损价')
+      + '（点这行看逐笔明细）</span>';
+    // 悬停看逐笔明细(按占用资金从大到小)
+    box.title = (r.items || []).slice(0, 12).map(x =>
+      x.underlying + ' ' + (x.contracts || []).join('/')
+      + ' · ' + x.lots + ' 手 · 占用 ' + money(x.occupied) + ' · 最大亏损 ' + money(x.max_loss)).join('\n')
+      + ((r.items || []).length > 12 ? '\n…' : '');
+    box.classList.remove('hidden');
   },
 
   renderMain(){
@@ -8559,6 +8908,9 @@ const TradeUI = {
     if ($('tmCloseTodayWrap')) $('tmCloseTodayWrap').style.display = isOpen ? 'none' : '';
     this.syncCloseTodaySeg();
     this.syncCloseTodayHint(preset);
+    this._feeLast = null;              // v50.78: 换弹窗就丢掉上一次的两档金额
+    if ($('tmFeeHint')) $('tmFeeHint').innerHTML = '';
+    if (!isOpen) this.syncModalFee();
     bg.classList.remove('hidden');
     bg.dataset.editing = preset.id || '';
   },
@@ -8693,6 +9045,74 @@ const TradeUI = {
     el.textContent = auto
       ? ('自动判定：' + auto + '（按开仓 ↔ 平仓的交易日，夜盘 21:00 后算下一交易日）')
       : '自动：按开仓 ↔ 平仓的交易日推；判不准/想强制时选平今或平昨';
+  },
+
+  /* v50.78: 平仓弹窗直接显示「平今 / 平昨」两档手续费**金额**
+     费率挑选逻辑一律走后端 /api/fees/estimate(内部复用 row_fee) ——
+     前端不重算, 否则弹窗提示与详情页/主表的手续费迟早对不上。 */
+  syncModalFee(){
+    const el = $('tmFeeHint');
+    if (!el) return;
+    if (!this._closeModal){ el.innerHTML = ''; return; }
+    const src = this._feeCode();
+    if (!src.underlying && !src.contract){ el.innerHTML = ''; return; }
+    const price = parseFloat(($('tmClosePrice') || {}).value) || 0;
+    const qty = parseFloat(($('tmCloseQty') || {}).value) || 0;
+    if (!(qty > 0)){
+      el.innerHTML = '<span style="opacity:.8">填了平仓数量就能算出平今 / 平昨各多少钱</span>';
+      return;
+    }
+    // 打字时别每按一键就发一次请求
+    clearTimeout(this._feeTimer);
+    this._feeTimer = setTimeout(() => this._fetchModalFee(src.underlying, src.contract, price, qty), 150);
+  },
+  /* 弹窗里的「标的 / 合约」原样取出 —— 两个都传给后端, 由 fee_product 解析品种
+     ⚠ 只传其中一个会解析失败(记录里的标的可能写成 CF2701空 这类) → 会误报"费率表未收录" */
+  _feeCode(){
+    const uEl = $('tmUnderlying');
+    const cEl = $('tmContract');
+    const underlying = uEl ? String(uEl.value || '').trim() : '';
+    const contract = cEl ? String(cEl.value || '').trim() : '';
+    return { underlying, contract };
+  },
+  async _fetchModalFee(underlying, contract, price, qty){
+    const el = $('tmFeeHint');
+    if (!el) return;
+    this._feeReqSeq = (this._feeReqSeq || 0) + 1;
+    const seq = this._feeReqSeq;
+    try {
+      const d = await (await fetchT('/api/fees/estimate'
+        + '?underlying=' + encodeURIComponent(underlying)
+        + '&contract=' + encodeURIComponent(contract)
+        + '&mode=' + encodeURIComponent(this.mode)
+        + '&price=' + price + '&qty=' + qty)).json();
+      if (seq !== this._feeReqSeq) return;      // 已有更新的请求, 丢弃这次结果
+      this._feeLast = d && d.ok ? d : null;
+      this._paintModalFee();
+    } catch (e) { /* 算不出就不显示, 不打扰 */ }
+  },
+  /* 用缓存的费率结果重画提示(切换平今/平昨档位时只需换高亮, 不用再请求一次) */
+  _paintModalFee(){
+    const el = $('tmFeeHint');
+    if (!el) return;
+    const d = this._feeLast;
+    if (!d){ el.innerHTML = ''; return; }
+    if (!d.known){
+      el.innerHTML = '<span style="opacity:.8">费率表未收录该品种，手续费按 ¥0 计</span>';
+      return;
+    }
+    const m = v => Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const cur = this._closeToday || '';
+    if (d.same){
+      el.innerHTML = '手续费：<b class="on">¥' + m(d.fee_today) + '</b>'
+        + ' <span style="opacity:.8">（该品种平今与平昨同价）</span>';
+      return;
+    }
+    const tag = (label, val, key) => '<b class="' + (cur === key ? 'on' : '') + '">'
+      + label + ' ¥' + m(val) + '</b>';
+    el.innerHTML = '手续费：' + tag('平今', d.fee_today, '1')
+      + ' <span style="opacity:.6">/</span> ' + tag('平昨', d.fee_prev, '0')
+      + (cur === '' ? ' <span style="opacity:.8">（当前：自动）</span>' : '');
   },
 
   /* 从标的(品种代码)或手填合约里解析品种, 用来取最小变动价位 */
@@ -9271,6 +9691,13 @@ const FundUI = {
     if (info && info.reason) lines.push('最后变更：' + info.reason + (info.detail ? '（' + info.detail + '）' : ''));
     else lines.push('最后变更：无说明（旧备份）');
     if (info && info.records != null) lines.push('内含：资金 ' + info.records + ' 条 · 交易 ' + (info.trades==null?'?':info.trades) + ' 条');
+    // v50.78: 恢复前先列出「这份备份与现在的差异」——少了几条/多了几条, 恢复前就看清
+    //   ⚠ 差异取不到(备份损坏/权限)不能挡住恢复, 静默跳过这一段
+    try {
+      const d = await (await fetchT('/api/funds/backup-diff?name=' + encodeURIComponent(name))).json();
+      if (d.ok && d.lines && d.lines.length) lines = lines.concat(['', '与现在的差异：'], d.lines);
+      else if (d.ok === false && d.error) lines.push('', '（差异读取失败：' + d.error + '）');
+    } catch (e) { /* 不阻断 */ }
     lines.push('', '当前的数据会先自动备份一份，所以还能再退回来。', '', '确定恢复吗？');
     if (!confirm(lines.join('\n'))) return;
     try {

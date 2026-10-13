@@ -909,18 +909,25 @@ async function main() {
   check('备份列表带版本号标记', /^v\d/.test(bkC.ver), bkChg);
   check('界面真的画出变更说明(.bk-chg)', bkC.domHasChg && bkC.domText.length > 0, bkChg);
   // 恢复确认框必须把「最后变更」念出来, 否则用户还是不知道要退到哪
-  const bkConfirm = await evalJs(ws, `JSON.stringify((() => {
+  // ⚠ v50.78: restoreBackup 会先异步取「与现在的差异」再弹 confirm → 这里必须 await,
+  //   否则 confirm 还没被调用就去读 msg 了(会读到空串)
+  const bkConfirm = await evalJs(ws, `(async () => {
     const msg = [];
     const old = window.confirm; window.confirm = (t) => { msg.push(t); return false; };
-    FundUI.restoreBackup('funds_不存在_测试.db', {reason:'交易记录-保存', detail:'期权买方 · bktest2610C5000 · 开仓买 3 手', mtime: Math.floor(Date.now()/1000), records:1, trades:3});
-    window.confirm = old;
-    return {txt: msg.join('|')};
-  })())`);
+    try {
+      await FundUI.restoreBackup('funds_不存在_测试.db', {reason:'交易记录-保存', detail:'期权买方 · bktest2610C5000 · 开仓买 3 手', mtime: Math.floor(Date.now()/1000), records:1, trades:3});
+      await new Promise(r => setTimeout(r, 200));
+    } finally { window.confirm = old; }
+    return JSON.stringify({txt: msg.join('|')});
+  })()`);
   await sleep(300);
   const bkCf = JSON.parse(bkConfirm);
   check('恢复确认框显示备份时间', /备份时间/.test(bkCf.txt), bkConfirm);
   check('恢复确认框显示「最后变更」与手数', /最后变更：交易记录-保存/.test(bkCf.txt) && /3 手/.test(bkCf.txt), bkConfirm);
   check('恢复确认框显示备份内含条数', /内含：资金 1 条/.test(bkCf.txt), bkConfirm);
+  // v50.78: 备份不存在时差异读取失败也不能挡住恢复(确认框照旧弹出, 只是多一行说明)
+  check('恢复确认框(v50.78): 差异取不到也不阻断(备份不存在仍能弹确认框)',
+        /将用这份备份【覆盖当前数据】/.test(bkCf.txt) && /确定恢复吗/.test(bkCf.txt), bkConfirm);
   // 清掉这条测试记录
   await evalJs(ws, `(async () => { await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:${bkC.id}})}); })()`);
   await sleep(300);
@@ -3952,6 +3959,101 @@ async function main() {
   check('文案(v50.77): 清除按钮明说只清「资金曲线」',
         /资金曲线/.test(v77.clearBtn) && !/清除全部/.test(v77.clearBtn)
         && /交易记录/.test(v77.clearTip), v77.clearBtn + ' | ' + v77.clearTip);
+
+  // ===== v50.78: 三档优化(平仓两档手续费 / 未平仓风险汇总 / 恢复前差异预览) =====
+  const v78Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const out = {};
+    // ---- ① 平仓弹窗直接显示两档手续费金额(棉花平今 0 / 平昨 4.3) ----
+    // ⚠ 标的要用**真实品种**(CF) —— 弹窗是拿 标的/合约 去解析品种查费率表的,
+    //   拿 e2e 自己的假名(如 e2efee78)会解析不出来, 会误显示"费率表未收录"
+    const o = await post({mode:'futures', underlying:'CF', contract:'CF2701', batch:'Bfee78',
+      op_type:'open', direction:'buy', open_date:'2026-09-01', open_time:'10:00',
+      open_price:15000, qty:5, premium:0});
+    // 顺带造一笔期权未平仓, 用来看期权口径的「占用权利金」
+    const oo = await post({mode:'options', underlying:'sm', contract:'sm2701C6000', batch:'Bopt78',
+      op_type:'open', direction:'buy', open_date:'2026-09-01', open_price:50, qty:4, premium:2000});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(900);
+    await TradeUI.loadDetail('CF', 'Bfee78'); await w(700);
+    // 走真实入口: 详情页的「新建平仓」
+    const nb = [...document.querySelectorAll('#tradesArea button')]
+      .find(b => /新建平仓/.test(b.textContent));
+    if (nb) { nb.click(); await w(500); }
+    const setV = (id, v) => { const el = document.getElementById(id);
+      el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); };
+    setV('tmClosePrice', '15100');
+    setV('tmCloseQty', '2');
+    await w(900);          // 等 debounce(150ms) + 请求
+    const hintEl = document.getElementById('tmFeeHint');
+    out.feeHint = hintEl ? hintEl.textContent : '';
+    out.feeHtml = hintEl ? hintEl.innerHTML : '';
+    out.feeShown = !!hintEl && !/hidden/.test(hintEl.parentElement.className);
+    // 点「平今」→ 高亮应该挪到平今那一档(只换高亮, 不重新请求)
+    const seg = document.querySelector('#tmCloseToday .pick-opt[data-ct="1"]');
+    if (seg) { seg.click(); await w(400); }
+    out.feeHtmlAfterPick = hintEl ? hintEl.innerHTML : '';
+    out.pickedCt = TradeUI._closeToday;
+    document.getElementById('tmCancel').click(); await w(400);
+    // ---- ② 未平仓风险汇总(期货: 占用保证金 / 理论最大亏损) ----
+    const rk = await (await fetch('/api/trades/open-risk?mode=futures')).json();
+    out.risk = { positions: rk.positions, lots: rk.lots, occupied: rk.occupied, maxLoss: rk.max_loss,
+                 partial: rk.max_loss_is_partial, noStop: rk.no_stop_lots };
+    const rb = document.getElementById('openRisk');
+    out.riskBar = { shown: rb && !rb.classList.contains('hidden'),
+                    text: rb ? rb.textContent : '', title: rb ? rb.title : '' };
+    // 期权买方模式换个口径(占用权利金)
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(1100);
+    const rbO = document.getElementById('openRisk');
+    const rkO = await (await fetch('/api/trades/open-risk?mode=options')).json();
+    out.riskBarOpt = { text: rbO ? rbO.textContent : '', positions: rkO.positions,
+                       occupied: rkO.occupied, maxLoss: rkO.max_loss };
+    // ---- ③ 恢复备份前的差异预览接口 ----
+    await fetch('/api/funds/backup', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    await w(300);
+    const bl = await (await fetch('/api/funds/backups')).json();
+    const nm = (bl.backups || [])[0] ? bl.backups[0].name : '';
+    const dd = await (await fetch('/api/funds/backup-diff?name=' + encodeURIComponent(nm))).json();
+    out.diff = { ok: dd.ok, nTables: (dd.tables || []).length,
+                 hasTrade: (dd.tables || []).some(t => t.key === 'trade_records' && t.delta === 0),
+                 lines: (dd.lines || []).join(' | ') };
+    const bad = await (await fetch('/api/funds/backup-diff?name=' + encodeURIComponent('abc.db'))).json();
+    out.diffBad = { ok: bad.ok, error: bad.error || '' };
+    await del(o.id); await del(oo.id);
+    return JSON.stringify(out);
+  })()`);
+  const v78 = JSON.parse(v78Run);
+  check('平仓两档手续费(v50.78): 弹窗提示里同时给出平今与平昨金额',
+        /平今\s*¥0\.02/.test(v78.feeHint.replace(/\s+/g, ' ')) && /平昨\s*¥8\.62/.test(v78.feeHint.replace(/\s+/g, ' ')),
+        v78.feeHint);
+  check('平仓两档手续费(v50.78): 自动档时提示「当前：自动」',
+        /当前：自动/.test(v78.feeHint), v78.feeHint);
+  check('平仓两档手续费(v50.78): 点「平今」后高亮挪到平今那一档',
+        v78.pickedCt === '1' && /class="on">平今/.test(v78.feeHtmlAfterPick)
+        && !/class="on">平昨/.test(v78.feeHtmlAfterPick), v78.feeHtmlAfterPick);
+  check('风险汇总(v50.78): 接口给出未平仓笔数/手数/占用/最大亏损',
+        v78.risk.positions >= 1 && v78.risk.lots >= 5 && v78.risk.occupied > 0,
+        JSON.stringify(v78.risk));
+  check('风险汇总(v50.78): 期货口径写「占用保证金」+「理论最大亏损」+「没设止损」提醒',
+        v78.riskBar.shown && /未平仓/.test(v78.riskBar.text) && /占用保证金/.test(v78.riskBar.text)
+        && /理论最大亏损/.test(v78.riskBar.text) && /没设初始止损/.test(v78.riskBar.text),
+        v78.riskBar.text);
+  check('风险汇总(v50.78): 悬停可看逐笔明细(标的/合约/占用/最大亏损)',
+        /占用 CN¥/.test(v78.riskBar.title) && /最大亏损 CN¥/.test(v78.riskBar.title),
+        v78.riskBar.title.slice(0, 160));
+  check('风险汇总(v50.78): 期权买方换成「占用权利金」口径',
+        /占用权利金/.test(v78.riskBarOpt.text) && v78.riskBarOpt.positions >= 1
+        && v78.riskBarOpt.maxLoss > 0, JSON.stringify(v78.riskBarOpt));
+  check('备份差异(v50.78): 接口返回四张表的备份/当前条数',
+        v78.diff.ok === true && v78.diff.nTables === 4 && v78.diff.hasTrade === true,
+        JSON.stringify(v78.diff));
+  check('备份差异(v50.78): 差异行写明「备份 N 条 / 现在 N 条」',
+        /交易记录：备份 \d+ 条 \/ 现在 \d+ 条/.test(v78.diff.lines), v78.diff.lines);
+  check('备份差异(v50.78): 非法文件名返回 ok=false + 人话错误',
+        v78.diffBad.ok === false && /不合法/.test(v78.diffBad.error), JSON.stringify(v78.diffBad));
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
