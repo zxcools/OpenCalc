@@ -20,7 +20,6 @@ _TEST_ROOT = _tfp.mkdtemp(prefix="oc_tests_")
 _TEST_DB = os.path.join(_TEST_ROOT, "funds.db")
 _TEST_CFG = os.path.join(_TEST_ROOT, "config.json")
 _main_mod.FUND_DB_PATH = _TEST_DB           # 所有 main 内函数读的就是这个全局
-_main_mod.FUND_DB_CONN = None
 _main_mod.CONFIG_PATH = _TEST_CFG           # 别让测试改动真实 config.json
 if "oc_tests_" not in _main_mod.FUND_DB_PATH:
     raise SystemExit("❌ 测试库未隔离(会破坏真实数据), 已拒绝运行: %s" % _main_mod.FUND_DB_PATH)
@@ -296,7 +295,8 @@ fund_delete("期权买方", 2032, 3)
 # ===== v50.78: 平仓两档手续费估算 / 未平仓风险汇总 / 备份差异预览 =====
 print("\n== v50.78 新增能力 ==")
 from main import (fee_estimate, open_risk_summary, fund_backup_diff,  # noqa: E402
-                  fund_auto_backup, DEFAULT_MARGIN_RATE)
+                  fund_auto_backup, DEFAULT_MARGIN_RATE,
+                  norm_date_field, calendar_missing_years)
 
 # --- ① 平仓弹窗的两档手续费: 必须与 row_fee 同源(不能前后端各算一套) ---
 _fe1 = fee_estimate("CF", "CF2701", "futures", 15000, 2)
@@ -385,6 +385,96 @@ check("风险汇总(v50.78): 平掉 i 仓后 → 2 笔 / 7 手 / 不再有止损
       _rk2["positions"] == 2 and _rk2["lots"] == 7 and _rk2["max_loss"] == 0.0,
       str({k: _rk2[k] for k in ("positions", "lots", "max_loss")}))
 
+# --- v50.80: 同一合约分两次开仓(中途改过保证金率) → 占用必须逐笔按各自的率算 ---
+#   以前是 g["mr"] 一把覆盖(取最后一次开仓的率) → 全部手数都按 22% 算, 占用偏大
+_mk_open("rb", "rb2701", 2, 3500, calc='{"margin_rate": 0.22}')
+_rk3 = open_risk_summary(_SU_RISK, "futures")
+_rb_item = [x for x in _rk3["items"] if x["underlying"] == "rb"][0]
+_exp_rb = 3200 * _mrb * 3 * DEFAULT_MARGIN_RATE + 3500 * _mrb * 2 * 0.22
+check("风险汇总(v50.80): 同合约两笔开仓率不同 → 占用 = 各笔 价×手数×自己的率 之和",
+      abs(_rb_item["occupied"] - round(_exp_rb, 2)) < 0.02,
+      'got=%s exp=%s' % (_rb_item["occupied"], round(_exp_rb, 2)))
+check("风险汇总(v50.80): 顶层给出「实际用到的保证金率」(不再恒定返回 16%)",
+      abs(_rk3["margin_rate"] - DEFAULT_MARGIN_RATE) < 1e-9 and _rk3["margin_rate_custom"] is True
+      and [round(x, 4) for x in _rk3["margin_rates"]] == [0.10, 0.16, 0.22],
+      str({"rates": _rk3["margin_rates"], "custom": _rk3["margin_rate_custom"]}))
+check("风险汇总(v50.80): 明细里带该笔用到的保证金率",
+      [round(x, 4) for x in _rb_item["margin_rates"]] == [0.16, 0.22], str(_rb_item["margin_rates"]))
+check("风险汇总(v50.80): 没有自定义率时 margin_rate_custom=False(前端才敢写「按 16% 估」)",
+      (lambda r: r["margin_rate_custom"] is False)(open_risk_summary("不存在的策略", "futures")),
+      str(open_risk_summary("不存在的策略", "futures")["margin_rate_custom"]))
+
+# --- v50.80: 日期字段归一 + 校验(不校验 = 详情页存储型 XSS 的入口) ---
+check("日期归一(v50.80): 标准日期原样、单位数补零",
+      norm_date_field("2026-10-14") == "2026-10-14" and norm_date_field("2026-1-4") == "2026-01-04", '')
+check("日期归一(v50.80): 空 / None → 空串",
+      norm_date_field("") == "" and norm_date_field(None) == "" and norm_date_field("   ") == "", '')
+check("日期归一(v50.80): 带时间的长串截成日期",
+      norm_date_field("2026-10-14T09:30") == "2026-10-14"
+      and norm_date_field("2026-10-14 09:30") == "2026-10-14", '')
+for _bad_d in ("<img src=x onerror=alert(1)>", "昨天", "2026-13-01", "2026-02-30", "20261014"):
+    try:
+        norm_date_field(_bad_d)
+        _rejected = False
+    except ValueError:
+        _rejected = True
+    check("日期归一(v50.80): 非法串被拒(%s)" % _bad_d[:14], _rejected, '')
+try:
+    trade_upsert({"underlying": "xss80", "contract": "xss802701", "op_type": "open",
+                  "direction": "buy", "open_date": "<b>坏日期</b>", "open_price": 100, "qty": 1})
+    _up_rejected = False
+except ValueError:
+    _up_rejected = True
+check("写库(v50.80): trade_upsert 拒绝非法 open_date(脏串进不了库就不会进 innerHTML)",
+      _up_rejected and not [r for r in trade_list_records() if r["underlying"] == "xss80"], '')
+try:
+    trade_import_record({"underlying": "xss80", "contract": "xss802701", "op_type": "open",
+                         "direction": "buy", "open_date": "<b>坏日期</b>", "open_price": 100, "qty": 1})
+    _im_rejected = False
+except ValueError:
+    _im_rejected = True
+check("写库(v50.80): trade_import_record 同样拒绝(备份导入这条路也堵住了)", _im_rejected, '')
+_fail_xss = fund_import_backup({"records": [], "trades": [
+    {"underlying": "xss80", "contract": "xss802701", "op_type": "open", "direction": "buy",
+     "open_date": "<b>坏日期</b>", "open_price": 100, "qty": 1}]})[2]
+check("写库(v50.80): 导入含脏日期的备份 → 记成失败明细(不静默丢, 也不写进去)",
+      len(_fail_xss) == 1 and "交易记录" in _fail_xss[0], str(_fail_xss))
+
+# --- v50.80: 交易日历年度提醒(表里没有的年份会静默退化成「只跳周末」) ---
+import datetime as _dtapi  # noqa: E402
+check("日历提醒(v50.80): 当年在表里 + 10 月(次年安排还没公布) → 不提醒",
+      calendar_missing_years() == [], str(calendar_missing_years()))
+check("日历提醒(v50.80): 表里覆盖的年份都算「已录」",
+      2025 in _main_mod.MARKET_HOLIDAY_YEARS, '')
+
+
+class _FakeNow(object):
+    def __init__(self, y, m):
+        self._d = _dtapi.datetime(y, m, 5)
+
+    def now(self):
+        return self._d
+
+    def __getattr__(self, k):        # 只替换 now(), 其它属性透传给真 datetime
+        return getattr(_dtapi.datetime, k)
+
+
+_m_real_dt = _main_mod.datetime
+try:
+    _main_mod.datetime = _FakeNow(2027, 1)       # 当年(2027)表里没有 → 必须提醒
+    check("日历提醒(v50.80): 当年不在表里 → 提醒该年份",
+          calendar_missing_years() == [2027], str(calendar_missing_years()))
+    _main_mod.datetime = _FakeNow(2026, 10)      # 当年有、10 月 → 不提次年
+    check("日历提醒(v50.80): 10 月不提前催次年安排",
+          calendar_missing_years() == [], str(calendar_missing_years()))
+    _main_mod.datetime = _FakeNow(2026, 11)      # 11 月起 → 提醒次年(2027 未录)
+    check("日历提醒(v50.80): 11 月起提醒次年安排",
+          calendar_missing_years() == [2027], str(calendar_missing_years()))
+finally:
+    _main_mod.datetime = _m_real_dt
+check("日历提醒(v50.80): 恢复真实 datetime(不能污染后面的用例)",
+      calendar_missing_years() == [], str(calendar_missing_years()))
+
 # --- ③ 恢复备份前的差异预览 ---
 _bk78 = fund_auto_backup("差异预览测试", force=True)
 check("备份差异(v50.78): 先生成一份快照", bool(_bk78) and os.path.exists(_bk78), str(_bk78))
@@ -406,6 +496,84 @@ for _bad78, _msg78 in (("../../funds.db", "非法文件名"), ("abc.db", "非法
         check("备份差异(v50.78): 拒绝[%s]" % _msg78, False, "未拒绝")
     except ValueError:
         check("备份差异(v50.78): 拒绝[%s]" % _msg78, True)
+
+# ===== v50.80: 接口兜底 + 备份差异的异常类型 =====
+print("\n== v50.80 接口兜底 / 异常类型 ==")
+import threading as _thr        # noqa: E402
+import http.client as _httpc    # noqa: E402
+import json as _j80            # noqa: E402
+import sqlite3 as _sq80        # noqa: E402
+
+check("异常文案(v50.80): 数据库异常给出人话前缀",
+      _main_mod._err_text(_sq80.OperationalError("unable to open database file"))
+      == "数据库出错：unable to open database file", '')
+check("异常文案(v50.80): ValueError 原样、无消息时退回类名",
+      _main_mod._err_text(ValueError("备份不存在：a.db")) == "备份不存在：a.db"
+      and _main_mod._err_text(ValueError()) == "ValueError", '')
+
+# 备份差异: 当前库缺失时抛的是 sqlite3.Error 而**不是** ValueError
+#   → handler 若只捕 ValueError, 异常会冒到 socketserver 直接断连(前端只看到 Failed to fetch)
+#   ⚠ 备份目录是从 FUND_DB_PATH 推出来的, 所以要把备份文件也挪进那个假数据目录才测得到
+import shutil as _sh80         # noqa: E402
+_saved_dbp80 = _main_mod.FUND_DB_PATH
+_fake_dir80 = os.path.join(_TEST_ROOT, "缺失库测试")
+os.makedirs(os.path.join(_fake_dir80, "backup"), exist_ok=True)
+_sh80.copy2(_bk78, os.path.join(_fake_dir80, "backup", os.path.basename(_bk78)))
+_main_mod.FUND_DB_PATH = os.path.join(_fake_dir80, "funds.db")     # ← 这个库不存在
+try:
+    try:
+        fund_backup_diff(os.path.basename(_bk78))
+        _raise80 = None
+    except Exception as _e80:  # noqa: BLE001
+        _raise80 = _e80
+finally:
+    _main_mod.FUND_DB_PATH = _saved_dbp80
+check("备份差异(v50.80): 当前库缺失时抛 sqlite3.Error(所以 handler 必须捕 Exception)",
+      isinstance(_raise80, _sq80.Error), repr(_raise80))
+check("备份差异(v50.80): 恢复数据目录后接口照旧可用",
+      fund_backup_diff(os.path.basename(_bk78))["tables"], '')
+
+# 处理器兜底: 让 _do_GET 抛异常, 用真 socket 发一次请求, 看是不是回 JSON 而不是断连
+_srv80 = _main_mod.ThreadingHTTPServer(("127.0.0.1", 0), _main_mod.Handler)
+_srv80_port = _srv80.server_address[1]
+_thr.Thread(target=_srv80.serve_forever, daemon=True).start()
+_saved_do_get80 = _main_mod.Handler._do_GET
+_main_mod.Handler._do_GET = lambda self: (_ for _ in ()).throw(RuntimeError("测试用炸弹"))
+import contextlib as _ctx80    # noqa: E402
+import io as _io80             # noqa: E402
+_buf80 = _io80.StringIO()      # 兜底会往 stderr 打堆栈(这是设计), 测试里收起来别刷屏
+try:
+    with _ctx80.redirect_stderr(_buf80):
+        _conn80 = _httpc.HTTPConnection("127.0.0.1", _srv80_port, timeout=8)
+        _conn80.request("GET", "/api/version")
+        _resp80 = _conn80.getresponse()
+        _body80 = _resp80.read().decode("utf-8")
+        _code80 = _resp80.status
+        _conn80.close()
+finally:
+    _main_mod.Handler._do_GET = _saved_do_get80
+    _srv80.shutdown()
+    _srv80.server_close()
+check("接口兜底(v50.80): 处理器内部抛异常时回 JSON(不是断连)", _code80 == 200 and "ok" in _body80,
+      "%s %s" % (_code80, _body80[:120]))
+check("接口兜底(v50.80): 兜底响应带 ok=false 与人话原因",
+      _j80.loads(_body80).get("ok") is False and "测试用炸弹" in _j80.loads(_body80).get("error", ""),
+      _body80[:160])
+check("接口兜底(v50.80): 堆栈仍打到控制台(异常没被吞掉, 只是不炸连接)",
+      "测试用炸弹" in _buf80.getvalue(), _buf80.getvalue()[:120])
+# 撤销打桩后接口恢复正常
+_srv80b = _main_mod.ThreadingHTTPServer(("127.0.0.1", 0), _main_mod.Handler)
+_thr.Thread(target=_srv80b.serve_forever, daemon=True).start()
+try:
+    _c80b = _httpc.HTTPConnection("127.0.0.1", _srv80b.server_address[1], timeout=8)
+    _c80b.request("GET", "/api/version")
+    _b80b = _j80.loads(_c80b.getresponse().read().decode("utf-8"))
+    _c80b.close()
+finally:
+    _srv80b.shutdown()
+    _srv80b.server_close()
+check("接口兜底(v50.80): 打桩撤销后 /api/version 正常", _b80b.get("ok") is True and _b80b.get("version"),
+      str(_b80b)[:160])
 
 # 清理本段造的数据(按独立策略名删)
 for _x in [x for x in trade_list_records() if x["strategy"] == _SU_RISK]:
@@ -863,7 +1031,6 @@ import os as _os, tempfile as _tf
 _td = _tf.mkdtemp()
 import main as _m
 _m.FUND_DB_PATH = _os.path.join(_td, 'funds.db')
-_m.FUND_DB_CONN = None
 
 # 1. 新建开仓 + 平仓 → 主表显示已平仓 + 平仓盈亏
 trade_upsert({'underlying':'ao611','contract':'ao611P2500','op_type':'open',
@@ -1622,7 +1789,6 @@ fund_auto_backup("快速第二次")      # 不 force → 应被 min_interval 合
 check("短时间重复触发被合并(不产生新文件)",
       len(glob.glob(_os.path.join(fund_backup_dir(), "funds_*.db"))) == _n_before)
 # 轮转: 造出超过上限的备份, 只保留 AUTO_BACKUP_KEEP 份
-_old_conn = _ms.FUND_DB_CONN
 for _i in range(AUTO_BACKUP_KEEP + 3):
     _p = _os.path.join(fund_backup_dir(), "funds_20990101_0000%02d_000.db" % _i)
     with open(_p, "wb") as _f:
@@ -1738,7 +1904,6 @@ check("二次写入覆盖(不留旧文本)",
 check("读不存在的说明返回 None(老备份)", _read_backup_meta(_os.path.join(fund_backup_dir(), "funds_不存在.db")) is None)
 
 # 11.6.3 被 min_interval 合并掉的原因要一起写进说明(否则「删了东西却显示上一次的保存」)
-_ck2 = _ms.FUND_DB_CONN
 _p_keep = _os.path.join(fund_backup_dir(), "funds_20880101_000000_000.db")
 # 先制造一次真实落盘, 让 _last_backup_ts 变成「刚刚」
 _snap_a = fund_auto_backup("第一次", force=True)

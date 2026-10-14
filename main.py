@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -32,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5079            # 与 README 版本号 v50.79 对齐(数值比较用于单实例接管)
+APP_VERSION = 5080            # 与 README 版本号 v50.80 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -375,6 +376,22 @@ MARKET_HOLIDAYS = frozenset(
 MARKET_HOLIDAY_YEARS = frozenset(int(d[:4]) for d in MARKET_HOLIDAYS)
 
 
+def calendar_missing_years():
+    """交易日历还需要补录的年份(v50.80 年度提醒)。
+
+    ⚠ 表里没有的年份会退化成「只跳周末」→ 节假日前后的「平今 / 平昨」判不出来,
+      手续费会算错(而现在只是静默退化, 界面上完全看不出来)。
+      次年安排一般 11 月前后由国务院办公厅公布 → 从 11 月起开始提醒次年。
+    """
+    now = datetime.now()
+    miss = []
+    if now.year not in MARKET_HOLIDAY_YEARS:
+        miss.append(now.year)
+    if (now.year + 1) not in MARKET_HOLIDAY_YEARS and now.month >= 11:
+        miss.append(now.year + 1)
+    return miss
+
+
 def is_trading_day(date_str):
     """该日是否为期货交易日(周一~周五 且 非法定节假日); 解析不了返回 False"""
     d = str(date_str or "").strip()[:10]
@@ -402,6 +419,28 @@ def next_trading_day(date_str):
     return d
 
 
+_DATE_FIELD_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+
+
+def norm_date_field(v):
+    """把日期字段归一成 YYYY-MM-DD; 空 → ''; 明显不是日期的串 → 抛 ValueError。
+
+    ⚠ v50.80: 以前日期字段完全不校验, 脏串(甚至构造过的 HTML)会进库, 而详情页/主表
+      把日期直接内插进 innerHTML → 等于一条存储型 XSS。前端是 type="date" 挡得住,
+      但「备份导入」和「直调 API」都能绕过, 所以在写库入口收口。
+    """
+    s = str(v or "").strip()[:10]
+    if not s:
+        return ""
+    m = _DATE_FIELD_RE.match(s)
+    if not m:
+        raise ValueError("日期格式不正确（应为 2026-10-14 这种）")
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime("%Y-%m-%d")
+    except ValueError:
+        raise ValueError("日期不存在：%s" % s)
+
+
 def trade_day(date_str, time_str=""):
     """把「日期 + 时间」换算成期货**交易日**。
     ⚠ 夜盘(21:00 之后)属于**下一个交易日**: 周四 21:30 开的仓, 交易日是周五;
@@ -413,7 +452,9 @@ def trade_day(date_str, time_str=""):
     if not d:
         return ""
     t = str(time_str or "").strip()
-    m = re.match(r"^(\d{1,2}):(\d{2})", t)
+    # ⚠ 分钟数允许 1~2 位: 以前写死 `(\d{2})`, 「21:5」这类串匹配不上 → 会被当成白盘
+    #   (本应用的时间框是 type="time" 不会产出这种串, 但导入的备份/手工数据可能有)
+    m = re.match(r"^(\d{1,2}):(\d{1,2})", t)
     if not m:
         return d
     hh = int(m.group(1))
@@ -1089,7 +1130,8 @@ elif _custom_data_dir:
     FUND_DB_PATH = os.path.join(os.path.abspath(os.path.expanduser(_custom_data_dir)), "funds.db")
 else:
     FUND_DB_PATH = os.path.join(_persistent_data_dir(), "funds.db")
-FUND_DB_CONN = None
+# ⚠ v50.80: 原来的全局 FUND_DB_CONN 已删除 —— 连接是每线程一个(_DB_LOCAL),
+#   那个全局只是"最近一次 _fund_db() 的线程"的连接, 拿它去 close 可能关到别的线程的连接
 
 # ---- 资金曲线策略(v50.59) ----
 # ⚠ 'abe' 已改名为「期权买方」: 启动时会把老库里的 abe 批量迁移过来(见 _migrate_strategy_names),
@@ -1297,6 +1339,11 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0, detail=""):
             # 合并窗口内: 把原因攒起来, 等下一次真正落盘时一并写进说明
             _pending_backup_meta.append((reason or "", detail or ""))
             return None
+        # ⚠ v50.80: 「占坑」必须在**离开锁之前** —— 以前是快照做完才写 _last_backup_ts,
+        #   两个并发请求都能通过上面的窗口检查, 然后各做一次全库快照(白占一个轮转位)。
+        #   代价: 万一下面的快照失败, 这一轮窗口也算"用掉了"——少一次自动备份比多两份重复份数划算,
+        #   而且恢复路径还有别的备份兜底。
+        _last_backup_ts = now
     conn_in = conn_out = None
     out_path = None
     try:
@@ -1316,7 +1363,6 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0, detail=""):
         with _BACKUP_LOCK:
             merged = _pending_backup_meta + [(reason or "", detail or "")]
             _pending_backup_meta = []
-            _last_backup_ts = now
         seen, parts = set(), []
         for r, d in merged:
             txt = (r + ("：" + d if d else "")).strip()
@@ -1811,7 +1857,7 @@ def fund_set_data_dir(new_dir):
       早期版本只迁移了 records → 换数据目录后交易记录全没了(用户会以为数据丢了)
     ⚠ 单条失败不能静默跳过(v50.77): 失败明细要带回前端, 让用户知道少了几条、为什么
     """
-    global FUND_DB_PATH, FUND_DB_CONN
+    global FUND_DB_PATH
     if _env_data_dir:
         raise ValueError("当前由 OC_DATA_DIR 环境变量锁定数据目录，无法在界面修改")
     new_dir = os.path.abspath(os.path.expanduser((new_dir or "").strip()))
@@ -1879,6 +1925,9 @@ def fund_data_info():
         "backup_dir": fund_backup_dir(),
         "backup_count": len(bks),
         "last_backup": bks[0] if bks else None,
+        # v50.80: 交易日历年度提醒 —— 当年(或 11 月起的次年)放假安排还没录入时前端要提示
+        "holiday_years": sorted(MARKET_HOLIDAY_YEARS),
+        "holiday_missing": calendar_missing_years(),
     }
 
 
@@ -2041,17 +2090,21 @@ _DB_SCHEMA_FOR = {"path": None}    # 已完成建表/补列的库路径
 
 
 def _close_fund_conn():
-    """关掉并清空全局库连接 + 标记表结构待重建。
-    ⚠ 连接其实是「每线程一个」(_DB_LOCAL), 这里只关当前线程这个;
-      它是给「恢复备份 / 切换数据目录」这种换库动作用的 —— 换完必须重新打开并重建结构。
+    """关掉并清空**当前线程**的库连接 + 标记表结构待重建。
+
+    ⚠ 连接是「每线程一个」(_DB_LOCAL) —— 这里只关自己这一个。
+      其它线程的连接不归我们管: 它们在 `_fund_db()` 里会先比库路径、再用 `SELECT 1`
+      探活, 发现失效就自己重连 (v50.80: 原先关的是一个被各线程轮流覆盖的全局变量,
+      等于可能去关别的线程正在用的连接, 与注释写的行为不一致)
     ⚠ 调用方应持有 _DB_LOCK(RLock), 让换库动作与建表/补列互斥"""
-    global FUND_DB_CONN
-    if FUND_DB_CONN is not None:
+    conn = getattr(_DB_LOCAL, "conn", None)
+    if conn is not None:
         try:
-            FUND_DB_CONN.close()
+            conn.close()
         except Exception:  # noqa: BLE001
             pass
-        FUND_DB_CONN = None
+        _DB_LOCAL.conn = None
+        _DB_LOCAL.path = None
     # 换库后需要重新建表/补列
     _DB_SCHEMA_FOR["path"] = None
 
@@ -2064,11 +2117,16 @@ def _fund_db():
       groups/pool/detail 多个请求时必现。
     建表与补列只对同一个库路径做一次, 用锁保护。
     """
-    global FUND_DB_CONN
     conn = getattr(_DB_LOCAL, "conn", None)
     # ⚠ 必须连库路径一起缓存: 用户切换数据目录后, 缓存的连接还指着旧库文件 → 会写到旧库里去
     if conn is not None:
         if getattr(_DB_LOCAL, "path", None) != FUND_DB_PATH:
+            # v50.80: 换库了 → 把旧连接关掉再重开(不关的话旧库文件句柄一直挂着,
+            #   Windows 上会让那个文件删不掉/覆盖不了)
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
             conn = None
         else:
             try:
@@ -2081,7 +2139,6 @@ def _fund_db():
         conn.row_factory = sqlite3.Row
         _DB_LOCAL.conn = conn
         _DB_LOCAL.path = FUND_DB_PATH
-    FUND_DB_CONN = conn            # 兼容旧引用(仅代表当前线程)
     with _DB_LOCK:
         if _DB_SCHEMA_FOR["path"] == FUND_DB_PATH:
             return conn
@@ -2954,6 +3011,10 @@ def trade_upsert(payload):
     )
     payload["open_time"] = (payload.get("open_time") or "").strip()[:5]
     payload["close_time"] = (payload.get("close_time") or "").strip()[:5]
+    # v50.80: 日期也要归一 + 校验(见 norm_date_field 的注释: 不校验 = 存储型 XSS 的入口)
+    for _dk in ("open_date", "close_date"):
+        if _dk in payload:
+            payload[_dk] = norm_date_field(payload[_dk])
     # 兜底: close 类型允许 qty/premium 为空(平仓字段用 close_qty/pnl 表达; API 直调漏传不报错)
     if payload.get("op_type") == "close":
         if payload.get("qty") is None:
@@ -3241,6 +3302,8 @@ def _holdings_from_items(underlying, items, with_risk=False):
             "price_each": (x["open_price"] or 0),
             "premium_each": (x["premium"] or 0) / qty if qty else 0,
             "stop_each": x.get("init_stop"),
+            # v50.80: 这笔开仓自己的保证金率(算占用资金用, 与 price_each 同粒度)
+            "mr_each": (_calc_mr(x) if with_risk else None),
         })
         g["left"] += qty
         g["cost_left"] += (x["open_price"] or 0) * qty
@@ -3251,7 +3314,9 @@ def _holdings_from_items(underlying, items, with_risk=False):
             _c = get_contract(fee_product(x.get("underlying"), x.get("contract")))
             if _c:
                 g["mult"] = (_c["opt_mult"] if x.get("mode") in ("options", "dual") else _c["mult"]) or 1
-            g["mr"] = _calc_mr(x)
+        # ⚠ v50.80: 保证金率按**每笔开仓**记 —— 以前是 g["mr"] 一把覆盖, 同合约开过两次
+        #   (中途改过保证金率)时全部手数都按最后一次的率算, 占用资金会偏
+        #   (与 FIFO 的 price_each / stop_each 保持同一粒度)
 
     # close 按时间 FIFO(按 close_date 升序逐单扣减, 同一合约内按 open_date 升序的 opens 顺序扣)
     closes_sorted = sorted(closes, key=lambda x: x.get("close_date") or "")
@@ -3291,8 +3356,13 @@ def _holdings_from_items(underlying, items, with_risk=False):
         }
         if with_risk:
             # 逐手累加「有止损那部分」的风险; 没设止损的手数单列(不能当成 0 风险)
+            # v50.80: 顺便按「每笔开仓自己的保证金率」累加「价 × 手数 × 率」(未平仓那部分),
+            #   交由 open_risk_summary 乘上乘数当占用资金 —— 不再用一把 mr 乘加权均价
             risk = 0.0
             no_stop = 0
+            margin_raw = 0.0          # Σ 价 × 剩余手数 × 保证金率(未乘乘数)
+            mr_lots = 0.0             # Σ 保证金率 × 剩余手数(算加权平均用)
+            mrs = set()               # 这几手里实际用到过哪几个保证金率
             for o in g["opens"]:
                 if o["qty_left"] <= 0:
                     continue
@@ -3301,9 +3371,17 @@ def _holdings_from_items(underlying, items, with_risk=False):
                     no_stop += o["qty_left"]
                 else:
                     risk += abs(o["price_each"] - float(st)) * g["mult"] * o["qty_left"]
+                _mr = o.get("mr_each") or DEFAULT_MARGIN_RATE
+                margin_raw += o["price_each"] * o["qty_left"] * _mr
+                mr_lots += _mr * o["qty_left"]
+                mrs.add(round(_mr, 6))
             h.update({
                 "mult": g["mult"],
-                "mr": g["mr"] if g["mr"] else DEFAULT_MARGIN_RATE,
+                # mr = 手数加权平均(展示/兼容用); margin_rates = 实际用到的那几个率
+                "mr": (mr_lots / g["left"]) if g["left"] else DEFAULT_MARGIN_RATE,
+                "margin_rates": sorted(mrs),
+                "mr_custom": any(abs(r - DEFAULT_MARGIN_RATE) > 1e-9 for r in mrs),
+                "margin_raw": margin_raw,           # × mult 才是占用资金
                 "risk_left": round(risk, 2),
                 "no_stop_lots": no_stop,
             })
@@ -3316,7 +3394,10 @@ def open_risk_summary(strategy=None, mode="options"):
 
     · positions  未平仓记录数(按 标的+批次 算一笔)
     · lots       剩余手数合计
-    · occupied   占用资金: 期权买方/双买 = 剩余权利金; 期货 = 保证金(开仓均价 × 乘数 × 手数 × 保证金率)
+    · occupied   占用资金: 期权买方/双买 = 剩余权利金; 期货 = 保证金
+                 (⚠ v50.80 逐笔按**该笔开仓自己的**保证金率算, 不再拿一把率乘加权均价;
+                   rate 来源 = 当年测算记在 calc_json.margin_rate 里的值, 缺省 16%)
+    · margin_rates / margin_rate_custom  实际用到的保证金率(前端文案据此写, 不再固定说 16%)
     · max_loss   理论最大亏损: 期权买方/双买 = 剩余权利金(买方最多亏光权利金);
                  期货 = Σ|开仓均价 − 初始止损| × 乘数 × 手数
     · max_loss_is_partial  期货里有没设止损的手数 → 上面的 max_loss 只是**下限**
@@ -3327,7 +3408,8 @@ def open_risk_summary(strategy=None, mode="options"):
     if not recs:
         return {"mode": mode, "positions": 0, "lots": 0, "occupied": 0.0, "max_loss": 0.0,
                 "max_loss_is_partial": False, "no_stop_lots": 0,
-                "margin_rate": DEFAULT_MARGIN_RATE, "items": []}
+                "margin_rate": DEFAULT_MARGIN_RATE, "margin_rates": [],
+                "margin_rate_custom": False, "items": []}
     is_opt = mode in ("options", "dual")
     by_u = {}
     for r in recs:
@@ -3335,6 +3417,8 @@ def open_risk_summary(strategy=None, mode="options"):
 
     total = {"positions": 0, "lots": 0, "occupied": 0.0, "max_loss": 0.0, "no_stop_lots": 0}
     items = []
+    mr_seen = set()          # v50.80: 实际用到的保证金率(展示/文案用, 免得固定写"16%")
+    mr_custom = False
     for (u, batch), sub in by_u.items():
         hs = _holdings_from_items(u, sub, with_risk=True)
         if not hs:
@@ -3349,9 +3433,14 @@ def open_risk_summary(strategy=None, mode="options"):
                 occ += h["premium"]
                 loss += h["premium"]
             else:
-                occ += h["open_price"] * h["mult"] * h["qty"] * h["mr"]
+                # v50.80: 逐笔按自己的保证金率累加(见 _holdings_from_items 里的 margin_raw)
+                occ += h["margin_raw"] * h["mult"]
                 loss += h["risk_left"]
                 nos += h["no_stop_lots"]
+                for _r in (h.get("margin_rates") or [h["mr"]]):
+                    mr_seen.add(round(float(_r), 6))
+                if h.get("mr_custom"):
+                    mr_custom = True
         total["positions"] += 1
         total["lots"] += lots
         total["occupied"] += occ
@@ -3363,6 +3452,9 @@ def open_risk_summary(strategy=None, mode="options"):
             "lots": lots,
             "occupied": round(occ, 2),
             "max_loss": round(loss, 2),
+            # 该笔用到的保证金率(逐笔取, 不是加权平均 —— 与前端文案「各笔记录里的率」对得上)
+            "margin_rates": sorted({round(float(x), 6) for h2 in hs
+                                    for x in (h2.get("margin_rates") or [h2["mr"]])}),
         })
     items.sort(key=lambda x: x["occupied"], reverse=True)
     return {
@@ -3374,7 +3466,11 @@ def open_risk_summary(strategy=None, mode="options"):
         # 期货里有没设止损的手数 → max_loss 只是下限, 前端要标明
         "max_loss_is_partial": (not is_opt) and total["no_stop_lots"] > 0,
         "no_stop_lots": total["no_stop_lots"],
+        # ⚠ 顶层不再恒定返默认值(以前前端据此写"按 16% 估", 与逐笔用 record 自己的率算出的
+        #   占用金额互相矛盾) —— 改成把「实际用到哪些率」返回给前端
         "margin_rate": DEFAULT_MARGIN_RATE,
+        "margin_rates": sorted(mr_seen),
+        "margin_rate_custom": mr_custom,
         "items": items,
     }
 
@@ -3691,7 +3787,7 @@ def trade_import_record(r):
         "underlying": r["underlying"],
         "contract": normalize_contract(r["contract"]),
         "op_type": r["op_type"],
-        "open_date": r.get("open_date") or "",
+        "open_date": norm_date_field(r.get("open_date")),
         "open_delta": r.get("open_delta"),
         "target_delta": r.get("target_delta"),
         "call_put": r.get("call_put"),
@@ -3702,7 +3798,7 @@ def trade_import_record(r):
         "close_qty": r.get("close_qty"),
         "close_price": r.get("close_price"),
         "pnl": r.get("pnl"),
-        "close_date": r.get("close_date") or "",
+        "close_date": norm_date_field(r.get("close_date")),
         "note": r.get("note") or "",
         "created_at": r.get("created_at") or now,
         "updated_at": r.get("updated_at") or now,
@@ -3824,7 +3920,16 @@ def _read_asset_bytes(name):
     if not os.path.isfile(fp):
         return None, None
     ext = os.path.splitext(fp)[1].lower()
-    return open(fp, "rb").read(), _ASSET_MIME.get(ext, "application/octet-stream")
+    with open(fp, "rb") as f:
+        return f.read(), _ASSET_MIME.get(ext, "application/octet-stream")
+
+
+def _err_text(exc):
+    """异常 → 给用户看的一句话(细节仍打到控制台, 方便排查)"""
+    t = str(exc).strip()
+    if isinstance(exc, sqlite3.Error):
+        return "数据库出错：%s" % (t or exc.__class__.__name__)
+    return t or exc.__class__.__name__
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3842,7 +3947,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_crash(self, exc):
+        """请求处理里出了没预料到的异常 → 也要回一句 JSON。
+
+        ⚠ v50.80: 以前任何未捕获异常都会冒到 socketserver, 直接**断开连接** ——
+          浏览器只报 `Failed to fetch`, 既看不到是哪个接口、也看不到原因。
+          现在统一兜住并打印堆栈(异常本身还是要修的, 兜底只是别让它"消失")。"""
+        traceback.print_exc()
+        try:
+            self._send(200, _json({"ok": False, "error": "服务端异常：" + _err_text(exc)}))
+        except Exception:  # noqa: BLE001
+            pass          # 响应可能已经发出去了(如进度流) → 忽略
+
     def do_GET(self):
+        try:
+            self._do_GET()
+        except Exception as e:  # noqa: BLE001
+            self._send_crash(e)
+
+    def _do_GET(self):
         path = self.path.split("?")[0]
         if path == "/":
             self._send(200, HTML.encode("utf-8"), "text/html; charset=utf-8")
@@ -3972,8 +4095,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
             try:
                 self._send(200, _json({"ok": True, **fund_backup_diff((qs.get("name") or [""])[0])}))
-            except ValueError as e:
-                self._send(200, _json({"ok": False, "error": str(e)}))
+            except Exception as e:  # noqa: BLE001
+                # ⚠ v50.80: 以前只捕 ValueError; 当前库文件不存在/损坏时抛的是
+                #   sqlite3.OperationalError → 逃出 do_GET → 连接直接断(前端 Failed to fetch),
+                #   而现在这里给一句人话, 前端照旧走"差异取不到不挡住恢复"的分支
+                self._send(200, _json({"ok": False, "error": _err_text(e)}))
 
         elif path == "/api/fs/list":
             # 内置文件夹浏览器: 列子目录 + 盘符(替代原来会静默失败的 Windows 原生对话框)
@@ -4011,6 +4137,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, _json({"ok": False, "error": "Not Found"}))
 
     def do_POST(self):
+        try:
+            self._do_POST()
+        except Exception as e:  # noqa: BLE001
+            self._send_crash(e)
+
+    def _do_POST(self):
         path = self.path.split("?")[0]
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -4310,6 +4442,10 @@ def main():
         if data_dir_risky():
             print("⚠ 数据目录在软件目录内(%s) — 更新软件会删除数据, 建议在「⚙ 数据位置」里迁到软件目录之外"
                   % os.path.dirname(FUND_DB_PATH))
+        _miss_years = calendar_missing_years()
+        if _miss_years:
+            print("⚠ 交易日历还没录入 %s 的放假安排 — 节假日前后的「平今/平昨」会退回「只跳周末」, 手续费可能算错"
+                  % "、".join("%d 年" % y for y in _miss_years))
     except Exception:  # noqa: BLE001
         pass
 
@@ -5210,6 +5346,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
   <button class="btn xs" id="dataRiskMigrate" style="flex:none">一键迁出</button>
   <button class="btn xs" id="dataRiskLater" style="flex:none">稍后</button>
   <button class="btn xs" id="dataRiskClose" style="flex:none">✕</button>
+</div>
+<!-- 交易日历年度提醒横幅(v50.80): 当年(或 11 月起的次年)放假安排还没录入时由 checkDataSafety() 显示 -->
+<div id="calStaleBanner" class="hidden" style="position:fixed;top:0;left:0;right:0;z-index:9998;background:#8a6a1f;color:#fff;padding:9px 14px;font-size:13px;line-height:1.6;display:flex;gap:12px;align-items:center;box-shadow:0 2px 10px rgba(0,0,0,.35)">
+  <span style="flex:1">
+    <b>📅 交易日历还没录入 <span id="calStaleYears"></span> 的放假安排</b>
+    —— 节假日前后的「平今 / 平昨」会退回「只跳周末」来判，手续费可能算错。等国务院办公厅公布后补一下日历即可。
+  </span>
+  <button class="btn xs" id="calStaleClose" style="flex:none">知道了</button>
 </div>
 <div class="app-shell">
   <aside class="side" id="mainTabs">
@@ -7071,8 +7215,15 @@ function showEmpty(msg){
 function showError(msg){
   hideAllResults();
   clearCalcCache(curMode);   // v50.65: 同上
-  $('empty').classList.remove('hidden');
-  $('empty').innerHTML = '<span style="color:var(--bad)">⚠ '+msg+'</span>';
+  const box = $('empty');
+  box.classList.remove('hidden');
+  // v50.80: 用 textContent 而不是拼 innerHTML —— error 文案里可能带用户输入(如手填的合约号),
+  //   拼字符串就等于把用户输入当 HTML 执行
+  box.innerHTML = '';
+  const sp = document.createElement('span');
+  sp.style.color = 'var(--bad)';
+  sp.textContent = '⚠ ' + String(msg == null ? '' : msg);
+  box.appendChild(sp);
 }
 
 /* =================================================================
@@ -7666,8 +7817,11 @@ const TradeUI = {
 
   fmtDate(d){
     if (!d) return '—';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-    return d;
+    const s = String(d);
+    // v50.80: 不是「YYYY-MM-DD」的串是脏数据(历史库/手工导入的备份都可能有), 转义后再显示 ——
+    //   这个返回值会被直接内插进 innerHTML, 原样返回等于给自己开一条存储型 XSS 的路
+    //   (写入侧也补了校验, 这里再兜一道: 老库里已经存在的脏数据也得挡住)
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : escHtml(s);
   },
   /* 日期 + 时间(v50.70): 有填时间就显示成 2026-10-09 21:33 */
   fmtDateTime(d, t){
@@ -8116,14 +8270,27 @@ const TradeUI = {
       + '<span class="rb-spacer"></span>'
       + '<span class="rb-tip">' + (isOpt
           ? '买方最大亏损 = 已付权利金'
-          : '保证金按 ' + Math.round((r.margin_rate || 0.16) * 100) + '% 估 · 止损按初始止损价')
+          : this._mrTip(r))
       + '（点这行看逐笔明细）</span>';
-    // 悬停看逐笔明细(按占用资金从大到小)
+    // 悬停看逐笔明细(按占用资金从大到小); 有自定义保证金率时把率也标出来, 便于核对
     box.title = (r.items || []).slice(0, 12).map(x =>
       x.underlying + ' ' + (x.contracts || []).join('/')
-      + ' · ' + x.lots + ' 手 · 占用 ' + money(x.occupied) + ' · 最大亏损 ' + money(x.max_loss)).join('\n')
+      + ' · ' + x.lots + ' 手 · 占用 ' + money(x.occupied) + ' · 最大亏损 ' + money(x.max_loss)
+      + ((r.margin_rate_custom && (x.margin_rates || []).length)
+          ? ' · 保证金率 ' + x.margin_rates.map(v => Math.round(v * 100 * 100) / 100 + '%').join('/') : '')).join('\n')
       + ((r.items || []).length > 12 ? '\n…' : '');
     box.classList.remove('hidden');
+  },
+
+  /* v50.80: 保证金率文案 —— 占用资金是逐笔按「该笔开仓自己记的率」算的,
+     所以这里也要照实说。以前恒定写「按 16% 估」, 记录里带自定义率时数字与说明会打架 */
+  _mrTip(r){
+    const pct = v => Math.round(Number(v) * 100 * 100) / 100 + '%';
+    const rates = (r.margin_rates || []).filter(v => v > 0);
+    if (!rates.length || !r.margin_rate_custom){
+      return '保证金按 ' + pct(r.margin_rate || 0.16) + ' 估 · 止损按初始止损价';
+    }
+    return '保证金按各笔记录里的保证金率估（' + rates.map(pct).join(' / ') + '） · 止损按初始止损价';
   },
 
   renderMain(){
@@ -8538,11 +8705,15 @@ const TradeUI = {
       ta.style.top = '-1000px';
       ta.style.opacity = '0';
       document.body.appendChild(ta);
-      ta.select();
-      ta.setSelectionRange(0, s.length);
-      const ok = document.execCommand('copy');
-      document.body.removeChild(ta);
-      return !!ok;
+      try {
+        ta.select();
+        ta.setSelectionRange(0, s.length);
+        return !!document.execCommand('copy');
+      } finally {
+        // v50.80: 必须 finally —— execCommand/select 抛异常时也要把这个临时节点收掉,
+        //   否则每失败一次就在 body 里剩一个隐藏 textarea
+        if (ta.parentNode) ta.parentNode.removeChild(ta);
+      }
     } catch (e) { return false; }
   },
 
@@ -9964,6 +10135,11 @@ const FundUI = {
       sessionStorage.setItem('dataRiskClosed', '1');    // 本次会话不再提示
       $('dataRiskBanner').classList.add('hidden');
     });
+    // v50.80: 交易日历年度提醒「知道了」
+    if ($('calStaleClose')) $('calStaleClose').addEventListener('click', ()=>{
+      sessionStorage.setItem('calStaleClosed', '1');    // 本次会话不再提示
+      $('calStaleBanner').classList.add('hidden');
+    });
     // 一键清除所有记录
     $('btnClearAll').addEventListener('click', ()=>this.clearAllRecords());
     // 联系作者(侧栏 💬 按钮; v50.61 去掉左下角重复的浮动按钮)
@@ -10061,6 +10237,20 @@ const FundUI = {
         if (dot) dot.classList.add('hidden');
         if (banner) banner.classList.add('hidden');
         $('btnDataDir').title = '把数据存到网盘同步文件夹，换电脑不丢记录';
+      }
+      // v50.80: 交易日历年度提醒 —— 当年/次年放假安排没录入时, 节假日前后平今/平昨会判错
+      const cb = $('calStaleBanner');
+      if (cb){
+        const miss = d.holiday_missing || [];
+        if (miss.length && !sessionStorage.getItem('calStaleClosed')){
+          $('calStaleYears').textContent = miss.map(y => y + ' 年').join('、');
+          cb.classList.remove('hidden');
+          // 两条横幅都有时把这条推到下面, 别叠在一起
+          cb.style.top = (banner && !banner.classList.contains('hidden'))
+            ? (banner.offsetHeight + 'px') : '0';
+        } else {
+          cb.classList.add('hidden');
+        }
       }
     } catch (e) { /* 静默 */ }
   },

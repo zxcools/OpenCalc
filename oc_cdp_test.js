@@ -4181,6 +4181,96 @@ async function main() {
   check('复制合约(v50.79): 点合约不误触其它交互(合约筛选保持「全部合约」)',
         v79.filterAfter === '', v79.filterAfter);
 
+  // ===== v50.80: 日期转义/校验 + 风险条保证金率口径 + 交易日历年度提醒 + 复制兜底 =====
+  const v80Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const out = {};
+
+    // ---- ① 日期: 写入侧拒绝构造过的串 + 显示侧转义 ----
+    out.badDate = await post({mode:'futures', underlying:'xss80', contract:'xss802701',
+      op_type:'open', direction:'buy', open_date:'<img src=x onerror=1>', open_price:100, qty:1});
+    out.fmtDateEsc = TradeUI.fmtDate('<img src=x onerror=1>');
+    out.fmtDateOk = TradeUI.fmtDate('2026-10-14');
+    out.fmtDateEmpty = TradeUI.fmtDate('');
+    const g0 = await (await fetch('/api/trades/groups?mode=futures')).json();
+    out.noXssRec = !(g0.groups || []).some(x => x.underlying === 'xss80');
+
+    // ---- ② 风险条: 有自定义保证金率时文案要照实说(不能写死「按 16% 估」) ----
+    const o = await post({mode:'futures', underlying:'ap', contract:'ap2701', batch:'Bmr80',
+      op_type:'open', direction:'buy', open_date:'2026-09-01', open_price:9000, qty:3,
+      premium:0, init_stop:8800, calc_json:'{"margin_rate": 0.22}'});
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(1100);
+    const rk = await (await fetch('/api/trades/open-risk?mode=futures')).json();
+    out.mr = { rates: rk.margin_rates, custom: rk.margin_rate_custom, occupied: rk.occupied };
+    const rb = document.getElementById('openRisk');
+    out.mrTip = rb ? rb.textContent.replace(/\\s+/g, ' ') : '';
+    out.mrTitle = rb ? rb.title : '';
+    await del(o.id);
+
+    // ---- ③ 交易日历年度提醒横幅(打桩 data-info, 用完立刻还原) ----
+    const oldFetch = window.fetchT;
+    window.fetchT = () => Promise.resolve({ ok: true, json: () => Promise.resolve(
+      { ok: true, risky: false, data_dir: 'X', holiday_missing: [2027, 2028] }) });
+    try {
+      sessionStorage.removeItem('calStaleClosed');
+      await FundUI.checkDataSafety(); await w(300);
+    } finally { window.fetchT = oldFetch; }
+    const cb = document.getElementById('calStaleBanner');
+    out.cal = { text: cb ? cb.textContent.replace(/\\s+/g, ' ') : '',
+                shown: cb ? !cb.classList.contains('hidden') : false };
+    document.getElementById('calStaleClose').click(); await w(200);
+    out.calClosed = cb.classList.contains('hidden') && sessionStorage.getItem('calStaleClosed') === '1';
+    sessionStorage.removeItem('calStaleClosed');
+    cb.classList.add('hidden');
+    const di = await (await fetch('/api/funds/data-info')).json();
+    out.calReal = { missing: di.holiday_missing, years: di.holiday_years };
+
+    // ---- ④ 复制兜底: execCommand 抛异常时也要把临时 textarea 收掉 ----
+    const taCount = () => document.querySelectorAll('body > textarea').length;
+    const oldExec = document.execCommand;
+    let ret = null;
+    try {
+      Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+      document.execCommand = () => { throw new Error('boom'); };
+      out.copyBefore = taCount();
+      ret = await TradeUI.copyText('abc');
+    } finally {
+      document.execCommand = oldExec;
+    }
+    out.copyFallback = { ret: ret, before: out.copyBefore, after: taCount() };
+    return JSON.stringify(out);
+  })()`);
+  const v80 = JSON.parse(v80Run);
+  check('日期(v50.80): 写入侧拒绝构造过的日期串(接口 ok=false + 人话)',
+        v80.badDate.ok === false && /日期/.test(v80.badDate.error || ''), JSON.stringify(v80.badDate));
+  check('日期(v50.80): 脏日期被拒后没留下记录', v80.noXssRec === true, String(v80.noXssRec));
+  check('日期(v50.80): 显示侧对非日期串做转义(老库里的脏数据也挡得住)',
+        /&lt;img/.test(v80.fmtDateEsc) && v80.fmtDateEsc.indexOf('<img') < 0, v80.fmtDateEsc);
+  check('日期(v50.80): 正常日期原样、空值给「—」',
+        v80.fmtDateOk === '2026-10-14' && v80.fmtDateEmpty === '—',
+        v80.fmtDateOk + ' | ' + v80.fmtDateEmpty);
+  check('风险条(v50.80): 有自定义保证金率时不再写死「按 16% 估」',
+        /各笔记录里的保证金率/.test(v80.mrTip) && /22%/.test(v80.mrTip) && !/按 16% 估/.test(v80.mrTip),
+        v80.mrTip);
+  check('风险条(v50.80): 接口返回实际用到的保证金率 + 自定义标记',
+        v80.mr.custom === true && (v80.mr.rates || []).indexOf(0.22) >= 0, JSON.stringify(v80.mr));
+  check('风险条(v50.80): 逐笔明细 tooltip 也标出保证金率',
+        /保证金率 22%/.test(v80.mrTitle), v80.mrTitle.slice(0, 200));
+  check('日历提醒(v50.80): data-info 带 holiday_years / holiday_missing',
+        Array.isArray(v80.calReal.missing) && (v80.calReal.years || []).indexOf(2026) >= 0
+        && v80.calReal.missing.length === 0, JSON.stringify(v80.calReal));
+  check('日历提醒(v50.80): 缺年份时显示横幅并写明年份与后果',
+        v80.cal.shown === true && /2027 年/.test(v80.cal.text) && /2028 年/.test(v80.cal.text)
+        && /平今/.test(v80.cal.text), v80.cal.text);
+  check('日历提醒(v50.80): 「知道了」收起并本次会话不再提示', v80.calClosed === true, String(v80.calClosed));
+  check('复制兜底(v50.80): execCommand 抛异常时返回 false 且不残留隐藏 textarea',
+        v80.copyFallback.ret === false && v80.copyFallback.after === v80.copyFallback.before,
+        JSON.stringify(v80.copyFallback));
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
