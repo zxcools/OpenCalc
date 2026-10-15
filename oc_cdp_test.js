@@ -4606,19 +4606,27 @@ async function main() {
     const n0 = (g0.groups || []).length;
     q('btnAddOpt').click(); await w(1800);
     const g1 = await (await fetch('/api/trades/groups?mode=options')).json();
-    const mine = (g1.groups || []).find(x => x.underlying === 'cu' && x.batch);
+    // ⚠ v50.85: 标的带合约年月(cu2612), 不再只是 cu
+    const mine = (g1.groups || []).find(x => String(x.underlying).indexOf('cu') === 0 && x.batch);
     let op0 = null;
+    const extra = {};
     if (mine){
-      const det = await (await fetch('/api/trades/detail?mode=options&underlying=cu&batch='
+      const det = await (await fetch('/api/trades/detail?mode=options&underlying='
+        + encodeURIComponent(mine.underlying) + '&batch='
         + encodeURIComponent(mine.batch))).json();
       op0 = (det.operations || [])[0] || null;
+      extra.underlying = mine.underlying;
+      extra.tpTargets = (det.tp_targets || []).length;
+      extra.tpFirst = (det.tp_targets && det.tp_targets[0]) ? det.tp_targets[0].targets.map(t => t.price_unit) : null;
+      extra.tpBox = (document.getElementById('tdTpTargets') || {}).textContent || '';
     }
-    out.added = {n0, n1: (g1.groups || []).length, found: !!mine, tab: '', op: op0};
+    out.added = Object.assign({n0, n1: (g1.groups || []).length, found: !!mine, tab: '', op: op0}, extra);
     const act = document.querySelector('#mainTabs .maintab.active');
     out.added.tab = act ? act.dataset.tab : '';
     // 清理: 删掉这条记录, 免得影响后面的用例
     if (mine){
-      const det = await (await fetch('/api/trades/detail?mode=options&underlying=cu&batch='
+      const det = await (await fetch('/api/trades/detail?mode=options&underlying='
+        + encodeURIComponent(mine.underlying) + '&batch='
         + encodeURIComponent(mine.batch))).json();
       for (const op of (det.operations || [])){
         await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -4670,6 +4678,77 @@ async function main() {
   check('期权买方(v50.84): 加入记录后自动跳到「交易记录 · 期权买方」',
         v84.added.tab === 'trades', v84.added.tab);
   check('期权买方(v50.84): 用例清理干净(记录数回到原值)', v84.cleaned === true, String(v84.cleaned));
+  check('期权买方(v50.85): 加入记录的「标的」带上合约年月(cu2612, 不再只是 cu)',
+        v84.added.underlying === 'cu2612', String(v84.added.underlying));
+  check('期权买方(v50.85): 详情接口返回 tp_targets(报价目标 110/220/440/880)',
+        v84.added.tpTargets === 1 && (v84.added.tpFirst || []).join(',') === '110,220,440,880',
+        JSON.stringify(v84.added.tpFirst));
+  check('期权买方(v50.85): 详情页真的画出「期权止盈目标价位」板块',
+        /期权止盈目标价位/.test(v84.added.tpBox) && /2×/.test(v84.added.tpBox),
+        (v84.added.tpBox || '').slice(0, 120));
+
+  // ===== v50.85: 详情页止盈目标价跟「当前持仓」走(老合约平完 → 按新开合约的价格重算) =====
+  const v85Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const U = 'p2701x85';
+    const det = () => fetch('/api/trades/detail?mode=options&underlying=' + U + '&batch=B85a')
+      .then(r=>r.json());
+    const out = {};
+    // ① 手动新建一条(报价 87.5, 乘数 10 → 每手 875, 3 手)
+    await post({mode:'options', underlying:U, contract:'p2701P9000', batch:'B85a', op_type:'open',
+      direction:'buy', call_put:'P', open_date:'2026-10-01', open_price:87.5, qty:3,
+      premium:2625, open_delta:-0.22});
+    const d1 = await det();
+    out.one = (d1.tp_targets || []).map(g => [g.contract, g.qty, g.price, g.targets.map(t => t.price_unit)]);
+    // ② 全部平掉 + 之后又开了一个新月份合约 → 目标价必须按**新合约**算
+    await post({mode:'options', underlying:U, contract:'p2701P9000', batch:'B85a', op_type:'close',
+      direction:'sell', close_date:'2026-10-10', close_qty:3, close_price:120, pnl:975});
+    const dMid = await det();
+    out.closed = (dMid.tp_targets || []).map(g => g.contract);
+    await post({mode:'options', underlying:U, contract:'p2703P9500', batch:'B85a', op_type:'open',
+      direction:'buy', call_put:'P', open_date:'2026-10-12', open_price:120, qty:2,
+      premium:2400, open_delta:-0.30});
+    const d2 = await det();
+    out.two = (d2.tp_targets || []).map(g => [g.contract, g.qty, g.price, g.targets.map(t => t.price_unit)]);
+    // ③ 在界面上打开这条记录 → 板块画出来且看得见
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(600);
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(500);
+    await TradeUI.loadDetail(U, 'B85a'); await w(800);
+    const box = document.getElementById('tdTpTargets');
+    out.dom = {visible: box.offsetParent !== null, display: getComputedStyle(box).display,
+               txt: box.textContent.replace(/\\s+/g, ' ').trim().slice(0, 240),
+               sep: box.querySelectorAll('tbody tr.tp-sep').length,
+               rows: box.querySelectorAll('tbody tr').length};
+    // ④ 切到期货 / 双买时这块不显示
+    TradeUI.setMode('futures'); await w(500);
+    out.inFutures = getComputedStyle(document.getElementById('tdTpTargets')).display;
+    TradeUI.setMode('options'); await w(400);
+    // 清理
+    const dd = await det();
+    for (const op of (dd.operations || [])){
+      await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: op.id})});
+    }
+    TradeUI.closeDetail();
+    return JSON.stringify(out);
+  })()`);
+  const v85 = JSON.parse(v85Run);
+  check('期权买方(v50.85): 手动新建的记录详情按当前持仓算目标价(87.5 → 175/350/700/1400)',
+        v85.one.length === 1 && v85.one[0][0] === 'p2701P9000' && v85.one[0][1] === 3
+        && v85.one[0][3].join(',') === '175,350,700,1400', JSON.stringify(v85.one));
+  check('期权买方(v50.85): 全部平掉(还没开新合约)时退回开仓记录，仍有目标价',
+        v85.closed.join(',') === 'p2701P9000', JSON.stringify(v85.closed));
+  check('期权买方(v50.85): 老合约平完 + 新开合约 → 目标价改成按新合约(120 → 240/480/960/1920)',
+        v85.two.length === 1 && v85.two[0][0] === 'p2703P9500' && v85.two[0][1] === 2
+        && v85.two[0][3].join(',') === '240,480,960,1920', JSON.stringify(v85.two));
+  check('期权买方(v50.85): 详情页板块可见且写出合约/当前价/倍数(不是仅接口有数据)',
+        v85.dom.visible === true && v85.dom.sep === 1
+        && /p2703P9500/.test(v85.dom.txt) && /120/.test(v85.dom.txt) && /2×/.test(v85.dom.txt),
+        JSON.stringify(v85.dom));
+  check('期权买方(v50.85): 期货模式下这块不显示(display:none)',
+        v85.inFutures === 'none', v85.inFutures);
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {

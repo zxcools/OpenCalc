@@ -1703,6 +1703,55 @@ check("止盈价测算(v50.63): 全平后退回开仓记录回算",
 for _o in trade_detail(_dt_u, mode="dual", batch=_dt_b)["operations"]:
     trade_delete(_o["id"])
 
+# ---- v50.85: 期权买方(单腿)详情止盈目标价 = 当前持仓的期权价格 × 2/4/8/16 ----
+_S85 = "p2701x85"
+trade_upsert({'mode': 'options', 'underlying': _S85, 'contract': 'p2701P9000', 'batch': 'B85a',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'P', 'open_date': '2026-10-01',
+              'open_price': 87.5, 'qty': 3, 'premium': 2625, 'open_delta': -0.22})
+_g85 = trade_detail(_S85, mode="options", batch='B85a')["tp_targets"]
+check("单腿止盈(v50.85): 有 1 组(合约/手数/报价/乘数)",
+      len(_g85) == 1 and _g85[0]["contract"] == "p2701P9000" and _g85[0]["qty"] == 3
+      and abs(_g85[0]["price"] - 87.5) < 1e-9 and _g85[0]["mult"] == 10,
+      str(_g85[:1]))
+check("单腿止盈(v50.85): 每手权利金 = 报价 87.5 × 乘数 10 = 875(成本 2625)",
+      abs(_g85[0]["premium_per_lot"] - 875) < 1e-9 and abs(_g85[0]["cost"] - 2625) < 0.01,
+      "%s / %s" % (_g85[0]["premium_per_lot"], _g85[0]["cost"]))
+check("单腿止盈(v50.85): 4 档目标价 = 报价 × N(175/350/700/1400)",
+      [t["price_unit"] for t in _g85[0]["targets"]] == [175.0, 350.0, 700.0, 1400.0],
+      str([t["price_unit"] for t in _g85[0]["targets"]]))
+check("单腿止盈(v50.85): 合计价值 = 每手 × 手数(2× → 1750×3 = 5250) / 浮盈 − 成本",
+      _g85[0]["targets"][0]["value"] == 5250.0 and _g85[0]["targets"][0]["profit"] == 2625.0,
+      str(_g85[0]["targets"][0]))
+# 全部平掉 → 退回开仓记录(仍有目标价, 供复盘)
+trade_upsert({'mode': 'options', 'underlying': _S85, 'contract': 'p2701P9000', 'batch': 'B85a',
+              'op_type': 'close', 'direction': 'sell', 'close_date': '2026-10-10',
+              'close_qty': 3, 'close_price': 120, 'pnl': 975})
+_c85 = trade_detail(_S85, mode="options", batch='B85a')["tp_targets"]
+check("单腿止盈(v50.85): 全平后退回开仓记录(仍是 3 手 / 报价 87.5)",
+      len(_c85) == 1 and _c85[0]["qty"] == 3 and abs(_c85[0]["price"] - 87.5) < 1e-9, str(_c85[:1]))
+# 老合约平完 + 又开了新合约 → 目标价必须按**新合约**的价格算
+trade_upsert({'mode': 'options', 'underlying': _S85, 'contract': 'p2703P9500', 'batch': 'B85a',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'P', 'open_date': '2026-10-12',
+              'open_price': 120, 'qty': 2, 'premium': 2400, 'open_delta': -0.3})
+_n85 = trade_detail(_S85, mode="options", batch='B85a')["tp_targets"]
+check("单腿止盈(v50.85): 换成新合约后只按新合约算(120 → 240/480/960/1920)",
+      len(_n85) == 1 and _n85[0]["contract"] == "p2703P9500" and _n85[0]["qty"] == 2
+      and [t["price_unit"] for t in _n85[0]["targets"]] == [240.0, 480.0, 960.0, 1920.0],
+      str([(g["contract"], [t["price_unit"] for t in g["targets"]]) for g in _n85]))
+# 同时持有两个合约 → 各算各的
+trade_upsert({'mode': 'options', 'underlying': _S85, 'contract': 'p2701P9000', 'batch': 'B85a',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'P', 'open_date': '2026-10-13',
+              'open_price': 95, 'qty': 1, 'premium': 950, 'open_delta': -0.25})
+_b85 = trade_detail(_S85, mode="options", batch='B85a')["tp_targets"]
+check("单腿止盈(v50.85): 两个合约同时持有 → 各给一组(报价 95 / 120)",
+      len(_b85) == 2 and {g["contract"] for g in _b85} == {"p2701P9000", "p2703P9500"}
+      and abs([g for g in _b85 if g["contract"] == "p2701P9000"][0]["price"] - 95) < 1e-9,
+      str([g["contract"] for g in _b85]))
+check("单腿止盈(v50.85): 期货/双买模式不返回该字段",
+      trade_detail(_dt_u, mode="dual", batch='Bm67a')["tp_targets"] == [], '')
+for _o in trade_detail(_S85, mode="options", batch='B85a')["operations"]:
+    trade_delete(_o["id"])
+
 # v50.67: 双买开仓价口径修正 —— 老数据把「每手权利金」当成了价格(被乘过期权乘数)
 from main import _migrate_dual_open_price, _option_mult
 check("双买乘数(v50.67): _option_mult 按品种取(烧碱 SH = 30)",

@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5084            # 与 README 版本号 v50.84 对齐(数值比较用于单实例接管)
+APP_VERSION = 5085            # 与 README 版本号 v50.85 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -3272,6 +3272,55 @@ def trade_groups(strategy=None, mode="options", fee_mode=FEE_MODE_DEFAULT):
     return groups
 
 
+def _options_tp_targets(underlying, mode, holdings, opens):
+    """期权买方(单腿) v50.85: 按 N = 2/4/8/16 倍「当前期权价格」给止盈目标价, 详情页用。
+
+    口径与开仓计算器一致 —— 目标价位 = 当前期权价格 × N（该腿权利金市值涨到 N 倍时该挂在哪）。
+    ⚠ 必须用**当前剩余持仓**(holdings)的加权均价: 老合约全平完、之后又开了新合约时,
+      holdings 里就只剩新合约 → 目标价自然跟着新合约的价格走(用户明确要求的行为)。
+      只有全部平完(holdings 空)才退回开仓记录, 免得点进一条已平的记录时这块是空白。
+    返回 [{contract, call_put, qty, price, mult, premium_per_lot, cost, targets:[...]}] 或 []
+    """
+    if mode != "options":
+        return []
+    src = list(holdings or [])
+    if not src:
+        # 全平完 → 退回开仓记录(等价于「这些合约当时若还拿着」的目标价)
+        src = _holdings_from_items(underlying, list(opens or []))
+    out = []
+    for h in src:
+        qty = h.get("qty") or 0
+        price = h.get("open_price") or 0          # 期权口径: 开仓均价 = 行情报价(不含乘数)
+        if qty <= 0 or price <= 0:
+            continue
+        prod = fee_product(underlying, h.get("contract"))
+        mult = _option_mult(prod) if prod else 1.0
+        per_lot = round(price * mult, 6)           # 每手权利金 = 报价 × 乘数
+        cost = round(per_lot * qty, 2)
+        targets = []
+        for n in OPTIONS_TP_MULTIPLES:
+            pl = round(per_lot * n, 2)
+            value = round(pl * qty, 2)
+            targets.append({
+                "n": n,
+                "price_unit": round(price * n, 4),
+                "premium_per_lot": pl,
+                "value": value,
+                "profit": round(value - cost, 2),
+            })
+        out.append({
+            "contract": h.get("contract") or "",
+            "call_put": (h.get("call_put") or "").strip().upper(),
+            "qty": qty,
+            "price": round(price, 6),
+            "mult": mult,
+            "premium_per_lot": per_lot,
+            "cost": cost,
+            "targets": targets,
+        })
+    return out
+
+
 def _dual_targets(underlying, mode, holdings, opens):
     """期权双买(v50.63): 算 2/3/4/5 倍权利金的止盈目标价 —— 详情页「持仓汇总」上方要用.
 
@@ -3671,6 +3720,8 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             "net_pnl": round(total_pnl - fee_total, 2),
             # v50.63: 双买止盈价测算(详情页持仓汇总上方展示) —— 前端不再自己算
             "dual_targets": _dual_targets(underlying, mode, holdings, opens),
+            # v50.85: 期权买方(单腿)止盈目标价 —— 按**当前持仓**的期权价格现算 2/4/8/16 倍
+            "tp_targets": _options_tp_targets(underlying, mode, holdings, opens),
             "holdings": holdings, "operations": ops}
 
 
@@ -4905,6 +4956,10 @@ select{cursor:pointer;appearance:none;
 .dual-target-tbl td.gold{color:var(--gold);font-weight:700}
 .dual-target-tbl td.good{color:var(--good);font-weight:700}
 .dual-target-tbl td.bad{color:var(--bad);font-weight:700}
+/* v50.85: 单腿止盈表的「合约小标题」行(一个批次里可能同时持有多个合约) */
+.dual-target-tbl tr.tp-sep td{background:rgba(122,86,190,.09);color:var(--sub);font-size:var(--fz-small);
+  text-align:left;font-weight:600;padding:7px 13px}
+[data-theme="light"] .dual-target-tbl tr.tp-sep td{background:rgba(60,90,60,.06)}
 /* 期权买方的「加入记录」一行 */
 .opt-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
 .plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
@@ -6097,6 +6152,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="fut-only" id="tdCalcCard" style="margin:0 0 12px"></div>
             <!-- v50.63: 期权双买止盈价测算(持仓汇总上方) -->
             <div class="dual-only" id="tdDualTargets" style="margin:0 0 14px"></div>
+            <!-- v50.85: 期权买方(单腿)止盈目标价 —— 按当前持仓的期权价格现算(持仓汇总上方) -->
+            <div class="opt-only" id="tdTpTargets" style="margin:0 0 14px"></div>
             <h3 style="font-size:13px;margin:6px 0 8px;color:var(--accent2)">当前持仓(按合约汇总, 仅算未平仓部分)</h3>
             <div class="tblwrap">
               <table class="tbl trades-tbl">
@@ -7533,9 +7590,11 @@ async function addOptionsToTradeRecord(){
   if (!d.enough_lots || !(d.max_lots > 0)){ alert('当前测算买不到 1 手（预算不足），无法加入记录'); return; }
   if (!d.contract_code){ alert('请先填「合约年月」与「行权价」，才能拼出合约代码（如 cu2612C80000）'); return; }
   const now = new Date();
+  // ⚠ v50.85: 标的带上合约年月(如 p2701) —— 不带的话主表里不同月份的记录都挤成一条「p」
+  const und = d.code + (d.month || '');
   const payload = {
     mode: 'options',
-    underlying: d.code,
+    underlying: und,
     contract: d.contract_code,
     batch: newBatch(),
     op_type: 'open',
@@ -7562,7 +7621,7 @@ async function addOptionsToTradeRecord(){
       await TradeUI.refresh();
       const tab = document.querySelector('#mainTabs .maintab[data-tab="trades"]');
       if (tab) tab.click();
-      TradeUI.loadDetail(d.code, payload.batch);
+      TradeUI.loadDetail(und, payload.batch);
     }
   } catch(e){ alert('加入记录失败：' + e); }
 }
@@ -8954,6 +9013,54 @@ const TradeUI = {
       + '涨到 Call 目标价就平 call 腿（此时 put 基本归零），跌到 Put 目标价就平 put 腿。</div>';
   },
 
+  /* 期权买方(单腿) v50.85: 止盈目标价位 = 当前期权价格 × 2/4/8/16
+     数据来自后端 trade_detail().tp_targets —— 手动新建 / 计算器加入的记录都按**当前持仓**现算:
+     老合约平完、只拿着新合约时, 目标价自然跟着新合约的价格走 */
+  renderOptTargets(d){
+    const box = $('tdTpTargets');
+    if (!box) return;
+    const gs = d && d.tp_targets;
+    if (this.mode !== 'options' || !gs || !gs.length){ box.innerHTML = ''; return; }
+    const money = v => '¥ ' + Number(v || 0).toLocaleString('en-US',{maximumFractionDigits:2});
+    // 从合约代码开头的字母解析品种 → 取单位(元/吨、元/克…), 与计算器同一口径
+    const unitOf = code => {
+      const m = String(code || '').match(/^([a-zA-Z]+)/);
+      const c = m ? CONTRACTS.find(x => x.code.toLowerCase() === m[1].toLowerCase()) : null;
+      return (c && c.unit) ? String(c.unit).split('/')[0] : '';
+    };
+    const costAll = gs.reduce((s, g) => s + (g.cost || 0), 0);
+    const qtyAll = gs.reduce((s, g) => s + (g.qty || 0), 0);
+    const u0 = unitOf(gs[0].contract);
+    const rows = gs.map(g => {
+      const u = unitOf(g.contract);
+      const uTxt = u ? ('（元/' + u + '）') : '';
+      const cpCls = (g.call_put === 'P') ? 'cp-put' : 'cp-call';
+      const cpTxt = (g.call_put === 'P') ? '看跌 put' : '看涨 call';
+      return '<tr class="tp-sep"><td colspan="5">' + escHtml(g.contract) + ' · ' + cpTxt
+        + ' · ' + g.qty + ' 手 · 当前 ¥' + fmt(g.price) + uTxt + '（每手 ' + money(g.premium_per_lot) + '）</td></tr>'
+        + g.targets.map(x =>
+            '<tr><td class="dt-n"><b>' + x.n + '×</b></td>'
+            + '<td class="big ' + cpCls + '"><span class="dt-px">¥' + fmt(x.price_unit) + '</span>'
+            + '<span class="dt-mult">' + x.n + '×</span></td>'
+            + '<td>' + money(x.premium_per_lot) + '</td>'
+            + '<td class="gold">' + money(x.value) + '</td>'
+            + '<td class="' + (x.profit >= 0 ? 'good' : 'bad') + '">'
+            + (x.profit >= 0 ? '+' : '−') + money(Math.abs(x.profit)) + '</td></tr>'
+          ).join('');
+    }).join('');
+    box.innerHTML =
+      '<div class="dt-head">'
+      + '<span class="dt-ico">🎯</span>'
+      + '<span class="dt-title">期权止盈目标价位<small>期权价格涨到 N 倍（＝当前期权价格 × N）时的价位与持仓价值</small></span>'
+      + '<span class="dt-sum">权利金成本 <b>' + money(costAll) + '</b> · ' + qtyAll + ' 手</span></div>'
+      + '<table class="dual-target-tbl"><thead><tr>'
+      + '<th>目标</th><th class="' + (gs[0].call_put === 'P' ? 'cp-put' : 'cp-call') + '">期权价格目标'
+      + (u0 ? '（元/' + u0 + '）' : '') + '</th>'
+      + '<th>每手权利金</th><th>合计价值</th><th>浮盈</th></tr></thead><tbody>' + rows + '</tbody></table>'
+      + '<div class="tip">按<b>当前剩余持仓</b>的期权价格现算（每手权利金 = 期权价格 × 合约乘数）；'
+      + '合约换月 / 新开合约后，这里会自动跟着新合约的价格走。目标价位可直接照着盘面挂单。</div>';
+  },
+
   /* 期货: 详情顶部展示来自开仓计算器的测算结果(取最早一条带快照的开仓记录) */
   renderCalcCard(d){
     const box = $('tdCalcCard');
@@ -9157,6 +9264,7 @@ const TradeUI = {
     this.renderOps();
     this.renderCalcCard(d);        // 期货: 顶部测算结果卡
     this.renderDualTargets(d);     // v50.63: 双买: 持仓汇总上方的止盈价测算
+    this.renderOptTargets(d);      // v50.85: 期权买方: 持仓汇总上方的止盈目标价位
     this.loadReviews();            // 底部复盘笔记(两个模式都有)
   },
 
