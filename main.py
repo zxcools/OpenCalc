@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5085            # 与 README 版本号 v50.85 对齐(数值比较用于单实例接管)
+APP_VERSION = 5086            # 与 README 版本号 v50.86 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -3234,15 +3234,19 @@ def trade_groups(strategy=None, mode="options", fee_mode=FEE_MODE_DEFAULT):
         last_close_time = (_cs[-1].get("close_time") or "") if _cs else ""
         # 方向: 主方向=持仓最多的合约的方向; 无持仓取最近开仓的方向
         direction = ""
+        call_put = ""     # v50.86: 看涨/看跌(期权买方主表在标的后面显示 多/空)
         if has_open_position:
             for c_key, st in by_c.items():
                 if (st["opened"] - st["closed"]) > 0:
                     rec = next((x for x in opens if _k(x["contract"]) == c_key), None)
                     if rec:
                         direction = rec["direction"]
+                        call_put = (rec.get("call_put") or "").strip().upper()
                         break
         if not direction and opens:
             direction = opens[-1]["direction"]
+        if not call_put and opens:
+            call_put = (opens[-1].get("call_put") or "").strip().upper()
         if not has_open_position and opens:
             close_status = "已平仓"
         elif has_open_position and total_pnl != 0:
@@ -3254,6 +3258,7 @@ def trade_groups(strategy=None, mode="options", fee_mode=FEE_MODE_DEFAULT):
             "underlying": u,
             "batch": batch,
             "direction": direction,
+            "call_put": call_put,
             "open_date": first_open,
             "open_time": first_open_time,
             "close_status": close_status,
@@ -5387,6 +5392,13 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 #tradesArea .rung .rq{font-size:var(--fz-rungq)}
 #tradesArea .rung .rp{font-size:var(--fz-micro)}
 /* v50.47: 同品种多条记录时, 标的下面的合约小字(区分用) */
+/* v50.86: 期权买方主表「开仓标的」后面的方向徽章 —— 买 call=多(红) / 买 put=空(青) */
+#tradesArea .trades-tbl .u-dir{font-size:var(--fz-micro);font-weight:700;margin-left:5px;
+  padding:1px 7px;border-radius:6px;border:1px solid transparent;white-space:nowrap}
+#tradesArea .trades-tbl .u-dir.long{color:#ff6b6b;background:rgba(255,107,107,.14);border-color:rgba(255,107,107,.32)}
+#tradesArea .trades-tbl .u-dir.short{color:#46d6ea;background:rgba(70,214,234,.13);border-color:rgba(70,214,234,.32)}
+[data-theme="light"] #tradesArea .trades-tbl .u-dir.long{color:#e05252;background:rgba(224,82,82,.12);border-color:rgba(224,82,82,.3)}
+[data-theme="light"] #tradesArea .trades-tbl .u-dir.short{color:#0e9fc8;background:rgba(14,159,200,.11);border-color:rgba(14,159,200,.3)}
 #tradesArea .trades-tbl .u-sub{font-size:var(--fz-micro);color:var(--sub);font-weight:400;
   margin-top:2px;font-family:Consolas,monospace;opacity:.85}
 /* v50.82: 开仓标的列限宽 + 合约换行 —— 双买那种一长串合约(3 个 P-100000 之类)会把这一列
@@ -8597,6 +8609,26 @@ const TradeUI = {
       avg: closed.length ? realized / closed.length : null,
       maxWin: wins.length ? Math.max(...wins.map(pnlOf)) : 0,
       maxLoss: losses.length ? Math.min(...losses.map(pnlOf)) : 0,
+      /* v50.86: 夏普比率 = 平均每笔盈亏 ÷ 每笔盈亏标准差(样本标准差, n−1)
+         ⚠ 记录级数据只有「每笔一笔」的盈亏, 没有连续的净值序列 → 只能算**每笔口径**,
+           不做年化(样本少时年化会放大成离谱的数字, 反而误导)。
+         样本 <2 笔 或 所有盈亏完全一样(标准差 0) → null(卡片显示 —) */
+      sharpe: (() => {
+        const xs = closed.map(pnlOf);
+        const n = xs.length;
+        if (n < 2) return null;
+        const m = xs.reduce((a, b) => a + b, 0) / n;
+        const sd = Math.sqrt(xs.reduce((a, b) => a + (b - m) * (b - m), 0) / (n - 1));
+        return sd > 1e-9 ? m / sd : null;
+      })(),
+      avgPnl: closed.length ? realized / closed.length : null,
+      sdPnl: (() => {
+        const xs = closed.map(pnlOf);
+        const n = xs.length;
+        if (n < 2) return null;
+        const m = xs.reduce((a, b) => a + b, 0) / n;
+        return Math.sqrt(xs.reduce((a, b) => a + (b - m) * (b - m), 0) / (n - 1));
+      })(),
     };
   },
   /* 「只展示未平仓」按钮外观的选中态(v50.55): 原生 checkbox 已隐藏, 用 label 上的 .on 表示选中 */
@@ -8702,9 +8734,19 @@ const TradeUI = {
                 + '\n净：盈利 ' + num(s.netWin) + ' / 亏损 ' + num(Math.abs(s.netLoss))
                 + (s.feeUnknown ? '\n⚠ 有 ' + s.feeUnknown + ' 条的费率表未收录，手续费按 0 计' : ''))
              : '暂无已平仓记录')
-      + card(5, '平均盈亏', s.avg == null ? '—' : money(s.avg),
-           s.closedN ? ('最大盈 ' + num(s.maxWin) + ' / 亏 ' + num(Math.abs(s.maxLoss))) : '—',
-           cls(s.avg));
+      /* v50.86: 第 5 卡由「平均盈亏」换成「夏普比率」
+         口径写进 tooltip: 每笔口径(不年化) + 均值/标准差/最大盈亏都列出来, 原信息没丢 */
+      + card(5, '夏普比率',
+           s.sharpe == null ? '—' : s.sharpe.toFixed(2),
+           s.closedN >= 2 ? ('每笔 · ' + s.closedN + ' 笔已平仓') : '需 ≥2 笔已平仓',
+           s.sharpe == null ? '' : cls(s.sharpe),
+           s.closedN >= 2
+             ? ('夏普比率 = 平均每笔盈亏 ÷ 每笔盈亏标准差（样本 n−1，按平仓盈亏未扣手续费）\n'
+                + '平均每笔 ' + num(s.avgPnl) + ' · 标准差 ' + num(s.sdPnl || 0)
+                + ' · 最大盈 ' + num(s.maxWin) + ' / 亏 ' + num(Math.abs(s.maxLoss))
+                + '\n⚠ 按**每笔记录**算（不做年化）：记录里只有每笔盈亏、没有连续净值序列，年化会失真。\n'
+                + '样本少时波动很大，仅供横向参考。\n' + scopeTip)
+             : ('共 ' + s.closedN + ' 笔已平仓，不足 2 笔算不出标准差。\n' + scopeTip));
   },
 
   /* v50.78: 未平仓头寸风险汇总 —— 一把看清「现在压着多少钱、最坏亏多少」
@@ -8872,9 +8914,26 @@ const TradeUI = {
         : '';
       // v50.60: 期权双买 → 标的列带上合约年月(如 lc 2611), 一眼看清是哪个到期月
       const dualM = this.dualMonthOf(g);
-      const nameTxt = this.underlyingText(g.underlying) + (dualM ? ' ' + dualM : '');
+      const nameRaw = this.underlyingText(g.underlying) + (dualM ? ' ' + dualM : '');
+      /* v50.86: 期权买方在「开仓标的」后面带方向 —— 买 call = 多(红) / 买 put = 空(青)。
+         ⚠ 老记录把 多/空 直接写进了标的(如 fu2612多) → 展示时剥掉这一段, 统一改成徽章。
+           但**只在写法与 call_put 一致时才剥**: 不一致的记录(如标的写「空」而合约是 C)
+           保持原样 + 徽章按合约走, 并在悬停里提示核对 —— 不静默改掉用户自己写的东西 */
+      const cpTxt = (this.mode === 'options' && g.call_put === 'C') ? '多'
+                  : ((this.mode === 'options' && g.call_put === 'P') ? '空' : '');
+      const cpCls = cpTxt === '空' ? 'short' : 'long';
+      const tailM = nameRaw.match(/(空头|空|多头|多)$/);
+      const nameTail = tailM ? tailM[1] : '';
+      const mismatch = !!(nameTail && cpTxt && nameTail.charAt(0) !== cpTxt);
+      const nameTxt = (nameTail && cpTxt && !mismatch)
+        ? nameRaw.slice(0, nameRaw.length - nameTail.length) : nameRaw;
+      const cpBadge = cpTxt ? (' <span class="u-dir ' + cpCls + '">' + cpTxt + '</span>') : '';
+      const nameTip = mismatch
+        ? ('⚠ 标的里写着「' + nameTail + '」，但合约是 ' + ((cpTxt === '多') ? '看涨 call' : '看跌 put')
+           + '（' + (con[0] || '—') + '）—— 请核对这条记录的方向')
+        : '';
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
-        <td class="col-name"><b>${escHtml(nameTxt)}</b>${conTxt}</td>
+        <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
         <td>${this.fmtDateTime(g.open_date, g.open_time)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>

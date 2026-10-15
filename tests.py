@@ -1752,6 +1752,35 @@ check("单腿止盈(v50.85): 期货/双买模式不返回该字段",
 for _o in trade_detail(_S85, mode="options", batch='B85a')["operations"]:
     trade_delete(_o["id"])
 
+# ---- v50.86: 主表分组带上「看涨/看跌」—— 期权买方在标的后显示 多(call) / 空(put) ----
+_G86 = "fu2612x86"
+trade_upsert({'mode': 'options', 'underlying': _G86, 'contract': 'fu2612C5200', 'batch': 'B86a',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'C', 'open_date': '2026-10-08',
+              'open_price': 88, 'qty': 3, 'premium': 2640})
+trade_upsert({'mode': 'options', 'underlying': _G86 + 'b', 'contract': 'ao2701P2500', 'batch': 'B86b',
+              'op_type': 'open', 'direction': 'buy', 'call_put': 'P', 'open_date': '2026-10-09',
+              'open_price': 60, 'qty': 2, 'premium': 1200})
+_g86 = {x["underlying"]: x for x in trade_groups(mode="options")
+        if x["underlying"] in (_G86, _G86 + 'b')}
+check("分组方向(v50.86): 买 call 的分组 call_put = C(主表显示「多」)",
+      _g86.get(_G86, {}).get("call_put") == "C", str(_g86.get(_G86, {}).get("call_put")))
+check("分组方向(v50.86): 买 put 的分组 call_put = P(主表显示「空」)",
+      _g86.get(_G86 + 'b', {}).get("call_put") == "P", str(_g86.get(_G86 + 'b', {}).get("call_put")))
+_f86 = next((x for x in trade_groups(mode="futures") if x["underlying"] == "rb"), None)
+check("分组方向(v50.86): 期货分组不带方向字母(空串)",
+      (not _f86) or _f86.get("call_put") == "", str(_f86 and _f86.get("call_put")))
+# 平掉后仍能从最近开仓里取到方向(主表不会因为平仓丢方向)
+trade_upsert({'mode': 'options', 'underlying': _G86, 'contract': 'fu2612C5200', 'batch': 'B86a',
+              'op_type': 'close', 'direction': 'sell', 'close_date': '2026-10-10',
+              'close_qty': 3, 'close_price': 120, 'pnl': 960})
+_g86c = [x for x in trade_groups(mode="options") if x["underlying"] == _G86]
+check("分组方向(v50.86): 全部平掉后方向仍在(取最近开仓)",
+      _g86c and _g86c[0]["call_put"] == "C", str(_g86c and _g86c[0]["call_put"]))
+for _u86 in (_G86, _G86 + 'b'):
+    for _b86 in ('B86a', 'B86b'):
+        for _o in trade_detail(_u86, mode="options", batch=_b86)["operations"]:
+            trade_delete(_o["id"])
+
 # v50.67: 双买开仓价口径修正 —— 老数据把「每手权利金」当成了价格(被乘过期权乘数)
 from main import _migrate_dual_open_price, _option_mult
 check("双买乘数(v50.67): _option_mult 按品种取(烧碱 SH = 30)",

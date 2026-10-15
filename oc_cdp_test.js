@@ -3243,6 +3243,9 @@ async function main() {
       s: (c.querySelector('.ss') || {}).textContent || '',
       cls: (c.querySelector('.sv') || {}).className || ''}));
     const fut = read();
+    // v50.86: 第 5 卡(夏普比率)的 tooltip 必须**在这里**抓 —— 后面还有别的造数会把卡片覆盖掉
+    const shTip = ((document.querySelectorAll('#tradeStats .stat-card')[4] || {})
+      .querySelector('.sv') || {}).getAttribute('title') || '';
     // v50.53: 视口够宽时 5 张卡必须排在同一行(用户要求"能一行就一行")
     const tops = [...document.querySelectorAll('#tradeStats .stat-card')]
       .map(c => Math.round(c.getBoundingClientRect().top));
@@ -3285,7 +3288,7 @@ async function main() {
     const optMode = TradeUI.mode;
     await wipe('futures'); await wipe('options');
     return JSON.stringify({fut, afterFilter, rowsAfterFilter, opt, optMode, oneRow, gridCols,
-                           nut, nutCard, nutTip, nutOff, nutBack,
+                           nut, nutCard, nutTip, nutOff, nutBack, shTip,
                            nutLabel: nutTitle.textContent || ''});
   })()`);
   const stat = JSON.parse(stRun);
@@ -3319,8 +3322,17 @@ async function main() {
         stat.nutOff === '3.46 / 3.46', String(stat.nutOff));
   check('净盈亏比(v50.71): 切回「交易所 + 0.01」→ 净盈亏比重新变小(3.46 / 3.42)',
         stat.nutBack === '3.46 / 3.42', String(stat.nutBack));
-  check('统计卡(v50.53): 平均盈亏 = 4125 / 4 = +CN¥1,031.25',
-        cardOf(stat.fut, '平均盈亏').v === '+CN¥1,031.25', JSON.stringify(cardOf(stat.fut, '平均盈亏')));
+  // ---- v50.86: 第 5 卡「平均盈亏」换成「夏普比率」 ----
+  check('统计卡(v50.86): 第 5 卡换成「夏普比率」= 1031.25 ÷ 1228.76 = 0.84',
+        cardOf(stat.fut, '夏普比率').v === '0.84'
+        && cardOf(stat.fut, '夏普比率').s === '每笔 · 4 笔已平仓',
+        JSON.stringify(cardOf(stat.fut, '夏普比率')));
+  check('统计卡(v50.86): 夏普卡 tooltip 写明口径(每笔/不年化)与均值·标准差·最大盈亏',
+        /平均每笔 1,031\.25/.test(stat.shTip) && /标准差 1,228\.76/.test(stat.shTip)
+        && /最大盈 2,105 \/ 亏 680/.test(stat.shTip) && /不做年化/.test(stat.shTip),
+        stat.shTip);
+  check('统计卡(v50.86): 「平均盈亏」这张卡已经不存在了',
+        cardOf(stat.fut, '平均盈亏').v === undefined, JSON.stringify(stat.fut.map(x => x.k)));
   check('统计卡(v50.53): 不受「只展示未平仓」影响(表格空了卡片不变)',
         stat.rowsAfterFilter === 0 && JSON.stringify(stat.afterFilter) === JSON.stringify(stat.fut),
         'rows=' + stat.rowsAfterFilter + ' after=' + JSON.stringify(stat.afterFilter));
@@ -4749,6 +4761,88 @@ async function main() {
         JSON.stringify(v85.dom));
   check('期权买方(v50.85): 期货模式下这块不显示(display:none)',
         v85.inFutures === 'none', v85.inFutures);
+
+  // ===== v50.86: 期权买方主表「开仓标的」后面带方向(买 call = 多 / 买 put = 空) =====
+  const v86Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const out = {};
+    // 老写法(标的里已经写了 多/空) + 新写法(只有品种+年月)各造一条
+    await post({mode:'options', underlying:'fu2612多', contract:'fu2612C5200', batch:'B86a',
+      op_type:'open', direction:'buy', call_put:'C', open_date:'2026-10-08', open_price:88, qty:3, premium:2640});
+    await post({mode:'options', underlying:'ao2701空', contract:'ao2701P2500', batch:'B86b',
+      op_type:'open', direction:'buy', call_put:'P', open_date:'2026-10-09', open_price:60, qty:2, premium:1200});
+    await post({mode:'options', underlying:'cu2701', contract:'cu2701C90000', batch:'B86c',
+      op_type:'open', direction:'buy', call_put:'C', open_date:'2026-10-10', open_price:55, qty:1, premium:550});
+    // 写法与合约**矛盾**的一条: 标的写「空」但合约是 call → 不许静默改写, 要提示核对
+    await post({mode:'options', underlying:'si2611空', contract:'si2611C9500', batch:'B86d',
+      op_type:'open', direction:'buy', call_put:'C', open_date:'2026-10-11', open_price:70, qty:1, premium:700});
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(700);
+    TradeUI.onlyOpen = false; TradeUI.mainQuery = ''; TradeUI.range = 'all';
+    TradeUI.showAll = true; TradeUI.renderMain(); await w(500);
+    const cellOf = u => {
+      const tr = [...document.querySelectorAll('#tradesTable tbody tr.clickable')]
+        .find(x => x.dataset.u === u);
+      if (!tr) return null;
+      const td = tr.querySelector('td.col-name');
+      const b = td.querySelector('.u-dir');
+      return {name: (td.querySelector('b') || {}).textContent || '',
+              badge: b ? b.textContent : '', cls: b ? b.className : '',
+              color: b ? getComputedStyle(b).color : '',
+              tip: td.getAttribute('title') || '',
+              sub: (td.querySelector('.u-sub') || {}).textContent || ''};
+    };
+    out.callOld = cellOf('fu2612多');     // 老写法 call → 名字剥掉「多」+ 徽章「多」
+    out.putOld = cellOf('ao2701空');      // 老写法 put → 名字剥掉「空」+ 徽章「空」
+    out.callNew = cellOf('cu2701');       // 新写法 → 名字原样 + 徽章「多」
+    out.mismatch = cellOf('si2611空');    // 矛盾 → 名字保持原样 + 徽章按合约(多) + 悬停提示
+    // 期货模式不该冒出这个徽章
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(700);
+    TradeUI.setMode('futures'); await TradeUI.refresh(); await w(600);
+    out.futBadges = document.querySelectorAll('#tradesTable td.col-name .u-dir').length;
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(400);
+    // 清理
+    const g = await (await fetch('/api/trades/groups?mode=options')).json();
+    for (const x of (g.groups || [])){
+      if (['fu2612多', 'ao2701空', 'cu2701', 'si2611空'].indexOf(x.underlying) < 0) continue;
+      const d = await (await fetch('/api/trades/detail?mode=options&underlying='
+        + encodeURIComponent(x.underlying) + '&batch=' + encodeURIComponent(x.batch || ''))).json();
+      for (const op of (d.operations || [])){
+        await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: op.id})});
+      }
+    }
+    TradeUI.showAll = false;
+    out.cleaned = ((await (await fetch('/api/trades/groups?mode=options')).json()).groups || [])
+      .filter(x => ['fu2612多', 'ao2701空', 'cu2701', 'si2611空'].indexOf(x.underlying) >= 0).length === 0;
+    return JSON.stringify(out);
+  })()`);
+  const v86 = JSON.parse(v86Run);
+  check('期权买方(v50.86): 买 call 的记录 → 标的后面的徽章是「多」',
+        v86.callNew && v86.callNew.badge === '多' && /long/.test(v86.callNew.cls)
+        && v86.callNew.name === 'cu2701', JSON.stringify(v86.callNew));
+  check('期权买方(v50.86): 买 put 的记录 → 徽章「空」(青色)',
+        v86.putOld && v86.putOld.badge === '空' && /short/.test(v86.putOld.cls)
+        && v86.putOld.badge !== v86.callNew.badge
+        && v86.putOld.color !== v86.callNew.color,
+        JSON.stringify(v86.putOld));
+  check('期权买方(v50.86): 老记录标的里写着的「多/空」不再重复显示(剥掉后只剩徽章)',
+        v86.callOld && v86.callOld.name === 'fu2612' && v86.callOld.badge === '多'
+        && v86.putOld.name === 'ao2701',
+        JSON.stringify({call: v86.callOld, put: v86.putOld}));
+  check('期权买方(v50.86): 合约小字没被方向徽章挤掉',
+        /fu2612C5200/.test(v86.callOld.sub), v86.callOld.sub);
+  check('期权买方(v50.86): 写法与合约矛盾的记录不被静默改写 —— 名字保持「si2611空」, 徽章按合约给「多」, 悬停提示核对',
+        v86.mismatch && v86.mismatch.name === 'si2611空' && v86.mismatch.badge === '多'
+        && /请核对/.test(v86.mismatch.tip) && /si2611C9500/.test(v86.mismatch.tip),
+        JSON.stringify(v86.mismatch));
+  check('期权买方(v50.86): 写法一致的记录没有这个提示(title 为空)',
+        v86.callOld && v86.callOld.tip === '' && v86.callNew.tip === '',
+        JSON.stringify([v86.callOld && v86.callOld.tip, v86.callNew && v86.callNew.tip]));
+  check('期权买方(v50.86): 期货模式不出现该徽章', v86.futBadges === 0, String(v86.futBadges));
+  check('期权买方(v50.86): 用例清理干净', v86.cleaned === true, String(v86.cleaned));
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
