@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5081            # 与 README 版本号 v50.81 对齐(数值比较用于单实例接管)
+APP_VERSION = 5082            # 与 README 版本号 v50.82 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -5276,6 +5276,21 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* v50.47: 同品种多条记录时, 标的下面的合约小字(区分用) */
 #tradesArea .trades-tbl .u-sub{font-size:var(--fz-micro);color:var(--sub);font-weight:400;
   margin-top:2px;font-family:Consolas,monospace;opacity:.85}
+/* v50.82: 开仓标的列限宽 + 合约换行 —— 双买那种一长串合约(3 个 P-100000 之类)会把这一列
+   撑到 300px+ , 整张表就超出容器、下面冒出横向滚动条。
+   列宽跟随窗口(clamp), 长列表按「每个合约一个整体」换行(不在 lc2701-P-100000 中间断开) */
+#tradesArea .trades-tbl th.col-name,
+#tradesArea .trades-tbl td.col-name{max-width:clamp(120px, 16vw, 240px);white-space:normal;overflow-wrap:anywhere}
+#tradesArea .trades-tbl .u-sub i{display:inline-block;font-style:normal;white-space:nowrap;
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+#tradesArea .trades-tbl .u-sub i:not(:last-child)::after{content:'/';margin:0 4px;opacity:.5}
+/* v50.82: 窄窗口(半屏 / 笔记本)下再收紧一点内边距 —— 8 列 × 8px ≈ 64px,
+   刚好能把「整张表比容器宽一点点 → 下面冒横向滚动条」压掉 */
+@media (max-width:1200px){
+  #tradesArea .trades-tbl th,#tradesArea .trades-tbl td{padding:8px 6px}
+  #tradesArea .trades-tbl th.col-name,
+  #tradesArea .trades-tbl td.col-name{max-width:clamp(110px, 14vw, 200px)}
+}
 #fundsArea .chartbox .legend{font-size:var(--fz-legend)}
 
 /* ===== 开仓计算页 字号放大 (变量驱动) ===== */
@@ -5937,7 +5952,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="tblwrap">
               <table class="tbl trades-tbl" id="tradesTable">
                   <thead><tr>
-            <th class="th-sort" data-sort="underlying" title="点击排序：升序 → 降序 → 恢复默认">开仓标的</th>
+            <th class="th-sort col-name" data-sort="underlying" title="点击排序：升序 → 降序 → 恢复默认">开仓标的</th>
             <th class="th-sort" data-sort="direction" title="点击排序：升序 → 降序 → 恢复默认">方向</th>
             <th class="th-sort" data-sort="open_date" title="点击排序：升序 → 降序 → 恢复默认">开仓时间</th>
             <th class="th-sort" data-sort="close_status" title="点击排序：升序 → 降序 → 恢复默认">是否平仓</th>
@@ -8470,13 +8485,16 @@ const TradeUI = {
       const netCls = net > 0 ? 'pos' : (net < 0 ? 'neg' : '');
       const fee = g.fee_total || 0;
       // v50.47: 同品种会有多条(不同批次) → 标的下面补一行合约小字, 否则两行长得一模一样分不清
+      // v50.82: 每个合约单独一个 inline-block(整体换行, 不在合约号中间断开); 分隔符走 CSS
       const con = (g.contracts || []).filter(Boolean);
-      const conTxt = con.length ? ('<div class="u-sub">' + escHtml(con.join(' / ')) + '</div>') : '';
+      const conTxt = con.length
+        ? ('<div class="u-sub">' + con.map(x => '<i>' + escHtml(x) + '</i>').join('') + '</div>')
+        : '';
       // v50.60: 期权双买 → 标的列带上合约年月(如 lc 2611), 一眼看清是哪个到期月
       const dualM = this.dualMonthOf(g);
       const nameTxt = this.underlyingText(g.underlying) + (dualM ? ' ' + dualM : '');
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
-        <td><b>${escHtml(nameTxt)}</b>${conTxt}</td>
+        <td class="col-name"><b>${escHtml(nameTxt)}</b>${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
         <td>${this.fmtDateTime(g.open_date, g.open_time)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>

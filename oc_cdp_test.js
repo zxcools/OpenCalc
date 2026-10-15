@@ -4418,6 +4418,84 @@ async function main() {
         && /按 平仓盈亏 降序/.test(v81.titleDesc) && /按开仓时间倒序/.test(v81.titleBack),
         v81.titleAsc + ' | ' + v81.titleDesc + ' | ' + v81.titleBack);
 
+  // ===== v50.82: 「开仓标的」列限宽 + 合约换行(多合约记录不再把表撑出横向滚动条) =====
+  const wide82 = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const U = 'e2ewide82';
+    const cs = ['lc2701-P-114000', 'lc2701-P-100000', 'lc2701-P-92000'];
+    const seeds = [];
+    for (const c of cs) {
+      seeds.push(await post({mode:'futures', underlying: U, contract: c, batch: 'Bw82',
+        op_type:'open', direction:'buy', open_date:'2026-10-10', open_time:'10:00',
+        open_price: 8000, qty: 2, premium: 0}));
+    }
+    // 字号档位会影响列宽 → 固定成中号, 保证测量可复现
+    document.body.classList.remove('fz-sm', 'fz-lg');
+    document.body.classList.add('fz-md');
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(1400);
+    TradeUI.onlyOpen = false; TradeUI.mainQuery = ''; TradeUI.range = 'all';
+    TradeUI.showAll = true; TradeUI.renderMain(); await w(400);
+    return JSON.stringify({ seeded: seeds.filter(s => s.ok).length });
+  })()`);
+  const w82 = JSON.parse(wide82);
+  check('表宽(v50.82): 3 个长合约名的记录造好了', w82.seeded === 3, wide82);
+
+  // 窄窗口(≈半屏 1080)下量: 表格不许比容器宽(否则下面冒横向滚动条)
+  await send(ws, 'Emulation.setDeviceMetricsOverride', {width: 1080, height: 1000, deviceScaleFactor: 1, mobile: false});
+  await sleep(700);
+  const narrow82 = await evalJs(ws, `(() => {
+    const tb = document.getElementById('tradesTable');
+    const wrap = tb.closest('.tblwrap');
+    const tr = [...document.querySelectorAll('#tradesTable tbody tr.clickable')]
+      .find(x => x.dataset.u === 'e2ewide82');
+    const td = tr ? tr.querySelector('td.col-name') : null;
+    const sub = td ? td.querySelector('.u-sub') : null;
+    const chip = sub ? sub.querySelector('i') : null;
+    const ccs = chip ? getComputedStyle(chip) : null;
+    return JSON.stringify({
+      view: window.innerWidth, client: wrap.clientWidth, scroll: wrap.scrollWidth,
+      tableW: tb.scrollWidth,
+      nameW: td ? Math.round(td.getBoundingClientRect().width) : -1,
+      subH: sub ? Math.round(sub.getBoundingClientRect().height) : -1,
+      chipH: chip ? chip.offsetHeight : -1,
+      // 换行判定: 每个合约是一个 inline-block, 数它们落在几行上(比 lineHeight 稳 —— 那个是 'normal')
+      chipTops: sub ? [...sub.querySelectorAll('i')].map(i => i.offsetTop) : [],
+      chips: sub ? sub.querySelectorAll('i').length : 0,
+      chipWs: ccs ? ccs.whiteSpace : '', chipDisp: ccs ? ccs.display : '',
+      sep: chip ? (getComputedStyle(chip, '::after').content || '') : '',
+      subTxt: sub ? sub.textContent : '',
+    });
+  })()`);
+  const n82 = JSON.parse(narrow82);
+  await send(ws, 'Emulation.setDeviceMetricsOverride', {width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false});
+  await sleep(400);
+  check('表宽(v50.82): 半屏(1080)下整张表不再超出容器(没有横向滚动条)',
+        n82.scroll <= n82.client + 1, JSON.stringify({view: n82.view, client: n82.client, scroll: n82.scroll}));
+  check('表宽(v50.82): 「开仓标的」列被限宽(不再跟着合约串一起变宽)',
+        n82.nameW > 0 && n82.nameW <= 260, 'nameW=' + n82.nameW);
+  check('表宽(v50.82): 多合约换行显示(而不是挤成一行把表撑宽)',
+        n82.chips === 3 && new Set(n82.chipTops).size >= 2 && n82.subH > n82.chipH + 2,
+        JSON.stringify({chips: n82.chips, rows: new Set(n82.chipTops).size, subH: n82.subH, chipH: n82.chipH}));
+  check('表宽(v50.82): 换行只发生在合约之间(单个合约号不折断)',
+        n82.chipWs === 'nowrap' && n82.chipDisp === 'inline-block' && n82.sep.indexOf('/') >= 0,
+        JSON.stringify({ws: n82.chipWs, disp: n82.chipDisp, sep: n82.sep}));
+  check('表宽(v50.82): 三个合约号都完整显示(没有被截断/丢字)',
+        ['lc2701-P-114000', 'lc2701-P-100000', 'lc2701-P-92000'].every(c => n82.subTxt.indexOf(c) >= 0),
+        n82.subTxt);
+  // 清理(顺手把 showAll 还原, 不影响后面用例)
+  await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const d = await (await fetch('/api/trades/detail?underlying=e2ewide82&mode=futures&batch=Bw82')).json();
+    for (const op of (d.operations || [])) {
+      await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: op.id})});
+    }
+    TradeUI.showAll = false; TradeUI.renderMain(); await w(200);
+    return 'ok';
+  })()`);
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
