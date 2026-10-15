@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5086            # 与 README 版本号 v50.86 对齐(数值比较用于单实例接管)
+APP_VERSION = 5087            # 与 README 版本号 v50.87 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -8629,6 +8629,26 @@ const TradeUI = {
         const m = xs.reduce((a, b) => a + b, 0) / n;
         return Math.sqrt(xs.reduce((a, b) => a + (b - m) * (b - m), 0) / (n - 1));
       })(),
+      /* v50.87: 年化夏普 = 每笔夏普 × √(每年笔数) —— 这才是通常跟基金/策略对比的「年化夏普」
+         每年笔数 = 已平仓笔数 ÷ 跨度(年), 跨度 = 这批里最早开仓日 → 最晚平仓日
+         ⚠ 只在「跨度 ≥ 30 天 且 ≥ 5 笔」时给: 笔数太少/时间太短时 √N 会把数字放大到没有意义,
+           那种情况宁可不显示(卡片只报每笔口径) */
+      sharpeAnn: (() => {
+        const xs = closed.map(pnlOf);
+        const n = xs.length;
+        if (n < 5) return null;
+        const m = xs.reduce((a, b) => a + b, 0) / n;
+        const sd = Math.sqrt(xs.reduce((a, b) => a + (b - m) * (b - m), 0) / (n - 1));
+        if (!(sd > 1e-9)) return null;
+        const od = closed.map(g => g.open_date || '').filter(Boolean).sort();
+        const cd = closed.map(g => g.last_close_date || '').filter(Boolean).sort();
+        if (!od.length || !cd.length) return null;
+        const t0 = Date.parse(od[0]), t1 = Date.parse(cd[cd.length - 1]);
+        if (!isFinite(t0) || !isFinite(t1)) return null;
+        const days = (t1 - t0) / 86400000;
+        if (!(days >= 30)) return null;
+        return {v: (m / sd) * Math.sqrt(n / (days / 365)), days, perYear: n / (days / 365)};
+      })(),
     };
   },
   /* 「只展示未平仓」按钮外观的选中态(v50.55): 原生 checkbox 已隐藏, 用 label 上的 .on 表示选中 */
@@ -8735,17 +8755,28 @@ const TradeUI = {
                 + (s.feeUnknown ? '\n⚠ 有 ' + s.feeUnknown + ' 条的费率表未收录，手续费按 0 计' : ''))
              : '暂无已平仓记录')
       /* v50.86: 第 5 卡由「平均盈亏」换成「夏普比率」
-         口径写进 tooltip: 每笔口径(不年化) + 均值/标准差/最大盈亏都列出来, 原信息没丢 */
+         v50.87: 小字里再报「年化」(= 每笔 × √每年笔数), tooltip 把两个口径都讲清楚 ——
+           只有每笔口径会显得偏低(它不按时间换算), 用户对比基金口径时容易以为算错了 */
       + card(5, '夏普比率',
            s.sharpe == null ? '—' : s.sharpe.toFixed(2),
-           s.closedN >= 2 ? ('每笔 · ' + s.closedN + ' 笔已平仓') : '需 ≥2 笔已平仓',
+           s.closedN >= 2
+             ? ('每笔 · ' + s.closedN + ' 笔已平仓'
+                + (s.sharpeAnn ? (' · 年化 ' + s.sharpeAnn.v.toFixed(2)) : ''))
+             : '需 ≥2 笔已平仓',
            s.sharpe == null ? '' : cls(s.sharpe),
            s.closedN >= 2
-             ? ('夏普比率 = 平均每笔盈亏 ÷ 每笔盈亏标准差（样本 n−1，按平仓盈亏未扣手续费）\n'
+             ? ('夏普比率 = 平均每笔盈亏 ÷ 每笔盈亏标准差（样本 n−1，按平仓盈亏、未扣手续费）\n'
                 + '平均每笔 ' + num(s.avgPnl) + ' · 标准差 ' + num(s.sdPnl || 0)
-                + ' · 最大盈 ' + num(s.maxWin) + ' / 亏 ' + num(Math.abs(s.maxLoss))
-                + '\n⚠ 按**每笔记录**算（不做年化）：记录里只有每笔盈亏、没有连续净值序列，年化会失真。\n'
-                + '样本少时波动很大，仅供横向参考。\n' + scopeTip)
+                + ' · 最大盈 ' + num(s.maxWin) + ' / 亏 ' + num(Math.abs(s.maxLoss)) + '\n'
+                + '每笔口径 ' + (s.sharpe == null ? '—' : s.sharpe.toFixed(2))
+                + '：平均每笔赚的钱 ≈ 每笔盈亏波动的 ' + (s.sharpe == null ? '—' : s.sharpe.toFixed(2))
+                + ' 倍 —— 不按时间换算，所以看着偏小是正常的\n'
+                + (s.sharpeAnn
+                    ? ('年化口径 ' + s.sharpeAnn.v.toFixed(2) + '：每笔 ' + s.sharpe.toFixed(2) + ' × √(每年 '
+                       + s.sharpeAnn.perYear.toFixed(1) + ' 笔)，跨度 ' + Math.round(s.sharpeAnn.days)
+                       + ' 天 —— 这才是通常跟基金/策略对比的「年化夏普」\n')
+                    : '年化口径：已平仓不足 5 笔或跨度不足 30 天，暂不年化（样本太小时 √N 会放大到失真）\n')
+                + '⚠ 笔数少 / 交易集中在几天时会高估，仅供横向参考。\n' + scopeTip)
              : ('共 ' + s.closedN + ' 笔已平仓，不足 2 笔算不出标准差。\n' + scopeTip));
   },
 

@@ -3327,10 +3327,14 @@ async function main() {
         cardOf(stat.fut, '夏普比率').v === '0.84'
         && cardOf(stat.fut, '夏普比率').s === '每笔 · 4 笔已平仓',
         JSON.stringify(cardOf(stat.fut, '夏普比率')));
-  check('统计卡(v50.86): 夏普卡 tooltip 写明口径(每笔/不年化)与均值·标准差·最大盈亏',
+  check('统计卡(v50.86): 夏普卡 tooltip 写明口径与均值·标准差·最大盈亏',
         /平均每笔 1,031\.25/.test(stat.shTip) && /标准差 1,228\.76/.test(stat.shTip)
-        && /最大盈 2,105 \/ 亏 680/.test(stat.shTip) && /不做年化/.test(stat.shTip),
+        && /最大盈 2,105 \/ 亏 680/.test(stat.shTip) && /每笔口径 0\.84/.test(stat.shTip),
         stat.shTip);
+  check('统计卡(v50.87): 只有 4 笔(不足 5) → 不年化, tooltip 说明原因',
+        /年化口径：已平仓不足 5 笔/.test(stat.shTip)
+        && cardOf(stat.fut, '夏普比率').s.indexOf('年化') < 0,
+        cardOf(stat.fut, '夏普比率').s);
   check('统计卡(v50.86): 「平均盈亏」这张卡已经不存在了',
         cardOf(stat.fut, '平均盈亏').v === undefined, JSON.stringify(stat.fut.map(x => x.k)));
   check('统计卡(v50.53): 不受「只展示未平仓」影响(表格空了卡片不变)',
@@ -4843,6 +4847,65 @@ async function main() {
         JSON.stringify([v86.callOld && v86.callOld.tip, v86.callNew && v86.callNew.tip]));
   check('期权买方(v50.86): 期货模式不出现该徽章', v86.futBadges === 0, String(v86.futBadges));
   check('期权买方(v50.86): 用例清理干净', v86.cleaned === true, String(v86.cleaned));
+
+  // ===== v50.87: 夏普卡补「年化」口径(≥5 笔且跨度 ≥30 天) =====
+  const v87Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const day = n => new Date(Date.UTC(2026, 0, 5 + n)).toISOString().slice(0, 10);
+    const cases = [['e2esh01', 1000, 0], ['e2esh02', 800, 12], ['e2esh03', 1200, 24],
+                   ['e2esh04', -400, 36], ['e2esh05', 900, 48], ['e2esh06', 1500, 60]];
+    for (const [u, pnl, off] of cases){
+      await post({underlying:u, contract:u+'2611', op_type:'open', direction:'buy',
+                  open_date:day(off), open_price:100, qty:1, premium:0, mode:'futures'});
+      await post({underlying:u, contract:u+'2611', op_type:'close', direction:'sell',
+                  close_date:day(off+5), close_qty:1, close_price:200, pnl:pnl, mode:'futures'});
+    }
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(1200);
+    TradeUI.setMode('futures'); await TradeUI.refresh(); await w(800);
+    TradeUI.onlyOpen = false; TradeUI.mainQuery = ''; TradeUI.range = 'all';
+    TradeUI.renderMain(); await w(500);
+    const c5 = document.querySelectorAll('#tradeStats .stat-card')[4];
+    const out = {val: (c5.querySelector('.sv') || {}).textContent || '',
+                 sub: (c5.querySelector('.ss') || {}).textContent || '',
+                 tip: (c5.querySelector('.sv') || {}).getAttribute('title') || ''};
+    // 独立重算: 用页面自己的 groups 数据(不依赖 calcStats 的实现)算一遍每笔/年化
+    const closed = (TradeUI.groups || []).filter(g => (g.total_pnl || 0) !== 0);
+    const xs = closed.map(g => g.total_pnl);
+    const n = xs.length, m = xs.reduce((a, b) => a + b, 0) / n;
+    const sd = Math.sqrt(xs.reduce((a, b) => a + (b - m) * (b - m), 0) / (n - 1));
+    const per = m / sd;
+    const od = closed.map(g => g.open_date || '').filter(Boolean).sort();
+    const cd = closed.map(g => g.last_close_date || '').filter(Boolean).sort();
+    const days = (Date.parse(cd[cd.length - 1]) - Date.parse(od[0])) / 86400000;
+    out.exp = {per: per.toFixed(2), ann: (per * Math.sqrt(n / (days / 365))).toFixed(2),
+               n: n, days: Math.round(days)};
+    // 清理
+    const g = await (await fetch('/api/trades/groups?mode=futures&fee=ex')).json();
+    for (const x of (g.groups || [])){
+      if (String(x.underlying).indexOf('e2esh') !== 0) continue;
+      const d = await (await fetch('/api/trades/detail?mode=futures&underlying=' + x.underlying
+        + '&batch=' + encodeURIComponent(x.batch || ''))).json();
+      for (const op of (d.operations || [])){
+        await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: op.id})});
+      }
+    }
+    out.cleaned = ((await (await fetch('/api/trades/groups?mode=futures&fee=ex')).json()).groups || [])
+      .filter(x => String(x.underlying).indexOf('e2esh') === 0).length === 0;
+    return JSON.stringify(out);
+  })()`);
+  const v87 = JSON.parse(v87Run);
+  check('夏普年化(v50.87): 每笔口径与页面对得上(独立重算 ' + v87.exp.per + ')',
+        v87.val === v87.exp.per, v87.val + ' vs ' + v87.exp.per);
+  check('夏普年化(v50.87): ≥5 笔且跨度 ≥30 天时, 小字报出「年化」且数值 = 每笔 × √(每年笔数)',
+        /年化/.test(v87.sub) && v87.sub.indexOf(v87.exp.ann) >= 0,
+        JSON.stringify({sub: v87.sub, exp: v87.exp}));
+  check('夏普年化(v50.87): tooltip 写清两个口径的算法与跨度',
+        /年化口径/.test(v87.tip) && /跨度/.test(v87.tip) && /每年/.test(v87.tip),
+        v87.tip.slice(0, 120));
+  check('夏普年化(v50.87): 用例清理干净', v87.cleaned === true, String(v87.cleaned));
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
