@@ -33,12 +33,13 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5082            # 与 README 版本号 v50.82 对齐(数值比较用于单实例接管)
+APP_VERSION = 5083            # 与 README 版本号 v50.83 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
-FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
-FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
-OPTIONS_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期权风险额度可选档位(%)
-OPTIONS_RISK_RATIO = 0.03    # 期权默认开仓金额比例 3% (可选项 0.5/1/1.5/2/3, 默认 3%)
+FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
+# 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
+FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期货风险额度可选档位(%)
+OPTIONS_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期权风险额度可选档位(%)
+OPTIONS_RISK_RATIO = 0.03    # 期权默认开仓金额比例 3% (可选项 0.5/1/1.5/2/3/4/5, 默认 3%)
 MIN_PROFIT_LOSS_RATIO = 1.5  # 盈亏比阈值
 
 # 行情相关
@@ -758,8 +759,12 @@ def calc_futures(params):
 def calc_options(params):
     """
     期权模式计算 (买入开仓)
-    params: equity(总权益), code(标的), entry(开仓价/权利金)
-    开仓额度 = 权益 × risk_percent% (默认 3%, 可选项 0.5/1/1.5/2/3)
+    params: equity(总权益), code(标的), entry(开仓价 = **期权报价**, 如 元/吨)
+    开仓额度 = 权益 × risk_percent% (默认 3%, 可选项 0.5/1/1.5/2/3/4/5)
+    ⚠ 口径(v50.83): entry 是行情里的**期权报价**(单吨/单点价, 不含乘数),
+      每手权利金 = 报价 × 合约乘数 —— 与「交易记录·期权买方」弹窗、期权双买两腿同口径。
+      以前把 entry 当成「1 手价格(已含乘数)」, 于是棕榈油 p 报价 72 被当成每手 72,
+      手数 = 预算 ÷ 72 多算了 10 倍(p 的乘数是 10)。
     返回: dict
     """
     equity = _num(params.get("equity"), "总权益")
@@ -783,7 +788,9 @@ def calc_options(params):
         risk_ratio = OPTIONS_RISK_RATIO
 
     budget = equity * risk_ratio
-    premium_per_lot = entry                   # 每手权利金 = 用户输入的开仓价(已含合约乘数, 即1手价格)
+    # 每手权利金 = 期权报价 × 合约乘数
+    #   ⚠ round(...,6): 抹掉浮点毛刺(报价 × 乘数 可能得 1000.0000000000001 → 手数白少 1 手)
+    premium_per_lot = round(entry * (opt_mult or 1), 6)
     max_lots = int(budget // premium_per_lot)  # 最大手数
     funds_used = max_lots * premium_per_lot    # 占用资金
 
@@ -797,7 +804,8 @@ def calc_options(params):
         "risk_ratio": risk_ratio,
         "risk_percent": risk_ratio * 100,
         "budget": budget,
-        "premium_per_lot": premium_per_lot,
+        "entry_price": entry,                     # 期权报价(不含乘数)
+        "premium_per_lot": premium_per_lot,       # 每手权利金 = 报价 × 乘数
         "max_lots": max_lots,
         "funds_used": funds_used,
         "enough_lots": max_lots >= 1,
@@ -1995,7 +2003,7 @@ def save_settings(patch):
     # 已写入任一独立权益键 → 完成迁移, 清掉旧版共用键(避免清除后被 legacy 回退覆盖)
     if "futures_default_equity" in patch or "options_default_equity" in patch:
         s.pop("default_equity", None)
-    # 风险额度: 只接受五档合法值(0.5/1/1.5/2/3), 其余只允许清除
+    # 风险额度: 只接受白名单档位(0.5/1/1.5/2/3/4/5, 见 FUTURES/OPTIONS_RISK_OPTIONS), 其余只允许清除
     #   ⚠ 之前任意数字都能存进去(如 999), 虽前端按 <option> 匹配后不会应用, 但配置里留脏值易误导
     for _k, _opts in (("futures_risk_pct", FUTURES_RISK_OPTIONS),
                       ("options_risk_pct", OPTIONS_RISK_OPTIONS)):
@@ -5476,6 +5484,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <option value="1.5">1.5%</option>
           <option value="2">2%</option>
           <option value="3">3%</option>
+          <option value="4">4%</option>
+          <option value="5">5%</option>
         </select>
         <div class="wanhint" id="riskHint" style="color:var(--sub)"></div>
 
@@ -5569,15 +5579,20 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <option value="1.5">1.5%</option>
           <option value="2">2%</option>
           <option value="3" selected>3%</option>
+          <option value="4">4%</option>
+          <option value="5">5%</option>
         </select>
         <div class="wanhint" id="riskHintO" style="color:var(--sub)"></div>
 
-        <label>开仓价 / 每手权利金（1 手价格，已含乘数）</label>
+        <label>开仓价（期权报价，如 元/吨 · 不含乘数）</label>
         <div class="unit-suffix">
           <input id="entryO" type="number" min="0" step="any" inputmode="decimal" placeholder="0.00">
-          <span class="u" id="unitO">元/手</span>
+          <span class="u" id="unitO">元/吨</span>
         </div>
-        <div class="tip">开仓金额 = 权益 × 所选百分比。<b>开仓价 = 1 手期权价格（已含合约乘数）</b>，手数 = 预算 ÷ 每手价格，按权利金全额占用资金。</div>
+        <!-- v50.83: 每手权利金 = 开仓价(报价) × 合约乘数 —— 与「交易记录·期权买方」弹窗、期权双买同一口径 -->
+        <div class="dual-leg-hint" id="entryOHint"></div>
+        <div class="tip">开仓金额 = 权益 × 所选百分比。<b>开仓价填行情里的期权报价</b>（元/吨、元/克 等，<b>不含</b>合约乘数），
+          <b>每手权利金 = 开仓价 × 合约乘数</b>，手数 = 预算 ÷ 每手权利金，按权利金全额占用资金。</div>
       </div>
 
       <!-- ===== 期权双买(v50.59): 同时买入 call 与 put, 两腿 delta 中性 ===== -->
@@ -5609,6 +5624,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               <option value="1.5">1.5%</option>
               <option value="2">2%</option>
               <option value="3" selected>3%</option>
+              <option value="4">4%</option>
+              <option value="5">5%</option>
             </select>
           </div>
         </div>
@@ -5728,14 +5745,15 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="s">手 · 按权利金（=最大亏损）倒推</div>
           </div>
           <div class="bignum anim">
-            <div class="t">每手权利金（=输入开仓价）</div>
+            <div class="t">每手权利金（报价 × 乘数）</div>
             <div class="n" id="rPremiumO" style="font-size:30px">—</div>
-            <div class="s">1 手价格 · 已含乘数</div>
+            <div class="s" id="rPremSubO">1 手价格 · 含合约乘数</div>
           </div>
         </div>
         <div class="details grid2 anim" id="rDetailO" style="margin-top:16px">
           <div class="dcell"><span class="k">开仓标的</span><span class="v" id="rContractO">—</span></div>
           <div class="dcell"><span class="k">期权合约乘数</span><span class="v" id="rMultO">—</span></div>
+          <div class="dcell"><span class="k" title="行情里的期权报价(不含乘数)">开仓价（报价）</span><span class="v" id="rEntryO">—</span></div>
           <div class="dcell"><span class="k" title="权利金 × 手数">占用资金</span><span class="v money gold" id="rFundsO">—</span></div>
         </div>
         <div class="warnbox hidden" id="rWarnO"></div>
@@ -6378,6 +6396,7 @@ function clearPrices(which){
     ['entry','stop','target'].forEach(id=>{ $(id).value=''; });
   } else if (which === 'O'){
     $('entryO').value='';
+    updateEntryOUI();
   } else if (which === 'D'){
     // ⚠ 双买(v50.65): 换品种必须清干净 —— 否则旧品种的行权价/delta/权利金会当成新品种的参数算，
     //   连 IV 一起清是因为 IV 是随记录入库的(留档旧品种的 IV 会污染新品种的复盘)
@@ -6697,7 +6716,7 @@ function pickContract(c, which){
     updateTickHint();
     loadQuote(c.code, 'F');
   } else if(which==='O') {
-    $('unitO').textContent = '元/手';   // 期权开仓价 = 1手价格(已含合约乘数)
+    updateEntryOUI();   // v50.83: 单位跟着品种(元/吨、元/克…), 并刷新「报价 × 乘数 = 每手权利金」提示
     loadQuote(c.code, 'O');
   } else {
     // 期权双买: 取行情做参考; 换品种后乘数变 → 按「期权价格」重算每手权利金
@@ -6871,6 +6890,8 @@ $('exitBtn').addEventListener('click',()=>{
   const el = $(id);
   if (el) el.addEventListener('input',onInput);
 });
+/* 期权买方(v50.83): 报价一改就刷新「报价 × 乘数 = 每手权利金」提示 */
+if ($('entryO')) $('entryO').addEventListener('input', updateEntryOUI);
 /* 双买 delta(v50.62): put 一边输就自动带负号(免得后端报「put delta 必须小于 0」); 失焦统一 4 位小数 */
 [['putDelta', false], ['callDelta', true]].forEach(([id, canBePositive])=>{
   const el = $(id);
@@ -6949,10 +6970,28 @@ function optMultOf(code){
 function dualOptMult(){
   return optMultOf(selCode.D);
 }
-function dualUnitTxt(){
-  const c = CONTRACTS.find(x => String(x.code).toLowerCase() === String(selCode.D || '').toLowerCase());
+/* 报价单位(元/吨 等): which = 'O' 期权买方 / 'D' 双买 */
+function optUnitTxt(which){
+  const code = (which === 'D') ? selCode.D : selCode.O;
+  const c = CONTRACTS.find(x => String(x.code).toLowerCase() === String(code || '').toLowerCase());
   const u = (c && c.unit) ? String(c.unit).split('/')[0] : '';
   return u ? ('元/' + u) : '元';
+}
+function dualUnitTxt(){
+  return optUnitTxt('D');
+}
+/* v50.83: 期权买方 —— 开仓价是「报价」，每手权利金 = 报价 × 乘数。
+   这里把乘数和算式实时写出来，免得再有人把报价当每手价格看 */
+function updateEntryOUI(){
+  const u = optUnitTxt('O');
+  if ($('unitO')) $('unitO').textContent = u;
+  const he = $('entryOHint');
+  if (!he) return;
+  if (!selCode.O){ he.textContent = '选好标的后，这里按报价 × 合约乘数算出每手权利金'; return; }
+  const m = optMultOf(selCode.O);
+  const pv = parseFloat($('entryO').value);
+  he.textContent = '合约乘数 ' + m + ' · ' + (pv > 0 ? fmt(pv) : '—') + ' × ' + m
+    + ' = 每手 ' + (pv > 0 ? '¥' + fmt(pv * m) : '—');
 }
 function premFromPrice(price){
   const v = parseFloat(price), m = dualOptMult();
@@ -7241,7 +7280,7 @@ function calcOptions(){
     return;
   }
   if(!eq || !entry){
-    showEmpty('请完整填写：总权益、开仓价（权利金）');
+    showEmpty('请完整填写：总权益、开仓价（期权报价）');
     return;
   }
   fetchT('/api/calc/options',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -7263,6 +7302,10 @@ function renderO(d){
   $('rPremiumO').textContent = fmtMoney(d.premium_per_lot);
   $('rContractO').textContent = d.contract+'（'+d.code+' · '+d.exchange+'）';
   $('rMultO').textContent = d.opt_mult+' '+d.unit;
+  // v50.83: 开仓价 = 期权报价(不含乘数), 每手权利金 = 报价 × 乘数 —— 两处都写清楚
+  const _u0 = String(d.unit || '吨/手').split('/')[0];
+  if ($('rPremSubO')) $('rPremSubO').textContent = '1 手价格 = 报价 × 乘数 ' + d.opt_mult;
+  if ($('rEntryO')) $('rEntryO').textContent = fmt(d.entry_price) + ' 元/' + _u0;
   $('rFundsO').textContent = fmtMoney(d.funds_used);
   const b = $('rIvBadge');
   b.className = 'badge good';
@@ -7300,6 +7343,9 @@ function showError(msg){
 /* =================================================================
    最近方案 (期货 / 期权各自独立): 保存当前参数, 各最多保留 3 组; 平铺列表, 一键调出
    ================================================================= */
+/* v50.83: 风险额度可选档位 —— 必须与后端 FUTURES_RISK_OPTIONS / OPTIONS_RISK_OPTIONS 一致
+   (加档位时: 后端常量 + 三处 <select> + 这里, 缺一处就是「下拉里有、调出方案时恢复不了」) */
+const RISK_OPTS = [0.5, 1, 1.5, 2, 3, 4, 5];
 const PLAN_KEY = 'oc_futures_plans';
 const PLAN_MAX = 10;
 const PLAN_KEY_O = 'oc_options_plans';   // 期权方案独立存储, 与期货互不挤占
@@ -7499,7 +7545,7 @@ function renderPlans(){
   if (btn) btn.title = isDual
     ? '把当前双买参数（标的/合约年月/两腿行权价·delta·权利金/风险额度/权益）保存为方案，点「调出」一键恢复并重算'
     : (isOpt
-      ? '把当前期权参数（标的/每手权利金/风险额度/权益）保存为方案，点「调出」一键恢复并重算'
+      ? '把当前期权参数（标的/开仓价(期权报价)/风险额度/权益）保存为方案，点「调出」一键恢复并重算'
       : '把当前开仓参数（标的/方向/价格/保证金率/风险额度/权益）保存为方案，点「调出」一键恢复并重算');
   const list = activePlans();
   const maxN = activePlanMax();
@@ -7521,9 +7567,9 @@ function renderPlans(){
       '</div>';
     }
     if (isOpt){
-      return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' 权利金 ' + escHtml(p.entry) + '">' +
+      return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' 报价 ' + escHtml(p.entry) + '">' +
         '<span class="nm">' + escHtml(p.contract) + ' <span class="d long">买</span> ' + escHtml(p.entry) + '</span>' +
-        '<span class="meta">' + escHtml(String(p.code||'').toUpperCase()) + ' · 权利金 ' + escHtml(p.entry) + ' 元/手 · 风险 ' + escHtml(p.riskPct) + '%' +
+        '<span class="meta">' + escHtml(String(p.code||'').toUpperCase()) + ' · 开仓价 ' + escHtml(p.entry) + ' · 风险 ' + escHtml(p.riskPct) + '%' +
         (p.eqWan ? ' · 权益 ' + escHtml(p.eqWan) + '万' : '') + '</span>' +
         '<span class="del" data-del="1" title="删除这条方案">✕</span>' +
         '<span class="go">调出</span>' +
@@ -7582,7 +7628,7 @@ function saveCurrentPlan(){
     const eqWanO = parseFloat($('equity').value);
     const prem = parseFloat($('entryO').value);
     if (!(eqWanO > 0 && prem > 0)){
-      alert('请先完整填写：总权益、开仓价（每手权利金），再保存方案');
+      alert('请先完整填写：总权益、开仓价（期权报价），再保存方案');
       return;
     }
     const co = CONTRACTS.find(x=>x.code.toLowerCase() === String(selCode.O).toLowerCase())
@@ -7636,7 +7682,7 @@ function recallPlan(p){
     pickContract(c, 'O');                                 // 设置单位/行情(内部会触发一次计算)
     $('entryO').value = p.entry;
     const wantO = Number(p.riskPct);
-    if ([0.5, 1, 1.5, 2, 3].indexOf(wantO) >= 0) $('riskAmountO').value = String(wantO);
+    if (RISK_OPTS.indexOf(wantO) >= 0) $('riskAmountO').value = String(wantO);
     if (p.eqWan){                                          // 恢复该方案当时的总权益
       equityByMode.options = p.eqWan;
       $('equity').value = p.eqWan;
@@ -7660,7 +7706,7 @@ function recallPlan(p){
     //   之前 "存 fmtTrim(2位) + 调出 fmtDelta4(4位)" 一来一回把精度丢了(0.3921 → 0.3900)
     updateDualLegUI();
     const wantD = Number(p.riskPct);
-    if ([0.5, 1, 1.5, 2, 3].indexOf(wantD) >= 0) $('riskAmountD').value = String(wantD);
+    if (RISK_OPTS.indexOf(wantD) >= 0) $('riskAmountD').value = String(wantD);
     if (p.eqWan){                                          // 恢复该方案当时的总权益
       equityByMode.dual = p.eqWan;
       $('equity').value = p.eqWan;
@@ -7681,7 +7727,7 @@ function recallPlan(p){
   $('target').value = p.target;
   $('marginRate').value = p.mr;
   const want = Number(p.riskPct);
-  if ([0.5, 1, 1.5, 2, 3].indexOf(want) >= 0) $('riskAmount').value = String(want);
+  if (RISK_OPTS.indexOf(want) >= 0) $('riskAmount').value = String(want);
   $('equity').dispatchEvent(new Event('input'));        // 刷新权益换算提示
   updateTickHint();
   onInput();                                            // 用方案参数重新测算

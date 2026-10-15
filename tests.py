@@ -763,26 +763,38 @@ try:
 except ValueError:
     check("非法价格组合被拒绝(止损>开仓)", True)
 
-print("\n== 期权模式 (开仓价=1手价格已含乘数; 额度统一 权益x3%; 手数 = 预算 / 每手价格) ==")
-o1 = calc_options({"equity": 1000000, "code": "m", "entry": 800})
-check("开仓金额统一=权益x3% = 30000", abs(o1["budget"] - 30000) < 0.01, str(o1["budget"]))
-check("每手权利金 = 输入开仓价(不乘乘数) = 800", abs(o1["premium_per_lot"] - 800) < 0.01, str(o1["premium_per_lot"]))
-check("最大手数 = 30000//800 = 37", o1["max_lots"] == 37, str(o1["max_lots"]))
-check("占用资金 = 37x800 = 29600", abs(o1["funds_used"] - 29600) < 0.01, str(o1["funds_used"]))
-check("enough_lots = True", o1["enough_lots"] is True)
-check("risk_ratio = 3%", abs(o1["risk_ratio"] - 0.03) < 1e-9, str(o1["risk_ratio"]))
+print("\n== 期权模式 (v50.83: 开仓价 = 期权报价; 每手权利金 = 报价 × 乘数; 手数 = 预算 / 每手权利金) ==")
+# 用户实测那组: 棕榈油 p 乘数 10, 报价 72 → 每手 720; 权益 12 万 x 3% = 3600 → 5 手
+_op = calc_options({"equity": 120000, "code": "p", "entry": 72})
+check("开仓金额统一=权益x3% = 3600", abs(_op["budget"] - 3600) < 0.01, str(_op["budget"]))
+check("每手权利金 = 报价 72 × 乘数 10 = 720", abs(_op["premium_per_lot"] - 720) < 1e-9, str(_op["premium_per_lot"]))
+check("最大手数 = 3600//720 = 5", _op["max_lots"] == 5, str(_op["max_lots"]))
+check("占用资金 = 5x720 = 3600", abs(_op["funds_used"] - 3600) < 0.01, str(_op["funds_used"]))
+check("返回开仓价(报价)原值 72", abs(_op["entry_price"] - 72) < 1e-9, str(_op.get("entry_price")))
+check("enough_lots = True", _op["enough_lots"] is True)
+check("risk_ratio = 3%", abs(_op["risk_ratio"] - 0.03) < 1e-9, str(_op["risk_ratio"]))
 
-# 期权不足1手: 权益2万 -> 预算600 < 800
+# 换乘数: 玻璃 fg 乘数 20, 报价 63 → 每手 1260(权益 10 万 x 3% = 3000 → 2 手)
+_ofg = calc_options({"equity": 100000, "code": "fg", "entry": 63})
+check("每手权利金 = 报价 63 × 乘数 20 = 1260", abs(_ofg["premium_per_lot"] - 1260) < 1e-9, str(_ofg["premium_per_lot"]))
+check("最大手数 = 3000//1260 = 2", _ofg["max_lots"] == 2, str(_ofg["max_lots"]))
+
+# 期权不足1手: 权益2万 -> 预算600 < 每手 8000(m 乘数 10)
 o4 = calc_options({"equity": 20000, "code": "m", "entry": 800})
 check("期权不足1手 -> 不开仓", o4["max_lots"] == 0 and o4["enough_lots"] is False, str(o4))
 
-# 自定义期权风险百分比: 1% → 权益100万x1%=10000
+# 自定义期权风险百分比: 1% → 权益100万x1%=10000, 每手 8000(m 报价 800) → 1 手
 o5 = calc_options({"equity": 1000000, "code": "m", "entry": 800, "risk_percent": 1})
 check("期权 risk_percent=1 预算=10000", abs(o5["budget"] - 10000) < 0.01, str(o5["budget"]))
-check("期权 risk_percent=1 手数=10000//800=12", o5["max_lots"] == 12, str(o5["max_lots"]))
+check("期权 risk_percent=1 手数=10000//8000=1", o5["max_lots"] == 1, str(o5["max_lots"]))
 check("期权 risk_percent 字段返回", abs(o5["risk_percent"] - 1.0) < 0.01, str(o5.get("risk_percent")))
-o05 = calc_options({"equity": 1000000, "code": "m", "entry": 800, "risk_percent": 0.5})
-check("期权 0.5% → 5000 → 6手", abs(o05["budget"] - 5000) < 0.01 and o05["max_lots"] == 6, str(o05))
+o05 = calc_options({"equity": 1000000, "code": "m", "entry": 80, "risk_percent": 0.5})   # 每手 800
+check("期权 0.5% → 5000 → 5000//800=6 手", abs(o05["budget"] - 5000) < 0.01 and o05["max_lots"] == 6, str(o05))
+# v50.83 新增档位 4% / 5% 也要能算
+_o4p = calc_options({"equity": 120000, "code": "p", "entry": 72, "risk_percent": 4})
+_o5p = calc_options({"equity": 120000, "code": "p", "entry": 72, "risk_percent": 5})
+check("期权 4% → 预算 4800 → 6 手", abs(_o4p["budget"] - 4800) < 0.01 and _o4p["max_lots"] == 6, str(_o4p["max_lots"]))
+check("期权 5% → 预算 6000 → 8 手", abs(_o5p["budget"] - 6000) < 0.01 and _o5p["max_lots"] == 8, str(_o5p["max_lots"]))
 try:
     calc_options({"equity": 1000000, "code": "m", "entry": 800, "risk_percent": 0})
     check("期权 risk_percent<=0 被拒绝", False)
@@ -1680,9 +1692,12 @@ for _b in ('Bm67a', 'Bm67b', 'Bm67c'):
     for _o in trade_detail(_u, mode="dual" if _b != 'Bm67c' else "options", batch=_b)["operations"]:
         trade_delete(_o["id"])
 
-# 9c. 风险额度只接受五档 (v50.30): 之前 999 也能存进配置
+# 9c. 风险额度只接受白名单档位 (v50.30): 之前 999 也能存进配置; v50.83 白名单加了 4% / 5%
 print("\n== 风险额度设置校验 ==")
-from main import save_settings
+from main import save_settings, FUTURES_RISK_OPTIONS as _FRO, OPTIONS_RISK_OPTIONS as _ORO
+check("风险额度档位常量含 4% / 5%",
+      4.0 in _FRO and 5.0 in _ORO and _FRO == _ORO == [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0],
+      "%s / %s" % (_FRO, _ORO))
 _orig_f = get_settings().get('futures_risk_pct')
 try:
     save_settings({'futures_risk_pct': 999})
@@ -1696,6 +1711,17 @@ except ValueError:
     check("风险额度非数字被拒", True)
 save_settings({'futures_risk_pct': 1.5})
 check("风险额度合法档 1.5 可存", get_settings().get('futures_risk_pct') == 1.5)
+# v50.83: 新增档位也要能存
+save_settings({'futures_risk_pct': 4})
+check("风险额度 4% 可存", get_settings().get('futures_risk_pct') == 4.0)
+save_settings({'options_risk_pct': 5})
+check("期权风险额度 5% 可存", get_settings().get('options_risk_pct') == 5.0)
+save_settings({'options_risk_pct': None})
+try:
+    save_settings({'options_risk_pct': 6})
+    check("风险额度 6% 仍被拒(白名单外)", False, "未拒绝")
+except ValueError:
+    check("风险额度 6% 仍被拒(白名单外)", True)
 save_settings({'futures_risk_pct': _orig_f})   # 还原
 check("风险额度可清除/还原", get_settings().get('futures_risk_pct') == _orig_f)
 

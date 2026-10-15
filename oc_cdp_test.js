@@ -4496,6 +4496,75 @@ async function main() {
     return 'ok';
   })()`);
 
+  // ===== v50.83: 风险额度新增 4% / 5% + 期权买方「每手权利金 = 报价 × 乘数」 =====
+  const v83Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const out = {opts: {}};
+    // ① 三个模式的风险额度下拉都要有 4% / 5%(后端白名单 + 三处 select 一处都不能漏)
+    ['riskAmount', 'riskAmountO', 'riskAmountD'].forEach(id => {
+      out.opts[id] = [...q(id).options].map(o => o.value);
+    });
+    // ② 期权买方: 棕榈油 p 报价 72 × 乘数 10 = 每手 720; 权益 12 万 × 3% = 3600 → 5 手
+    //    (这正是用户报的那组数: 以前把 72 当每手价格 → 算出 50 手)
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(300);
+    setMode('options'); await w(300);
+    pickContract(CONTRACTS.find(x => x.code.toLowerCase() === 'p'), 'O'); await w(300);
+    q('equity').value = '12'; q('equity').dispatchEvent(new Event('input', {bubbles:true}));
+    q('entryO').value = '72'; q('entryO').dispatchEvent(new Event('input', {bubbles:true}));
+    q('riskAmountO').value = '3';
+    onInput(); await w(900);
+    out.unit = q('unitO').textContent;
+    out.hint = q('entryOHint').textContent;
+    out.hintVisible = q('entryOHint').offsetParent !== null;
+    out.prem = q('rPremiumO').textContent;
+    out.lots = q('rLotsO').textContent;
+    out.funds = q('rFundsO').textContent;
+    out.budget = q('rBudgetO').textContent;
+    out.entryCell = q('rEntryO').textContent;
+    out.premSub = q('rPremSubO').textContent;
+    // ③ 换到新增的 5%: 预算 6000 → 8 手
+    q('riskAmountO').value = '5'; onInput(); await w(900);
+    out.budget5 = q('rBudgetO').textContent;
+    out.lots5 = q('rLotsO').textContent;
+    // ④ 双买(后端)也要收 5%
+    const d5 = await (await fetch('/api/calc/dual', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({equity: 120000, code:'fg', month:'2701', risk_percent: 5,
+        call_strike:800, call_delta:0.8291, call_premium:1260,
+        put_strike:800, put_delta:-0.1973, put_premium:150})})).json();
+    out.dual5 = {ok: d5.ok, pct: d5.risk_percent, budget: d5.budget, qc: d5.call && d5.call.qty, qp: d5.put && d5.put.qty};
+    // ⑤ 期货(后端)收 4%
+    const f4 = await (await fetch('/api/calc/futures', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({equity: 1000000, code:'rb', direction:'long', entry: 3200, stop: 3100, target: 3400,
+        risk_percent: 4})})).json();
+    out.fut4 = {ok: f4.ok, pct: f4.risk_percent, budget: f4.budget, lots: f4.max_lots};
+    return JSON.stringify(out);
+  })()`);
+  const v83 = JSON.parse(v83Run);
+  const RISK_ALL = '0.5,1,1.5,2,3,4,5';
+  check('风险额度(v50.83): 期货/期权买方/双买三个下拉都含 4% 与 5%',
+        v83.opts.riskAmount.join(',') === RISK_ALL && v83.opts.riskAmountO.join(',') === RISK_ALL
+        && v83.opts.riskAmountD.join(',') === RISK_ALL, JSON.stringify(v83.opts));
+  check('期权买方(v50.83): 开仓价单位跟着品种(棕榈油 = 元/吨) + 提示写出算式并可见',
+        /元\/吨/.test(v83.unit) && v83.hintVisible === true
+        && /乘数 10/.test(v83.hint) && /72 × 10/.test(v83.hint) && /720/.test(v83.hint),
+        JSON.stringify({unit: v83.unit, hint: v83.hint, vis: v83.hintVisible}));
+  check('期权买方(v50.83): 报价 72 × 乘数 10 = 每手 ¥720(不再是 72)',
+        /720/.test(v83.prem) && !/ ¥ 72$/.test(v83.prem.trim()), v83.prem);
+  check('期权买方(v50.83): 权益 12 万 × 3% = 3600 → 5 手(以前是 50 手)', /3,600/.test(v83.budget)
+        && v83.lots === '5' && /3,600/.test(v83.funds), JSON.stringify({b: v83.budget, lots: v83.lots, f: v83.funds}));
+  check('期权买方(v50.83): 结果里另列「开仓价(报价)72 元/吨」并写明每手 = 报价 × 乘数',
+        /72 元\/吨/.test(v83.entryCell) && /报价 × 乘数 10/.test(v83.premSub),
+        v83.entryCell + ' | ' + v83.premSub);
+  check('风险额度(v50.83): 期权买方选 5% → 预算 6000 → 8 手',
+        /6,000/.test(v83.budget5) && v83.lots5 === '8', v83.budget5 + ' / ' + v83.lots5);
+  check('风险额度(v50.83): /api/calc/dual 收 5%(预算 120000x5% = 6000)',
+        v83.dual5.ok === true && v83.dual5.pct === 5 && Math.abs(v83.dual5.budget - 6000) < 0.01,
+        JSON.stringify(v83.dual5));
+  check('风险额度(v50.83): /api/calc/futures 收 4%(预算 1000000x4% = 40000)',
+        v83.fut4.ok === true && v83.fut4.pct === 4 && Math.abs(v83.fut4.budget - 40000) < 0.01,
+        JSON.stringify(v83.fut4));
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
