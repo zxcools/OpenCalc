@@ -4271,6 +4271,153 @@ async function main() {
         v80.copyFallback.ret === false && v80.copyFallback.after === v80.copyFallback.before,
         JSON.stringify(v80.copyFallback));
 
+  // ===== v50.81: 双买手数按 delta 中性优先 + 主表表头排序(三态) =====
+  const v81Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const del = id => fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify({id})}).then(r=>r.json());
+    const out = {};
+    const set = (id, v, e) => { const el = document.getElementById(id);
+      el.value = v; el.dispatchEvent(new Event(e || 'input', {bubbles:true})); };
+
+    // ---- ① 双买: 玻璃 800 跨式(call 63 → 每手 1260, put 7.5 → 每手 150), 走真实入口 ----
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(600);
+    document.querySelector('.mode[data-mode="dual"]').click(); await w(400);
+    set('equity', '11');
+    const sd = document.getElementById('cSearchD');
+    sd.value = 'fg'; sd.dispatchEvent(new Event('input'));
+    sd.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); await w(800);
+    set('dualMonth', '2701', 'change');
+    set('callStrike', '800'); set('callDelta', '0.8291');
+    set('callPrice', '63');
+    set('putStrike', '800'); set('putDelta', '-0.1973');
+    set('putPrice', '7.5');
+    set('riskAmountD', '3', 'change');
+    await w(1400);
+    const snap = () => ({
+      qc: (document.getElementById('rQtyCD') || {}).textContent.trim(),
+      qp: (document.getElementById('rQtyPD') || {}).textContent.trim(),
+      delta: (document.getElementById('rDeltaD') || {}).textContent.trim(),
+      hint: (document.getElementById('rQtyHintD') || {}).textContent.trim(),
+    });
+    out.p3 = snap();
+    set('riskAmountD', '2', 'change'); await w(1200);
+    out.p2 = snap();
+    // 风险额度只有 0.5/1/1.5/2/3 → 想看「规模翻倍」得抬权益: 13 万 × 3% = 3900(2:8 只要 3720)
+    set('riskAmountD', '3', 'change'); await w(1000);
+    set('equity', '13'); await w(1300);
+    out.p13 = snap();
+    set('equity', '11'); await w(1000);
+
+    // ---- ② 主表排序: 造 3 条(开仓时间不同 + 盈亏不同 + 一条未平仓) ----
+    //   ⚠ 开仓行必须带 premium(库里 NOT NULL), 漏了会报 raw SQL 错误 → 造数静默失败
+    const U = 'e2esort81';
+    const seedRes = [];
+    const mk = async (b, od, ot, cd, pnl) => {
+      seedRes.push(await post({mode:'futures', underlying:U, contract:'rb2701', batch:b,
+        op_type:'open', direction:'buy', open_date:od, open_time:ot, open_price:3200, qty:1,
+        premium:0}));
+      if (cd) await post({mode:'futures', underlying:U, contract:'rb2701', batch:b,
+        op_type:'close', direction:'sell', close_date:cd, close_time:'14:00', close_qty:1,
+        close_price:3300, pnl:pnl});
+    };
+    await mk('B81a', '2026-03-05', '10:00', '2026-03-20', 500);
+    await mk('B81b', '2026-05-20', '10:00', '2026-06-01', -300);
+    await mk('B81c', '2026-07-10', '10:00', null, 0);
+    out.seedOk = seedRes.map(r => !!r.ok);
+    document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(1400);
+    // 归零可能影响顺序的视图状态(别的用例可能留了搜索/只展示未平仓/统计区间)
+    TradeUI.onlyOpen = false; TradeUI.mainQuery = '';
+    const sb = document.getElementById('tradesSearch');
+    if (sb) sb.value = '';
+    const scb = document.getElementById('tradesSearchClear');
+    if (scb) scb.hidden = true;
+    TradeUI.range = 'all'; TradeUI.sortKey = ''; TradeUI.sortState = 0;
+    TradeUI.syncSortHead(); TradeUI.showAll = true; TradeUI.renderMain(); await w(400);
+    const order = () => [...document.querySelectorAll('#tradesTable tbody tr.clickable')]
+      .map(tr => tr.dataset.b || '').filter(b => b.indexOf('B81') === 0);
+    const th = k => document.querySelector('#tradesTable thead th[data-sort="' + k + '"]');
+    const dir = k => th(k).getAttribute('data-dir');
+    const title = () => (document.getElementById('mainTableOrder') || {}).textContent || '';
+    out.def = order();
+    out.titleDef = title();
+    th('open_date').click(); await w(300);
+    out.odAsc = { order: order(), dir: dir('open_date') };
+    th('open_date').click(); await w(300);
+    out.odDesc = { order: order(), dir: dir('open_date') };
+    th('open_date').click(); await w(300);
+    out.back = { order: order(), dir: dir('open_date') };
+    th('total_pnl').click(); await w(300);
+    out.pnlAsc = { order: order(), dir: dir('total_pnl'), odDir: dir('open_date') };
+    out.titleAsc = title();
+    th('total_pnl').click(); await w(300);
+    out.pnlDesc = { order: order() };
+    out.titleDesc = title();
+    th('close_status').click(); await w(300);
+    out.stAsc = { order: order() };
+    // 表头文本不能被污染(箭头是 CSS ::after, 不写进 textContent)
+    out.headers = [...document.querySelectorAll('#tradesTable thead th')].map(t => t.textContent.trim());
+    out.opSortable = !!document.querySelector('#tradesTable thead th:nth-child(8)').dataset.sort;
+    // 恢复默认 + 清理造的数据
+    TradeUI.sortKey = ''; TradeUI.sortState = 0; TradeUI.showAll = false;
+    TradeUI.syncSortHead(); TradeUI.renderMain(); await w(300);
+    out.restored = order();
+    out.titleBack = title();
+    for (const b of ['B81a', 'B81b', 'B81c']) {
+      const d = await (await fetch('/api/trades/detail?underlying=' + encodeURIComponent(U)
+        + '&mode=futures&batch=' + encodeURIComponent(b))).json();
+      for (const op of (d.operations || [])) await del(op.id);
+    }
+    return JSON.stringify(out);
+  })()`);
+  const v81 = JSON.parse(v81Run);
+  check('双买(v50.81): 造数成功(3 条开仓都写进去了)', v81.seedOk.join(',') === 'true,true,true',
+        JSON.stringify(v81.seedOk));
+  check('双买(v50.81): 玻璃 3% 预算 → Call 1 : Put 4(不是老算法的 1:6)',
+        v81.p3.qc === '1' && v81.p3.qp === '4', v81.p3.qc + ':' + v81.p3.qp);
+  check('双买(v50.81): 两腿净 delta 接近中性(差 <5%)',
+        /0\.0399/.test(v81.p3.delta) && (function () {
+          const m = v81.p3.delta.match(/两腿差 ([\d.]+)%/);
+          return !m || parseFloat(m[1]) < 5;
+        })(), v81.p3.delta);
+  check('双买(v50.81): 2% 预算给同一组手数(装不下下一档)',
+        v81.p2.qc === '1' && v81.p2.qp === '4', v81.p2.qc + ':' + v81.p2.qp);
+  check('双买(v50.81): 预算加到 3900 → 2 : 8(规模翻倍且仍中性)',
+        v81.p13.qc === '2' && v81.p13.qp === '8', v81.p13.qc + ':' + v81.p13.qp);
+  check('双买(v50.81): 预算没用完时写明原因(还剩多少 + 下一档要多少)',
+        /预算还剩/.test(v81.p3.hint) && /2 手 call \+ 8 手 put/.test(v81.p3.hint)
+        && /超预算/.test(v81.p3.hint), v81.p3.hint);
+  check('主表排序(v50.81): 默认顺序 = 开仓时间倒序(最新在顶)',
+        v81.def.join(',') === 'B81c,B81b,B81a', JSON.stringify(v81.def));
+  check('主表排序(v50.81): 点「开仓时间」→ 升序(最早在顶) + 表头标 asc',
+        v81.odAsc.order.join(',') === 'B81a,B81b,B81c' && v81.odAsc.dir === 'asc',
+        JSON.stringify(v81.odAsc));
+  check('主表排序(v50.81): 再点 → 降序 + 表头标 desc',
+        v81.odDesc.order.join(',') === 'B81c,B81b,B81a' && v81.odDesc.dir === 'desc',
+        JSON.stringify(v81.odDesc));
+  check('主表排序(v50.81): 第三次点 → 恢复默认顺序 + 标记清掉',
+        v81.back.order.join(',') === 'B81c,B81b,B81a' && v81.back.dir === null,
+        JSON.stringify(v81.back));
+  check('主表排序(v50.81): 换列排序(平仓盈亏 升序 = -300 → 0 → +500) + 旧列标记清掉',
+        v81.pnlAsc.order.join(',') === 'B81b,B81c,B81a' && v81.pnlAsc.dir === 'asc'
+        && v81.pnlAsc.odDir === null, JSON.stringify(v81.pnlAsc));
+  check('主表排序(v50.81): 平仓盈亏降序 = +500 → 0 → -300',
+        v81.pnlDesc.order.join(',') === 'B81a,B81c,B81b', JSON.stringify(v81.pnlDesc));
+  check('主表排序(v50.81): 「是否平仓」升序 = 未平仓 → 已平仓(同状态按开仓时间)',
+        v81.stAsc.order.join(',') === 'B81c,B81a,B81b', JSON.stringify(v81.stAsc));
+  check('主表排序(v50.81): 表头文字没被箭头污染(箭头走 CSS ::after)',
+        v81.headers.indexOf('净盈亏') >= 0 && v81.headers.indexOf('开仓时间') >= 0
+        && !v81.headers.some(h => /[↕↑↓]/.test(h)), JSON.stringify(v81.headers));
+  check('主表排序(v50.81): 「操作」列不可排序', v81.opSortable === false, String(v81.opSortable));
+  check('主表排序(v50.81): 恢复默认后顺序与初始一致', v81.restored.join(',') === 'B81c,B81b,B81a',
+        JSON.stringify(v81.restored));
+  check('主表排序(v50.81): 标题里的排序口径跟着变(不再是「按开仓时间倒序」)',
+        /按开仓时间倒序/.test(v81.titleDef) && /按 平仓盈亏 升序/.test(v81.titleAsc)
+        && /按 平仓盈亏 降序/.test(v81.titleDesc) && /按开仓时间倒序/.test(v81.titleBack),
+        v81.titleAsc + ' | ' + v81.titleDesc + ' | ' + v81.titleBack);
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

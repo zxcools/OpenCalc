@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5080            # 与 README 版本号 v50.80 对齐(数值比较用于单实例接管)
+APP_VERSION = 5081            # 与 README 版本号 v50.81 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3, 默认 1%)
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0]   # 期货风险额度可选档位(%)
@@ -824,9 +824,14 @@ def calc_dual(params):
 
     口径(与用户约定):
       1. 手数按 delta 中性 →  call手数 × |call delta| = put手数 × |put delta|
-      2. 预算 = 权益 × 风险额度%, 两腿权利金合计不超过预算, 超出则回调手数
+      2. 预算 = 权益 × 风险额度%, 两腿权利金合计不超过预算
       3. 止盈目标价位 = 「期权权利金」的目标价(不是标的价格): 持仓总价值达到 N 倍总权利金时
          单腿各自的每手权利金 —— 上涨时 put 归零全靠 call 撑, 下跌时反过来
+
+    ⚠ 手数求解(v50.81): 先定「每 1 手 call 配 k 手 put」(k = |callΔ|/|putΔ|), call 手数从
+      budget // (call权利金 + k × put权利金) 往下试, put 取 round(k × call) ——
+      规模优先次序 = ① 保住 delta 中性 ② 不超预算 ③ 同规模取更大的。
+      不为了花完预算去破坏配比(预算没用完是正常的, next_pair 给出「再加一组要多少钱」)。
     """
     equity = _num(params.get("equity"), "总权益")
     risk_percent = params.get("risk_percent")
@@ -864,22 +869,40 @@ def calc_dual(params):
         raise ValueError("delta 的绝对值不能大于 1")
 
     c_abs, p_abs = abs(c_delta), abs(p_delta)
-    # 手数比: call : put = |put delta| : |call delta|  (使两腿 delta 相加为 0)
+    # 手数比: call手数 × |call delta| = put手数 × |put delta|  (两腿 delta 相加为 0)
+    #   k     = 每 1 手 call 要配几手 put  (= |callΔ| / |putΔ|)
+    #   ratio = 每 1 手 put 对应几手 call(旧字段 qty_ratio 的口径, 保持不变)
+    k = c_abs / p_abs
     ratio = p_abs / c_abs
-    unit_cost = p_prem + ratio * c_prem            # 1 手 put + 对应比例 call 的成本
+    unit_cost = c_prem + k * p_prem                # 1 手 call + 按中性比例配的 put 的成本
 
     def _cost(cq, pq):
         return cq * c_prem + pq * p_prem
 
-    put_qty = int(budget // unit_cost)
-    call_qty = int(round(ratio * put_qty))
-    # 取整(round 向上)可能超预算 → 逐手回调, 直到装得下
-    while put_qty > 0 and _cost(call_qty, put_qty) > budget:
-        put_qty -= 1
-        call_qty = int(round(ratio * put_qty))
-    # 双买要求两腿都在: 任一腿不足 1 手 → 整组不开
-    if call_qty < 1 or put_qty < 1:
-        call_qty = put_qty = 0
+    def _pair(cq):
+        """给定 call 手数 → 最接近 delta 中性的 put 手数"""
+        return int(round(k * cq))
+
+    # ⚠ v50.81 修: 老算法是「按 unit_cost 估个 put 手数 → round 出 call → 逐手递减 put」,
+    #   递减时 call 会跟着 round 跳变, 首个可行组合未必最接近中性 ——
+    #   实测 玻璃(call 1260/手, put 150/手, Δ 0.8291 / -0.1973) 3% 预算 3300 时给出 1:6(两腿差 42.8%),
+    #   而按 delta 中性应当是 1:4(差 4.8%)。现在改为「先按中性配比, 再从最大可行规模往下试」:
+    #   规模优先次序 = ① 保住 delta 中性 ② 不超预算 ③ 同规模取更大的。
+    call_qty = put_qty = 0
+    c_max = int(budget // unit_cost) if unit_cost > 0 else 0
+    for _cq in range(max(c_max, 1), 0, -1):
+        _pq = _pair(_cq)
+        if _pq < 1:
+            break                    # call 再少更配不到 1 手 put → 后面都不会有解
+        if _cost(_cq, _pq) <= budget:
+            call_qty, put_qty = _cq, _pq
+            break
+    # 下一档(多配一组)的规模与成本 —— 前端用它解释「预算为什么没用完」
+    next_pair = None
+    if call_qty:
+        _nc, _np = call_qty + 1, _pair(call_qty + 1)
+        if _np >= 1:
+            next_pair = {"call": _nc, "put": _np, "cost": round(_cost(_nc, _np), 2)}
 
     enough = call_qty >= 1 and put_qty >= 1
     total_premium = _cost(call_qty, put_qty)
@@ -915,8 +938,9 @@ def calc_dual(params):
 
     msg = ""
     if not enough:
-        msg = ("预算 %s 元装不下 1 组（1 手 call %s + %s 手 put %s）"
-               % (_fmt_num(round(budget, 2)), _fmt_num(c_prem), _fmt_num(round(ratio, 2)), _fmt_num(p_prem)))
+        # ⚠ 这里要说「1 手 call 配几手 put」→ 用 k, 以前误用了 ratio(每手 put 对应几手 call) → 写成 0.24 手
+        msg = ("预算 %s 元配不出 1 组（1 手 call %s + %s 手 put %s）"
+               % (_fmt_num(round(budget, 2)), _fmt_num(c_prem), _fmt_num(round(k, 2)), _fmt_num(p_prem)))
 
     return {
         "ok": True,
@@ -945,8 +969,11 @@ def calc_dual(params):
             "strike_fmt": _fmt_num(p_strike),
         },
         "qty_ratio": round(ratio, 4),
+        "put_per_call": round(k, 4),               # 每 1 手 call 配几手 put(中性配比)
         "total_premium": round(total_premium, 2),
         "funds_used": round(total_premium, 2),
+        "budget_left": round(budget - total_premium, 2),
+        "next_pair": next_pair,                    # 下一档规模(预算不够时的解释用)
         "net_delta": round(net_delta, 4),          # 越接近 0 越中性
         "delta_gap_pct": round(gap_pct, 2),        # 两腿 delta 的不平衡度(%)
         "enough_lots": enough,
@@ -5062,6 +5089,14 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .op-filter select{padding:3px 6px;border-radius:6px;border:1px solid var(--panel2);
   background:var(--panel2);color:var(--text);font-size:12px;max-width:180px}
 .trades-tbl th{font-size:11px}
+/* v50.81: 主表表头点击排序 —— 箭头用 ::after 伪元素(不写进 textContent, 免得打挂「表头文案」类断言)
+   三态: 无标记(默认) → ↑ 升序 → ↓ 降序 → 回默认 */
+.trades-tbl th.th-sort{cursor:pointer;user-select:none}
+.trades-tbl th.th-sort::after{content:'↕';opacity:.26;margin-left:4px;font-size:10px}
+.trades-tbl th.th-sort:hover{color:var(--text)}
+.trades-tbl th.th-sort:hover::after{opacity:.6}
+.trades-tbl th.th-sort[data-dir="asc"]::after{content:'↑';opacity:.95;color:var(--accent2);font-weight:700}
+.trades-tbl th.th-sort[data-dir="desc"]::after{content:'↓';opacity:.95;color:var(--accent2);font-weight:700}
 .trades-tbl td{font-size:12px;padding:6px 8px}
 .trades-tbl tr.row-open td{background:rgba(62,207,143,.04)}
 .trades-tbl tr.row-close td{background:rgba(255,107,155,.04)}
@@ -5714,6 +5749,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="s">按 delta 中性配比</div>
           </div>
         </div>
+        <!-- v50.81: 配比优先 —— 预算没用完时说明白为什么(否则会以为算错了) -->
+        <div id="rQtyHintD" class="tip" style="margin-top:8px"></div>
         <div id="rTargetsD" style="margin-top:16px"></div>
         <div class="details grid2 anim" id="rDetailD" style="margin-top:16px">
           <div class="dcell"><span class="k">开仓标的 / 合约</span><span class="v" id="rContractD">—</span></div>
@@ -5890,7 +5927,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div class="trades-main">
           <div class="card results">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-              <h2 style="margin:0;flex:1;min-width:0"><span class="dot"></span><span id="mainTableTitle">期权交易</span>(按开仓时间倒序, 最近在最上, 默认 10 条)</h2>
+              <h2 style="margin:0;flex:1;min-width:0"><span class="dot"></span><span id="mainTableTitle">期权交易</span><span id="mainTableOrder">(按开仓时间倒序, 最近在最上, 默认 10 条)</span></h2>
               <span id="tradesSearchHint" class="dim" style="font-size:12px;flex:none"></span>
               <button class="btn xs ghost" id="btnShowAllTrades" hidden style="flex:none" title="默认只显示最近 10 条, 点此展开全部">显示全部</button>
               <input id="tradesSearch" type="text" autocomplete="off" spellcheck="false"
@@ -5900,8 +5937,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <div class="tblwrap">
               <table class="tbl trades-tbl" id="tradesTable">
                   <thead><tr>
-            <th>开仓标的</th><th>方向</th><th>开仓时间</th>
-            <th>是否平仓</th><th>平仓盈亏</th><th>净盈亏</th><th>平仓时间</th>
+            <th class="th-sort" data-sort="underlying" title="点击排序：升序 → 降序 → 恢复默认">开仓标的</th>
+            <th class="th-sort" data-sort="direction" title="点击排序：升序 → 降序 → 恢复默认">方向</th>
+            <th class="th-sort" data-sort="open_date" title="点击排序：升序 → 降序 → 恢复默认">开仓时间</th>
+            <th class="th-sort" data-sort="close_status" title="点击排序：升序 → 降序 → 恢复默认">是否平仓</th>
+            <th class="th-sort" data-sort="total_pnl" title="点击排序：升序 → 降序 → 恢复默认">平仓盈亏</th>
+            <th class="th-sort" data-sort="net_pnl" title="点击排序：升序 → 降序 → 恢复默认">净盈亏</th>
+            <th class="th-sort" data-sort="last_close_date" title="点击排序：升序 → 降序 → 恢复默认">平仓时间</th>
             <th>操作</th>
                   </tr></thead>
                   <tbody></tbody>
@@ -6969,6 +7011,20 @@ function renderD(d){
     + (d.delta_gap_pct <= 2
         ? ' <span style="color:var(--good)">（中性）</span>'
         : ' <span style="color:var(--sub)">（两腿差 ' + d.delta_gap_pct + '%，取整所致）</span>');
+  /* v50.81: 手数按「delta 中性优先」定, 预算可能用不完 —— 说明清楚, 免得以为是算错了 */
+  const qh = $('rQtyHintD');
+  if (qh){
+    if (!d.enough_lots || !(d.budget_left >= 1)){
+      qh.innerHTML = '';
+    } else {
+      qh.innerHTML = '按 delta 中性只能配到 <b>' + d.call.qty + ' : ' + d.put.qty + '</b>，预算还剩 '
+        + fmtMoney(d.budget_left) + (d.next_pair
+          ? ('；再多配一组（' + d.next_pair.call + ' 手 call + ' + d.next_pair.put + ' 手 put）需 '
+             + fmtMoney(d.next_pair.cost) + '，超预算')
+          : '')
+        + ' —— 配比优先，不为了花完预算破坏两腿平衡。';
+    }
+  }
   /* 目标价位表(v50.60): 按「期权价格」口径给 —— 持仓总价值涨到 N 倍权利金时, 单腿期权价格要到的位置 */
   const _u = (d.unit || '').split('/')[0];
   const _uTxt = _u ? ('（元/' + _u + '）') : '';
@@ -7667,6 +7723,10 @@ const TradeUI = {
   RANGES: ['1m', '3m', '1y', 'ytd', 'all'],
   _closeModal: false,   // v50.72 当前弹窗是不是「平仓」(决定要不要自动算平仓盈亏)
   _closeToday: '',      // v50.74 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
+  // v50.81 主表排序: sortKey='' 表示默认顺序(后端给的「开仓时间倒序」);
+  //   sortState: 0=默认 / 1=升序 / 2=降序 —— 点表头循环这三态
+  sortKey: '',
+  sortState: 0,
 
   // 预处理: 空白是打字随手敲的 → 直接删; _ / 视为有意分段 → 统一成 '-'; 合并连续'-'; 去首尾'-'
   //   'br 2610 C 15800' -> 'br-2610-C-15800' ; 'lc2611_C_144000' -> 'lc2611-C-144000'
@@ -7836,6 +7896,13 @@ const TradeUI = {
       this.syncOnlyOpenBtn();      // v50.55: 按钮外观的选中态
       this.renderMain();
     });
+    // v50.81: 主表表头点击排序(三态循环) —— 用委托, 表头只写一次
+    const _th = document.querySelector('#tradesTable thead');
+    if (_th) _th.addEventListener('click', e => {
+      const th = (e.target && e.target.closest) ? e.target.closest('th.th-sort') : null;
+      if (th && th.dataset.sort) this.cycleSort(th.dataset.sort);
+    });
+    this.syncSortHead();
     this.syncOnlyOpenBtn();
     $('btnToggleStats').addEventListener('click', () => this.toggleStats());
     this.applyStatsPref();        // v50.55: 恢复上次的统计卡片显隐选择(默认显示)
@@ -8293,6 +8360,73 @@ const TradeUI = {
     return '保证金按各笔记录里的保证金率估（' + rates.map(pct).join(' / ') + '） · 止损按初始止损价';
   },
 
+  /* ===== v50.81 主表排序(三个模式共用同一张表) =====
+     排序键: underlying/direction/open_date/close_status/total_pnl/net_pnl/last_close_date
+     ⚠ 只改显示顺序 —— 统计卡/区间条数不受影响(它们只做求和/计数)
+     ⚠ 默认态直接返回原列表(后端已按开仓时间倒序), 保证老行为/老测试不变 */
+  sortKeys(){
+    return ['underlying', 'direction', 'open_date', 'close_status',
+            'total_pnl', 'net_pnl', 'last_close_date'];
+  },
+  _sortVal(g, key){
+    if (key === 'underlying') return this.underlyingText(g.underlying);
+    if (key === 'direction') return this.dirTxt(g.direction);
+    if (key === 'open_date') return String(g.open_date || '') + ' ' + String(g.open_time || '');
+    if (key === 'close_status'){
+      // 未平仓 < 部分平仓 < 已平仓(按「平掉的程度」排, 比按文字排有意义)
+      const rank = { '未平仓': 0, '部分平仓': 1, '已平仓': 2 };
+      return (rank[g.close_status] != null) ? rank[g.close_status] : 9;
+    }
+    if (key === 'total_pnl') return Number(g.total_pnl) || 0;
+    if (key === 'net_pnl') return Number(g.net_pnl != null ? g.net_pnl : g.total_pnl) || 0;
+    if (key === 'last_close_date') return String(g.last_close_date || '') + ' ' + String(g.last_close_time || '');
+    return '';
+  },
+  applySort(list){
+    if (!this.sortKey || this.sortState === 0) return list;
+    const key = this.sortKey;
+    const sgn = (this.sortState === 2) ? -1 : 1;
+    const isNum = (key === 'total_pnl' || key === 'net_pnl' || key === 'close_status');
+    return [...list].sort((a, b) => {
+      const x = this._sortVal(a, key), y = this._sortVal(b, key);
+      let r = isNum ? (x - y) : String(x).localeCompare(String(y), 'zh-Hans-CN');
+      if (r === 0){   // 同值 → 按开仓时间 + 批次兜底, 顺序稳定可预期
+        r = String(a.open_date || '').localeCompare(String(b.open_date || ''))
+          || String(a.open_time || '').localeCompare(String(b.open_time || ''))
+          || String(a.batch || '').localeCompare(String(b.batch || ''));
+        return sgn * r;
+      }
+      return sgn * r;
+    });
+  },
+  /* 三态循环: 新字段 → 升序 / 同字段 → 升序→降序→默认 */
+  cycleSort(key){
+    if (key !== this.sortKey){ this.sortKey = key; this.sortState = 1; }
+    else this.sortState = (this.sortState + 1) % 3;
+    if (this.sortState === 0) this.sortKey = '';
+    this.syncSortHead();
+    this.renderMain();
+  },
+  syncSortHead(){
+    document.querySelectorAll('#tradesTable thead th.th-sort').forEach(th => {
+      if (!this.sortKey || this.sortState === 0 || th.dataset.sort !== this.sortKey) th.removeAttribute('data-dir');
+      else th.setAttribute('data-dir', this.sortState === 1 ? 'asc' : 'desc');
+    });
+    // v50.81: 标题里的「按开仓时间倒序」在排序后就不成立了, 跟着改成当前口径
+    const ord = $('mainTableOrder');
+    if (ord){
+      if (!this.sortKey || this.sortState === 0){
+        ord.textContent = '(按开仓时间倒序, 最近在最上, 默认 10 条)';
+      } else {
+        const label = { underlying: '开仓标的', direction: '方向', open_date: '开仓时间',
+                        close_status: '是否平仓', total_pnl: '平仓盈亏', net_pnl: '净盈亏',
+                        last_close_date: '平仓时间' }[this.sortKey] || this.sortKey;
+        ord.textContent = '（按 ' + label + (this.sortState === 1 ? ' 升序' : ' 降序')
+          + '，再点表头换顺序）';
+      }
+    }
+  },
+
   renderMain(){
     const tb = document.querySelector('#tradesTable tbody');
     this.renderStats();          // v50.53: 顶部统计卡片随数据一起刷新
@@ -8303,6 +8437,7 @@ const TradeUI = {
     if (this.onlyOpen) rows = rows.filter(g => g.close_status !== '已平仓');
     const q = (this.mainQuery || '').trim();
     if (q) rows = rows.filter(g => this.matchGroup(g, q));
+    rows = this.applySort(rows);        // v50.81: 表头排序(默认态原样返回)
     const total = rows.length;
     // 搜索命中数提示(区间条数由 #rangeNote 负责, 这里只报「筛选后」的)
     const hint = $('tradesSearchHint');

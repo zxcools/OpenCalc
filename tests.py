@@ -1458,6 +1458,53 @@ check("双买: 预算装不下 1 组 → 两腿都不开", _d3["enough_lots"] is
       and _d3["call"]["qty"] == 0 and _d3["put"]["qty"] == 0, str(_d3["message"]))
 check("双买: 不开仓时给提示文案", bool(_d3["message"]), '')
 
+# ===== v50.81: 双买手数改成「delta 中性优先」求解 =====
+#   用户实测案例: 玻璃 800 跨式, call 1260/手 (Δ 0.8291) / put 150/手 (Δ −0.1973)
+#   老算法: 按 unit_cost 估 put 手数 → round 出 call → 逐手递减 put, 3% 预算下给出 1:6(两腿差 42.8%)
+#   按规则(先保 delta 中性)应当是 1:4(两腿差 4.8%)
+_FG81 = {'code': 'FG', 'month': '2701', 'call_strike': 800, 'call_delta': 0.8291,
+         'call_premium': 1260, 'put_strike': 800, 'put_delta': -0.1973, 'put_premium': 150}
+_d81a = calc_dual(dict(_FG81, equity=110000, risk_percent=3))
+check("双买(v50.81): 玻璃 3% 预算 → 1:4(不是老算法的 1:6), 两腿差 <5%",
+      _d81a["call"]["qty"] == 1 and _d81a["put"]["qty"] == 4 and _d81a["delta_gap_pct"] < 5,
+      "%s:%s 差 %s%%" % (_d81a["call"]["qty"], _d81a["put"]["qty"], _d81a["delta_gap_pct"]))
+check("双买(v50.81): 2% 与 3% 预算装不下「下一档」时给同一组手数",
+      (lambda b: (b["call"]["qty"], b["put"]["qty"]) == (1, 4))(
+          calc_dual(dict(_FG81, equity=110000, risk_percent=2))), '')
+check("双买(v50.81): 5% 预算 → 2:8(规模翻倍且仍中性)",
+      (lambda b: (b["call"]["qty"], b["put"]["qty"]) == (2, 8) and b["delta_gap_pct"] < 5)(
+          calc_dual(dict(_FG81, equity=110000, risk_percent=5))), '')
+check("双买(v50.81): 每 1 手 call 配几手 put 如实返回(4.2019)",
+      abs(_d81a["put_per_call"] - 4.2019) < 0.001, str(_d81a["put_per_call"]))
+check("双买(v50.81): 预算没用完要如实报出 + 给出「下一档」的成本",
+      abs(_d81a["budget_left"] - (3300 - 1860)) < 0.01 and _d81a["next_pair"]["cost"] > _d81a["budget"],
+      str({"left": _d81a["budget_left"], "next": _d81a["next_pair"]}))
+check("双买(v50.81): 「配不出 1 组」的提示写的是「1 手 call 配 4.2 手 put」(以前误用 ratio 写成 0.24 手)",
+      (lambda m: "4.2" in m and "0.24" not in m)(calc_dual(dict(_FG81, equity=1000, risk_percent=100))["message"]),
+      calc_dual(dict(_FG81, equity=1000, risk_percent=100))["message"])
+
+# 性质: 各档预算都要满足「① 不超预算 ② 中性(gap<10%) ③ 再加一组就超预算」
+_miss81 = []
+for _b81 in (1860, 1870, 2200, 3300, 4500, 5500, 9000, 20000, 100000):
+    _d = calc_dual(dict(_FG81, equity=_b81, risk_percent=100))
+    if _d["enough_lots"]:
+        _ok = (_d["total_premium"] <= _b81 + 1e-6) and (_d["delta_gap_pct"] < 10) \
+              and (_d["next_pair"] is not None) and (_d["next_pair"]["cost"] > _b81)
+    else:
+        _ok = _d["next_pair"] is None
+    if not _ok:
+        _miss81.append((_b81, _d["call"]["qty"], _d["put"]["qty"], _d["delta_gap_pct"],
+                       _d["total_premium"], _d["next_pair"]))
+check("双买(v50.81): 9 档预算都满足「不超预算 + 中性 + 再加一组就超」", not _miss81, str(_miss81))
+check("双买(v50.81): 预算正好不够 1 组时不开仓(1800 < 1860)",
+      (lambda b: b["enough_lots"] is False)(
+          calc_dual(dict(_FG81, equity=1800, risk_percent=100))), '')
+check("双买(v50.81): 对称 delta 的结果没被改坏(k=1 → 手数相同)",
+      (lambda b: b["call"]["qty"] == b["put"]["qty"] == 1 and abs(b["net_delta"]) < 1e-9)(
+          calc_dual({'equity': 900000, 'code': 'lc', 'month': '2611', 'risk_percent': 3,
+                     'call_strike': 144000, 'call_delta': 0.3, 'call_premium': 9800,
+                     'put_strike': 120000, 'put_delta': -0.3, 'put_premium': 8500})), '')
+
 for _bad, _desc in [
     ({'equity': 900000, 'code': 'lc', 'call_strike': 144000, 'call_delta': -0.3,
       'call_premium': 9800, 'put_strike': 120000, 'put_delta': -0.3, 'put_premium': 8500},
