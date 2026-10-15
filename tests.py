@@ -795,6 +795,49 @@ _o4p = calc_options({"equity": 120000, "code": "p", "entry": 72, "risk_percent":
 _o5p = calc_options({"equity": 120000, "code": "p", "entry": 72, "risk_percent": 5})
 check("期权 4% → 预算 4800 → 6 手", abs(_o4p["budget"] - 4800) < 0.01 and _o4p["max_lots"] == 6, str(_o4p["max_lots"]))
 check("期权 5% → 预算 6000 → 8 手", abs(_o5p["budget"] - 6000) < 0.01 and _o5p["max_lots"] == 8, str(_o5p["max_lots"]))
+
+# ---- v50.84: 持仓方向 / 合约年月 / 行权价 / delta + 止盈目标价 ----
+_ol = calc_options({"equity": 120000, "code": "p", "entry": 72, "risk_percent": 3,
+                    "direction": "long", "month": "2611", "strike": 9000, "delta": 0.32})
+check("做多 → call(C) + 合约代码 = 品种+年月+C+行权价",
+      _ol["call_put"] == "C" and _ol["contract_code"] == "p2611C9000",
+      "%s / %s" % (_ol["call_put"], _ol["contract_code"]))
+check("direction/strike/delta 原样返回", _ol["direction"] == "long"
+      and abs(_ol["strike"] - 9000) < 1e-9 and abs(_ol["delta"] - 0.32) < 1e-9,
+      str({k: _ol.get(k) for k in ("direction", "strike", "delta")}))
+_os = calc_options({"equity": 120000, "code": "p", "entry": 72, "risk_percent": 3,
+                    "direction": "short", "month": "2611", "strike": 8000, "delta": -0.28})
+check("做空 → put(P) + 合约代码带 P", _os["call_put"] == "P" and _os["contract_code"] == "p2611P8000",
+      "%s / %s" % (_os["call_put"], _os["contract_code"]))
+check("方向非法值退回 long(不报错)", calc_options({"equity": 120000, "code": "p", "entry": 72,
+      "direction": "xxx"})["call_put"] == "C", '')
+check("只填期权价格(年月/行权价空) → 合约代码为空但不影响手数",
+      calc_options({"equity": 120000, "code": "p", "entry": 72})["contract_code"] == ""
+      and calc_options({"equity": 120000, "code": "p", "entry": 72})["max_lots"] == 5, '')
+try:
+    calc_options({"equity": 120000, "code": "p", "entry": 72, "strike": 0})
+    check("行权价<=0 被拒", False, "未拒绝")
+except ValueError:
+    check("行权价<=0 被拒", True)
+try:
+    calc_options({"equity": 120000, "code": "p", "entry": 72, "delta": 1.5})
+    check("delta 绝对值>1 被拒", False, "未拒绝")
+except ValueError:
+    check("delta 绝对值>1 被拒", True)
+
+# 止盈目标价: 2× / 4× / 8× / 16× 当前期权价格
+_tg = _op["targets"] if isinstance(_op.get("targets"), list) else []
+check("止盈目标价共 4 档 = 2/4/8/16 倍",
+      [x["n"] for x in _tg] == [2, 4, 8, 16], str([x["n"] for x in _tg]))
+check("目标报价 = 当前 72 × N(2→144 / 4→288 / 8→576 / 16→1152)",
+      [x["price_unit"] for x in _tg] == [144.0, 288.0, 576.0, 1152.0],
+      str([x["price_unit"] for x in _tg]))
+check("每手权利金 = 720 × N", [x["premium_per_lot"] for x in _tg] == [1440.0, 2880.0, 5760.0, 11520.0],
+      str([x["premium_per_lot"] for x in _tg]))
+check("合计价值 = 每手 × 5 手", [x["value"] for x in _tg] == [7200.0, 14400.0, 28800.0, 57600.0],
+      str([x["value"] for x in _tg]))
+check("浮盈 = 目标价值 − 成本(3600)", [x["profit"] for x in _tg] == [3600.0, 10800.0, 25200.0, 54000.0],
+      str([x["profit"] for x in _tg]))
 try:
     calc_options({"equity": 1000000, "code": "m", "entry": 800, "risk_percent": 0})
     check("期权 risk_percent<=0 被拒绝", False)

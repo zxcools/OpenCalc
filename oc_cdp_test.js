@@ -4553,8 +4553,8 @@ async function main() {
         /720/.test(v83.prem) && !/ ¥ 72$/.test(v83.prem.trim()), v83.prem);
   check('期权买方(v50.83): 权益 12 万 × 3% = 3600 → 5 手(以前是 50 手)', /3,600/.test(v83.budget)
         && v83.lots === '5' && /3,600/.test(v83.funds), JSON.stringify({b: v83.budget, lots: v83.lots, f: v83.funds}));
-  check('期权买方(v50.83): 结果里另列「开仓价(报价)72 元/吨」并写明每手 = 报价 × 乘数',
-        /72 元\/吨/.test(v83.entryCell) && /报价 × 乘数 10/.test(v83.premSub),
+  check('期权买方(v50.83): 结果里另列「期权价格(报价)72 元/吨」并写明每手 = 期权价格 × 乘数',
+        /72 元\/吨/.test(v83.entryCell) && /期权价格 × 乘数 10/.test(v83.premSub),
         v83.entryCell + ' | ' + v83.premSub);
   check('风险额度(v50.83): 期权买方选 5% → 预算 6000 → 8 手',
         /6,000/.test(v83.budget5) && v83.lots5 === '8', v83.budget5 + ' / ' + v83.lots5);
@@ -4564,6 +4564,112 @@ async function main() {
   check('风险额度(v50.83): /api/calc/futures 收 4%(预算 1000000x4% = 40000)',
         v83.fut4.ok === true && v83.fut4.pct === 4 && Math.abs(v83.fut4.budget - 40000) < 0.01,
         JSON.stringify(v83.fut4));
+
+  // ===== v50.84: 期权买方 = 单腿(call/put) + 合约年月·行权价·delta + 止盈目标价 + 加入记录 =====
+  const v84Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const out = {};
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(300);
+    setMode('options'); await w(300);
+    pickContract(CONTRACTS.find(x => x.code.toLowerCase() === 'cu'), 'O'); await w(400);
+    // ① 合约年月挪到「风险额度」那一行(不再在腿卡里)
+    const row = q('optMonth').closest('.dual-row');
+    out.layout = {sameRow: !!row && row.contains(q('riskAmountO')),
+                  inLeg: !!q('optMonth').closest('#optLegCard')};
+    // ② 做多 → CALL(红框) + 合约拼成 C
+    q('optMonth').value = '2612'; q('optMonth').dispatchEvent(new Event('input',{bubbles:true}));
+    q('optStrike').value = '80000'; q('optStrike').dispatchEvent(new Event('input',{bubbles:true}));
+    q('optDelta').value = '0.32'; q('optDelta').dispatchEvent(new Event('input',{bubbles:true}));
+    q('entryO').value = '55'; q('entryO').dispatchEvent(new Event('input',{bubbles:true}));
+    q('equity').value = '12'; q('equity').dispatchEvent(new Event('input',{bubbles:true}));
+    q('riskAmountO').value = '3'; q('riskAmountO').dispatchEvent(new Event('change',{bubbles:true}));
+    onInput(); await w(900);
+    out.long = {card: q('optLegCard').className, badge: q('optLegBadge').textContent,
+                name: q('optLegName').textContent, border: getComputedStyle(q('optLegCard')).borderTopColor,
+                premAuto: q('optPremium').value, hint: q('entryOHint').textContent,
+                code: q('rCodeO').textContent, lots: q('rLotsO').textContent,
+                delta: q('rDeltaO').textContent, funds: q('rFundsO').textContent,
+                heads: [...document.querySelectorAll('#rTargetsO thead th')].map(th => th.textContent.trim()),
+                rows: [...document.querySelectorAll('#rTargetsO tbody tr')].map(tr =>
+                  [...tr.children].map(td => td.textContent.trim()))};
+    // ③ 做空 → PUT(青框) + 合约变 P + delta 自动带负号
+    document.querySelector('#dirSegO button[data-dir="short"]').click(); await w(900);
+    out.short = {card: q('optLegCard').className, badge: q('optLegBadge').textContent,
+                 name: q('optLegName').textContent, border: getComputedStyle(q('optLegCard')).borderTopColor,
+                 deltaVal: q('optDelta').value, deltaCell: q('rDeltaO').textContent,
+                 code: q('rCodeO').textContent,
+                 hint: q('entryOHint').textContent,
+                 firstTgt: (document.querySelector('#rTargetsO tbody tr td:nth-child(2)') || {}).textContent || ''};
+    // ④ 加入记录 → 交易记录 · 期权买方 多一条(合约/方向/价格/手数/权利金都要对上)
+    const g0 = await (await fetch('/api/trades/groups?mode=options')).json();
+    const n0 = (g0.groups || []).length;
+    q('btnAddOpt').click(); await w(1800);
+    const g1 = await (await fetch('/api/trades/groups?mode=options')).json();
+    const mine = (g1.groups || []).find(x => x.underlying === 'cu' && x.batch);
+    let op0 = null;
+    if (mine){
+      const det = await (await fetch('/api/trades/detail?mode=options&underlying=cu&batch='
+        + encodeURIComponent(mine.batch))).json();
+      op0 = (det.operations || [])[0] || null;
+    }
+    out.added = {n0, n1: (g1.groups || []).length, found: !!mine, tab: '', op: op0};
+    const act = document.querySelector('#mainTabs .maintab.active');
+    out.added.tab = act ? act.dataset.tab : '';
+    // 清理: 删掉这条记录, 免得影响后面的用例
+    if (mine){
+      const det = await (await fetch('/api/trades/detail?mode=options&underlying=cu&batch='
+        + encodeURIComponent(mine.batch))).json();
+      for (const op of (det.operations || [])){
+        await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: op.id})});
+      }
+      if (typeof TradeUI !== 'undefined') TradeUI.closeDetail();
+    }
+    const g2 = await (await fetch('/api/trades/groups?mode=options')).json();
+    out.cleaned = (g2.groups || []).length === n0;
+    return JSON.stringify(out);
+  })()`);
+  const v84 = JSON.parse(v84Run);
+  check('期权买方(v50.84): 合约年月与「风险额度」同一行, 已从腿卡里挪出',
+        v84.layout.sameRow === true && v84.layout.inLeg === false, JSON.stringify(v84.layout));
+  check('期权买方(v50.84): 做多 → CALL 红框(腿卡/徽章/文案都跟着走)',
+        /\bcall\b/.test(v84.long.card) && !/put/.test(v84.long.card)
+        && v84.long.badge === 'CALL' && v84.long.name === '看涨腿', JSON.stringify(v84.long.card + '|' + v84.long.badge));
+  check('期权买方(v50.84): 每手权利金自动 = 期权价格 55 × 乘数 5 = 275',
+        v84.long.premAuto === '275', v84.long.premAuto);
+  check('期权买方(v50.84): 做多合约代码 = cu2612C80000',
+        v84.long.code === 'cu2612C80000', v84.long.code);
+  check('期权买方(v50.84): 手数 3600÷275 = 13 / 占用 ¥3,575 / delta 4 位小数',
+        v84.long.lots === '13' && /3,575/.test(v84.long.funds) && v84.long.delta === '0.3200',
+        JSON.stringify({lots: v84.long.lots, funds: v84.long.funds, delta: v84.long.delta}));
+  check('期权买方(v50.84): 止盈目标价表 4 档 = 2×/4×/8×/16×(报价 110/220/440/880)',
+        v84.long.rows.length === 4 && v84.long.rows[0][0] === '2×' && /110/.test(v84.long.rows[0][1])
+        && /220/.test(v84.long.rows[1][1]) && /440/.test(v84.long.rows[2][1]) && /880/.test(v84.long.rows[3][1]),
+        JSON.stringify(v84.long.rows));
+  check('期权买方(v50.84): 止盈表列出 每手权利金 / 合计价值 / 浮盈(2× → 550 / 7,150 / +3,575)',
+        /550/.test(v84.long.rows[0][2]) && /7,150/.test(v84.long.rows[0][3]) && /3,575/.test(v84.long.rows[0][4]),
+        JSON.stringify(v84.long.rows[0]));
+  check('期权买方(v50.84): 做空 → 腿卡切到 PUT(青框) 且与 CALL 的边框色不同',
+        /\bput\b/.test(v84.short.card) && !/\bcall\b/.test(v84.short.card)
+        && v84.short.badge === 'PUT' && v84.short.name === '看跌腿'
+        && v84.short.border !== v84.long.border,
+        JSON.stringify({card: v84.short.card, badge: v84.short.badge,
+                        short: v84.short.border, long: v84.long.border}));
+  check('期权买方(v50.84): 做空后 delta 自动带负号(-0.3200)',
+        v84.short.deltaVal === '-0.32' && v84.short.deltaCell === '-0.3200',
+        v84.short.deltaVal + ' / ' + v84.short.deltaCell);
+  check('期权买方(v50.84): 做空合约代码变 cu2612P80000',
+        v84.short.code === 'cu2612P80000', v84.short.code);
+  check('期权买方(v50.84): 加入记录 → 期权买方多一条(合约/看跌/价格 55/13 手/权利金 3575)',
+        v84.added.found === true && v84.added.n1 === v84.added.n0 + 1 && v84.added.op
+        && v84.added.op.contract === 'cu2612P80000' && v84.added.op.call_put === 'P'
+        && Number(v84.added.op.open_price) === 55 && Number(v84.added.op.qty) === 13
+        && Math.abs(Number(v84.added.op.premium) - 3575) < 0.01,
+        JSON.stringify(v84.added.op));
+  check('期权买方(v50.84): 加入记录后自动跳到「交易记录 · 期权买方」',
+        v84.added.tab === 'trades', v84.added.tab);
+  check('期权买方(v50.84): 用例清理干净(记录数回到原值)', v84.cleaned === true, String(v84.cleaned));
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {

@@ -33,13 +33,14 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5083            # 与 README 版本号 v50.83 对齐(数值比较用于单实例接管)
+APP_VERSION = 5084            # 与 README 版本号 v50.84 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期货风险额度可选档位(%)
 OPTIONS_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期权风险额度可选档位(%)
 OPTIONS_RISK_RATIO = 0.03    # 期权默认开仓金额比例 3% (可选项 0.5/1/1.5/2/3/4/5, 默认 3%)
+OPTIONS_TP_MULTIPLES = (2, 4, 8, 16)   # v50.84 期权买方止盈目标价 = 当前期权价格 × N
 MIN_PROFIT_LOSS_RATIO = 1.5  # 盈亏比阈值
 
 # 行情相关
@@ -758,17 +759,19 @@ def calc_futures(params):
 
 def calc_options(params):
     """
-    期权模式计算 (买入开仓)
-    params: equity(总权益), code(标的), entry(开仓价 = **期权报价**, 如 元/吨)
+    期权买方计算 (买入单腿: 做多 → call 看涨, 做空 → put 看跌) —— v50.84
+
+    params: equity(总权益), code(标的), direction('long' 做多 / 'short' 做空),
+            month(合约年月, 如 2611), strike(行权价), delta,
+            entry(期权价格 = 行情报价, 不含乘数), risk_percent(风险额度%, 默认 3%)
     开仓额度 = 权益 × risk_percent% (默认 3%, 可选项 0.5/1/1.5/2/3/4/5)
-    ⚠ 口径(v50.83): entry 是行情里的**期权报价**(单吨/单点价, 不含乘数),
-      每手权利金 = 报价 × 合约乘数 —— 与「交易记录·期权买方」弹窗、期权双买两腿同口径。
-      以前把 entry 当成「1 手价格(已含乘数)」, 于是棕榈油 p 报价 72 被当成每手 72,
-      手数 = 预算 ÷ 72 多算了 10 倍(p 的乘数是 10)。
+    ⚠ 口径: entry 是**期权报价**(单吨/单点价, 不含乘数), 每手权利金 = 报价 × 合约乘数 ——
+      与「交易记录·期权买方」弹窗、期权双买两腿同口径。
+    止盈目标价: 期权价格涨到 N 倍(N = 2/4/8/16)时该腿的报价 / 每手权利金 / 持仓价值 / 浮盈
     返回: dict
     """
     equity = _num(params.get("equity"), "总权益")
-    entry = _num(params.get("entry"), "开仓价")
+    entry = _num(params.get("entry"), "期权价格")
 
     contract = get_contract(params.get("code", ""))
     if contract is None:
@@ -776,6 +779,24 @@ def calc_options(params):
     opt_mult = contract["opt_mult"]
     if contract["code"] in OPTION_MULT_OVERRIDES:
         opt_mult = OPTION_MULT_OVERRIDES[contract["code"]]
+
+    # 持仓方向 → 合约类型: 做多买 call(看涨), 做空买 put(看跌)
+    direction = str(params.get("direction") or "long").lower()
+    if direction not in ("long", "short"):
+        direction = "long"
+    cp = "C" if direction == "long" else "P"
+
+    month = "".join(ch for ch in str(params.get("month") or "") if ch.isdigit())
+    strike = None
+    if params.get("strike") not in (None, ""):
+        strike = _num(params.get("strike"), "行权价")
+        if strike <= 0:
+            raise ValueError("行权价必须大于 0")
+    delta = None
+    if params.get("delta") not in (None, ""):
+        delta = _num_any(params.get("delta"), "delta")
+        if abs(delta) > 1:
+            raise ValueError("delta 的绝对值不能大于 1")
 
     # 风险额度(占权益的百分比, 如 3 = 3%): 用户可自定义; 留空则默认 3%
     risk_percent = params.get("risk_percent")
@@ -794,6 +815,20 @@ def calc_options(params):
     max_lots = int(budget // premium_per_lot)  # 最大手数
     funds_used = max_lots * premium_per_lot    # 占用资金
 
+    # 止盈目标价(v50.84): 期权价格涨到 N 倍 → 每手权利金 ×N, 持仓价值 = 每手 × 手数
+    #   ⚠ 单腿买方的持仓价值就是这一腿的权利金市值(没有第二条腿分摊), 所以目标价 = 当前报价 × N
+    targets = []
+    for n in OPTIONS_TP_MULTIPLES:
+        per_lot = round(premium_per_lot * n, 2)
+        value = round(per_lot * max_lots, 2)
+        targets.append({
+            "n": n,
+            "price_unit": round(entry * n, 4),          # 报价口径的目标价(照盘面挂单用)
+            "premium_per_lot": per_lot,
+            "value": value,
+            "profit": round(value - funds_used, 2),     # 浮盈 = 目标价值 − 权利金成本
+        })
+
     return {
         "ok": True,
         "contract": contract["name"],
@@ -801,6 +836,14 @@ def calc_options(params):
         "exchange": contract["exchange"],
         "opt_mult": opt_mult,
         "unit": contract["unit"],
+        "direction": direction,
+        "call_put": cp,
+        "month": month,
+        "strike": strike,
+        "strike_fmt": _fmt_num(strike) if strike else "",
+        "delta": delta,
+        # 合约代码与「交易记录 · 期权买方」同一写法(品种小写 + C/P 大写); 没填年月则为空
+        "contract_code": ("%s%s%s%s" % (contract["code"], month, cp, _fmt_num(strike))) if (month and strike) else "",
         "risk_ratio": risk_ratio,
         "risk_percent": risk_ratio * 100,
         "budget": budget,
@@ -809,6 +852,7 @@ def calc_options(params):
         "max_lots": max_lots,
         "funds_used": funds_used,
         "enough_lots": max_lots >= 1,
+        "targets": targets,
     }
 
 
@@ -4857,6 +4901,12 @@ select{cursor:pointer;appearance:none;
 .dual-target-tbl th.cp-put{color:var(--cp-put);background:var(--cp-put-bg);font-weight:700}
 .dual-target-tbl td.cp-call{background:var(--cp-call-bg2)}
 .dual-target-tbl td.cp-put{background:var(--cp-put-bg2)}
+/* v50.84: 单腿(期权买方)止盈表多两列数值 —— 表格里没有 .details .v 那套颜色类, 补上 */
+.dual-target-tbl td.gold{color:var(--gold);font-weight:700}
+.dual-target-tbl td.good{color:var(--good);font-weight:700}
+.dual-target-tbl td.bad{color:var(--bad);font-weight:700}
+/* 期权买方的「加入记录」一行 */
+.opt-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
 .plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
   border-radius:10px;padding:10px 14px;line-height:1.6}
 .plans-item{display:flex;align-items:center;gap:12px;background:var(--panel2);
@@ -5570,29 +5620,60 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <button class="qref" id="qRefO">刷新</button>
         </div>
 
-        <label>风险额度（占权益的百分比，单选）
-          <button class="btn xs ghost" id="btnDefRiskO" title="把当前选中的百分比保存为默认，下次打开自动选中" style="margin-left:8px">设为默认</button>
-        </label>
-        <select id="riskAmountO">
-          <option value="0.5">0.5%</option>
-          <option value="1">1%</option>
-          <option value="1.5">1.5%</option>
-          <option value="2">2%</option>
-          <option value="3" selected>3%</option>
-          <option value="4">4%</option>
-          <option value="5">5%</option>
-        </select>
+        <!-- v50.84: 合约年月与风险额度同一行(与双买一致) -->
+        <div class="dual-row">
+          <div>
+            <label>合约年月</label>
+            <input id="optMonth" placeholder="如 2611" maxlength="4" inputmode="numeric" autocomplete="off">
+          </div>
+          <div>
+            <label>风险额度
+              <button class="btn xs ghost" id="btnDefRiskO" title="把当前选中的百分比保存为默认，下次打开自动选中" style="margin-left:6px">设为默认</button>
+            </label>
+            <select id="riskAmountO">
+              <option value="0.5">0.5%</option>
+              <option value="1">1%</option>
+              <option value="1.5">1.5%</option>
+              <option value="2">2%</option>
+              <option value="3" selected>3%</option>
+              <option value="4">4%</option>
+              <option value="5">5%</option>
+            </select>
+          </div>
+        </div>
         <div class="wanhint" id="riskHintO" style="color:var(--sub)"></div>
 
-        <label>开仓价（期权报价，如 元/吨 · 不含乘数）</label>
-        <div class="unit-suffix">
-          <input id="entryO" type="number" min="0" step="any" inputmode="decimal" placeholder="0.00">
-          <span class="u" id="unitO">元/吨</span>
+        <!-- v50.84: 持仓方向决定买哪条腿 —— 做多 → call(红框), 做空 → put(青框), 与双买同一套腿色 -->
+        <div class="dirrow">
+          <span class="dirlabel">持仓方向</span>
+          <div class="dseg" id="dirSegO">
+            <button type="button" class="active" data-dir="long">做多 · 买看涨</button>
+            <button type="button" data-dir="short">做空 · 买看跌</button>
+          </div>
         </div>
-        <!-- v50.83: 每手权利金 = 开仓价(报价) × 合约乘数 —— 与「交易记录·期权买方」弹窗、期权双买同一口径 -->
-        <div class="dual-leg-hint" id="entryOHint"></div>
-        <div class="tip">开仓金额 = 权益 × 所选百分比。<b>开仓价填行情里的期权报价</b>（元/吨、元/克 等，<b>不含</b>合约乘数），
-          <b>每手权利金 = 开仓价 × 合约乘数</b>，手数 = 预算 ÷ 每手权利金，按权利金全额占用资金。</div>
+
+        <div class="leg-card call" id="optLegCard">
+          <div class="leg-hd">
+            <span class="cp-badge call" id="optLegBadge">CALL</span>
+            <span class="leg-name" id="optLegName">看涨腿</span>
+            <span class="leg-sub" id="optLegSub">买入 · 标的涨则赚</span>
+          </div>
+          <div class="dual-leg">
+            <div><span class="k">行权价</span>
+              <input id="optStrike" type="number" min="0" step="any" inputmode="decimal" placeholder="如 80000"></div>
+            <div><span class="k">delta</span>
+              <input id="optDelta" type="number" step="0.0001" min="-1" max="1" inputmode="decimal" placeholder="0.30"></div>
+            <div><span class="k">期权价格<span class="u" id="unitO">（元/吨）</span></span>
+              <input id="entryO" type="number" min="0" step="any" inputmode="decimal" placeholder="0.00"></div>
+            <div><span class="k">每手权利金<span class="u">自动</span></span>
+              <input id="optPremium" type="number" min="0" step="any" inputmode="decimal" placeholder="自动算"></div>
+          </div>
+          <!-- 每手权利金 = 期权价格 × 合约乘数(与「交易记录·期权买方」弹窗、期权双买同一口径) -->
+          <div class="dual-leg-hint" id="entryOHint"></div>
+        </div>
+        <div class="tip">开仓金额 = 权益 × 所选百分比。<b>期权价格填行情里的报价</b>（元/吨、元/克 等，<b>不含</b>合约乘数），
+          <b>每手权利金 = 期权价格 × 合约乘数</b>，手数 = 预算 ÷ 每手权利金，按权利金全额占用资金。
+          合约年月 + 行权价会自动拼出合约代码（做多 → C，做空 → P）。</div>
       </div>
 
       <!-- ===== 期权双买(v50.59): 同时买入 call 与 put, 两腿 delta 中性 ===== -->
@@ -5752,9 +5833,17 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </div>
         <div class="details grid2 anim" id="rDetailO" style="margin-top:16px">
           <div class="dcell"><span class="k">开仓标的</span><span class="v" id="rContractO">—</span></div>
+          <div class="dcell"><span class="k">合约</span><span class="v" id="rCodeO">—</span></div>
           <div class="dcell"><span class="k">期权合约乘数</span><span class="v" id="rMultO">—</span></div>
-          <div class="dcell"><span class="k" title="行情里的期权报价(不含乘数)">开仓价（报价）</span><span class="v" id="rEntryO">—</span></div>
+          <div class="dcell"><span class="k" title="行情里的期权报价(不含乘数)">期权价格（报价）</span><span class="v" id="rEntryO">—</span></div>
+          <div class="dcell"><span class="k">delta</span><span class="v" id="rDeltaO">—</span></div>
           <div class="dcell"><span class="k" title="权利金 × 手数">占用资金</span><span class="v money gold" id="rFundsO">—</span></div>
+        </div>
+        <!-- v50.84: 期权止盈目标价位(2× / 4× / 8× / 16× 当前期权价格), 与双买共用一套表格样式 -->
+        <div id="rTargetsO" class="anim" style="margin-top:16px"></div>
+        <div class="opt-actions anim">
+          <button class="btn cyan sm" id="btnAddOpt" title="把这次测算写入「交易记录 · 期权买方」的开仓记录，并跳过去">📥 加入记录</button>
+          <span class="tip" style="margin:0">写入后可在交易记录里补备注 / 平仓；合约代码由「合约年月 + 行权价」自动拼出</span>
         </div>
         <div class="warnbox hidden" id="rWarnO"></div>
         <div class="tip">期权买入不占用保证金，资金按权利金全额占用。期权乘数请以交易所最新规定为准。</div>
@@ -6387,6 +6476,7 @@ let curMode = 'futures';
 const selCode = {F: null, O: null, D: null};   // 当前选中的标的代码
 const lastPicked = {F: null, O: null, D: null}; // 上次真正选中的品种(用于"切换品种→自动清空价格"判断)
 let dirF = 'long';                     // 期货持仓方向(做多红/做空青 双按钮)
+let dirO = 'long';                     // v50.84 期权买方方向(做多→CALL 红框 / 做空→PUT 青框)
 
 /* 清空价格/开仓参数: 期货=开仓/止损/止盈价, 期权买方=开仓价(每手权利金),
    期权双买=两腿 4 组参数 + 合约年月 + IV(一个品种的期权链参数换到别的品种就作废);
@@ -6395,7 +6485,10 @@ function clearPrices(which){
   if (which === 'F'){
     ['entry','stop','target'].forEach(id=>{ $(id).value=''; });
   } else if (which === 'O'){
-    $('entryO').value='';
+    // v50.84: 换品种要连合约参数一起清 —— 旧品种的行权价/delta 当成新品种的会算出错误合约代码
+    ['optMonth','optStrike','optDelta','entryO','optPremium'].forEach(id=>{
+      const el = $(id); if (el) el.value='';
+    });
     updateEntryOUI();
   } else if (which === 'D'){
     // ⚠ 双买(v50.65): 换品种必须清干净 —— 否则旧品种的行权价/delta/权利金会当成新品种的参数算，
@@ -6886,12 +6979,54 @@ $('exitBtn').addEventListener('click',()=>{
 
 /* 输入事件 */
 ['equity','entry','stop','target','marginRate','entryO','futMonth',
- 'dualMonth','callStrike','callDelta','putStrike','dualIv','dualIvPct'].forEach(id=>{
+ 'dualMonth','callStrike','callDelta','putStrike','dualIv','dualIvPct',
+ 'optMonth','optStrike'].forEach(id=>{
   const el = $(id);
   if (el) el.addEventListener('input',onInput);
 });
-/* 期权买方(v50.83): 报价一改就刷新「报价 × 乘数 = 每手权利金」提示 */
-if ($('entryO')) $('entryO').addEventListener('input', updateEntryOUI);
+/* 期权买方(v50.83/84): 价格/行权价/年月一改就刷新「乘数 · 算式 · 合约代码」提示 */
+['entryO','optStrike','optMonth'].forEach(id=>{
+  const el = $(id);
+  if (el) el.addEventListener('input', updateEntryOUI);
+});
+/* 期权买方: 期权价格 ⇄ 每手权利金 联动 */
+if ($('entryO')) $('entryO').addEventListener('input', ()=>{
+  if ($('optPremium')) $('optPremium').value = optPremFromPrice($('entryO').value);
+  updateEntryOUI();
+});
+if ($('optPremium')) $('optPremium').addEventListener('input', ()=>{
+  $('entryO').value = optPriceFromPrem($('optPremium').value);
+  updateEntryOUI();
+});
+/* 期权买方 delta: 做空(put) 自动带负号, 失焦统一 4 位小数
+   ⚠ 单独绑(不放进上面的 onInput 列表): 要先改完正负号再算, 否则算的是改符号前的值 */
+if ($('optDelta')){
+  $('optDelta').addEventListener('input', ()=>{
+    const el = $('optDelta'), v = String(el.value || '');
+    if (dirO === 'short' && v && v.charAt(0) !== '-') el.value = '-' + v;
+    if (dirO === 'long' && v && v.charAt(0) === '-') el.value = v.slice(1);
+    onInput();
+  });
+  $('optDelta').addEventListener('blur', ()=>{ $('optDelta').value = fmtDelta4($('optDelta').value); });
+}
+/* 期权买方 持仓方向: 做多 → CALL(红框) / 做空 → PUT(青框) */
+document.querySelectorAll('#dirSegO button').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    if (b.dataset.dir === dirO) return;
+    dirO = b.dataset.dir;
+    document.querySelectorAll('#dirSegO button').forEach(x=>x.classList.toggle('active', x===b));
+    // 方向变了: delta 正负跟着改, 合约代码里的 C/P 也跟着变
+    const de = $('optDelta');
+    if (de){
+      const v = String(de.value || '');
+      if (dirO === 'short' && v && v.charAt(0) !== '-') de.value = '-' + v;
+      if (dirO === 'long' && v && v.charAt(0) === '-') de.value = v.slice(1);
+    }
+    updateEntryOUI();
+    onInput();
+  });
+});
+if ($('btnAddOpt')) $('btnAddOpt').addEventListener('click', () => addOptionsToTradeRecord());
 /* 双买 delta(v50.62): put 一边输就自动带负号(免得后端报「put delta 必须小于 0」); 失焦统一 4 位小数 */
 [['putDelta', false], ['callDelta', true]].forEach(([id, canBePositive])=>{
   const el = $(id);
@@ -6980,18 +7115,48 @@ function optUnitTxt(which){
 function dualUnitTxt(){
   return optUnitTxt('D');
 }
-/* v50.83: 期权买方 —— 开仓价是「报价」，每手权利金 = 报价 × 乘数。
-   这里把乘数和算式实时写出来，免得再有人把报价当每手价格看 */
+/* v50.83/84: 期权买方 —— 期权价格是「报价」，每手权利金 = 报价 × 乘数。
+   这里把乘数/算式/拼出来的合约代码实时写出来，并按方向把卡片切成 CALL(红) / PUT(青) */
+function optCpO(){ return dirO === 'short' ? 'P' : 'C'; }
+/* 合约代码 = 品种 + 年月 + C/P + 行权价(与「交易记录·期权买方」同一写法); 缺年月或行权价则空 */
+function optContractCodeO(){
+  const mo = $('optMonth') ? String($('optMonth').value || '').trim() : '';
+  const k = $('optStrike') ? parseFloat($('optStrike').value) : NaN;
+  if (!selCode.O || !/^\d{3,4}$/.test(mo) || !(k > 0)) return '';
+  return String(selCode.O).toLowerCase() + mo + optCpO() + fmtTrim(k);
+}
 function updateEntryOUI(){
-  const u = optUnitTxt('O');
-  if ($('unitO')) $('unitO').textContent = u;
+  const isPut = dirO === 'short';
+  const card = $('optLegCard');
+  if (card){
+    card.classList.toggle('put', isPut);
+    card.classList.toggle('call', !isPut);
+  }
+  if ($('optLegBadge')){
+    $('optLegBadge').textContent = isPut ? 'PUT' : 'CALL';
+    $('optLegBadge').className = 'cp-badge ' + (isPut ? 'put' : 'call');
+  }
+  if ($('optLegName')) $('optLegName').textContent = isPut ? '看跌腿' : '看涨腿';
+  if ($('optLegSub')) $('optLegSub').textContent = isPut ? '买入 · 标的跌则赚' : '买入 · 标的涨则赚';
+  if ($('unitO')) $('unitO').textContent = '（' + optUnitTxt('O') + '）';
   const he = $('entryOHint');
   if (!he) return;
-  if (!selCode.O){ he.textContent = '选好标的后，这里按报价 × 合约乘数算出每手权利金'; return; }
+  if (!selCode.O){ he.textContent = '选好标的后，这里按 期权价格 × 合约乘数 算出每手权利金'; return; }
   const m = optMultOf(selCode.O);
   const pv = parseFloat($('entryO').value);
+  const code = optContractCodeO();
   he.textContent = '合约乘数 ' + m + ' · ' + (pv > 0 ? fmt(pv) : '—') + ' × ' + m
-    + ' = 每手 ' + (pv > 0 ? '¥' + fmt(pv * m) : '—');
+    + ' = 每手 ' + (pv > 0 ? '¥' + fmt(pv * m) : '—')
+    + (code ? ' · 合约 ' + code : ' · 填「合约年月 + 行权价」自动拼合约代码');
+}
+/* 期权价格 ⇄ 每手权利金 双向联动(与双买两腿同一套: 改哪个都自动补另一个) */
+function optPremFromPrice(price){
+  const v = parseFloat(price), m = optMultOf(selCode.O);
+  return (v > 0) ? fmtTrim(v * m) : '';
+}
+function optPriceFromPrem(prem){
+  const v = parseFloat(prem), m = optMultOf(selCode.O) || 1;
+  return (v > 0) ? fmtTrim(v / m) : '';
 }
 function premFromPrice(price){
   const v = parseFloat(price), m = dualOptMult();
@@ -7274,17 +7439,22 @@ function renderF(d){
 
 function calcOptions(){
   const eq = (parseFloat($('equity').value) || 0) * 10000;   // 万元 → 元
-  const entry = parseFloat($('entryO').value);
+  const price = parseFloat($('entryO').value);
   if(!selCode.O){
     showEmpty('请先选择开仓标的（点击上方品种按钮）');
     return;
   }
-  if(!eq || !entry){
-    showEmpty('请完整填写：总权益、开仓价（期权报价）');
+  if(!eq || !price){
+    showEmpty('请完整填写：总权益、期权价格');
     return;
   }
+  const mo = String(($('optMonth') ? $('optMonth').value : '') || '').trim();
+  if (mo && !/^\d{3,4}$/.test(mo)){ showError('合约年月请填 3~4 位数字（如 2611）'); return; }
   fetchT('/api/calc/options',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({equity:eq,code:selCode.O,entry,
+    body:JSON.stringify({equity:eq,code:selCode.O,direction:dirO,month:mo,
+      strike: ($('optStrike') ? $('optStrike').value : ''),
+      delta: ($('optDelta') ? $('optDelta').value : ''),
+      entry: price,
       risk_percent: $('riskAmountO').value ? parseFloat($('riskAmountO').value) : 3})})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ showError(d.error||'计算失败'); return; }
@@ -7297,20 +7467,55 @@ function renderO(d){
   $('empty').classList.add('hidden');
   hideAllResults();
   $('resultO').classList.remove('hidden');
+  // v50.84: 方向/腿色跟结果一起恢复(切模式回来时卡片颜色不能错)
+  dirO = (d.direction === 'short') ? 'short' : 'long';
+  document.querySelectorAll('#dirSegO button').forEach(b=>b.classList.toggle('active', b.dataset.dir === dirO));
+  updateEntryOUI();
   $('rBudgetO').textContent = fmtMoney(d.budget);
   $('rLotsO').textContent = d.max_lots;
   $('rPremiumO').textContent = fmtMoney(d.premium_per_lot);
   $('rContractO').textContent = d.contract+'（'+d.code+' · '+d.exchange+'）';
   $('rMultO').textContent = d.opt_mult+' '+d.unit;
-  // v50.83: 开仓价 = 期权报价(不含乘数), 每手权利金 = 报价 × 乘数 —— 两处都写清楚
+  // v50.83: 期权价格 = 行情报价(不含乘数), 每手权利金 = 报价 × 乘数 —— 两处都写清楚
   const _u0 = String(d.unit || '吨/手').split('/')[0];
-  if ($('rPremSubO')) $('rPremSubO').textContent = '1 手价格 = 报价 × 乘数 ' + d.opt_mult;
+  if ($('rPremSubO')) $('rPremSubO').textContent = '1 手价格 = 期权价格 × 乘数 ' + d.opt_mult;
   if ($('rEntryO')) $('rEntryO').textContent = fmt(d.entry_price) + ' 元/' + _u0;
+  if ($('rCodeO')) $('rCodeO').textContent = d.contract_code || '—（填合约年月 + 行权价后自动拼出）';
+  if ($('rDeltaO')) $('rDeltaO').textContent = (d.delta == null) ? '—' : fmtDelta4(d.delta);
   $('rFundsO').textContent = fmtMoney(d.funds_used);
   const b = $('rIvBadge');
   b.className = 'badge good';
   const pct = (d.risk_percent != null ? d.risk_percent : 3).toFixed(1).replace(/\.0$/, '');
   b.innerHTML = '<span class="ico">◈</span>权益 × ' + pct + '%';
+  /* v50.84: 止盈目标价位 —— 期权价格涨到 2/4/8/16 倍时, 直接给出下单价位与持仓价值
+     ⚠ 单腿买方: 目标价 = 当前期权价格 × N(该腿权利金市值), 与左侧「期权价格」同一口径 */
+  if ($('rTargetsO')){
+    const isPut = (d.call_put === 'P');
+    const cpCls = isPut ? 'cp-put' : 'cp-call';
+    $('rTargetsO').innerHTML = (d.enough_lots && (d.targets || []).length) ? (
+      '<div class="dt-head">'
+      + '<span class="dt-ico">🎯</span>'
+      + '<span class="dt-title">期权止盈目标价位<small>期权价格涨到 N 倍（＝当前 '
+      + fmt(d.entry_price) + ' × N）时的价位与持仓价值</small></span>'
+      + '<span class="dt-sum">权利金成本 <b>' + fmtMoney(d.funds_used) + '</b></span>'
+      + '</div>'
+      + '<table class="dual-target-tbl"><thead><tr>'
+      + '<th>目标</th><th class="' + cpCls + '">期权价格目标（元/' + _u0 + '）</th>'
+      + '<th>每手权利金</th><th>合计价值</th><th>浮盈</th></tr></thead><tbody>'
+      + d.targets.map(t =>
+          '<tr><td class="dt-n"><b>' + t.n + '×</b></td>'
+          + '<td class="big ' + cpCls + '"><span class="dt-px">¥' + fmt(t.price_unit) + '</span>'
+          + '<span class="dt-mult">' + t.n + '×</span></td>'
+          + '<td>' + fmtMoney(t.premium_per_lot) + '</td>'
+          + '<td class="gold">' + fmtMoney(t.value) + '</td>'
+          + '<td class="' + (t.profit >= 0 ? 'good' : 'bad') + '">'
+          + (t.profit >= 0 ? '+' : '−') + fmtMoney(Math.abs(t.profit)) + '</td></tr>'
+        ).join('')
+      + '</tbody></table>'
+      + '<div class="tip">目标价与左侧「期权价格」同一口径（元/' + _u0 + '），可直接照着盘面报价挂单；'
+      + '按 ' + d.max_lots + ' 手算的持仓价值与浮盈。</div>'
+    ) : '';
+  }
   const warnO = $('rWarnO');
   if(!d.enough_lots){
     warnO.classList.remove('hidden');
@@ -7318,6 +7523,48 @@ function renderO(d){
   } else {
     warnO.classList.add('hidden');
   }
+}
+
+/* v50.84: 期权买方测算 → 交易记录(单腿, 与「新建开仓」弹窗同一套字段) */
+async function addOptionsToTradeRecord(){
+  if (curMode !== 'options'){ alert('请先切到开仓计算器的「期权买方」'); return; }
+  const d = lastCalcO;
+  if (!d){ alert('测算结果还没生成，请稍候再点'); return; }
+  if (!d.enough_lots || !(d.max_lots > 0)){ alert('当前测算买不到 1 手（预算不足），无法加入记录'); return; }
+  if (!d.contract_code){ alert('请先填「合约年月」与「行权价」，才能拼出合约代码（如 cu2612C80000）'); return; }
+  const now = new Date();
+  const payload = {
+    mode: 'options',
+    underlying: d.code,
+    contract: d.contract_code,
+    batch: newBatch(),
+    op_type: 'open',
+    direction: 'buy',                        // 期权买方 = 买入开仓
+    call_put: d.call_put,                    // 做多 → C, 做空 → P
+    open_date: now.toISOString().slice(0, 10),
+    open_time: now.toTimeString().slice(0, 5),
+    open_price: d.entry_price,               // 期权价格(报价口径, 与弹窗/双买一致)
+    qty: d.max_lots,
+    premium: Math.round(d.premium_per_lot * d.max_lots * 100) / 100,   // 每手 × 手数
+    open_delta: d.delta,
+    note: '来自开仓计算器 · ' + d.contract + (d.month ? ' ' + d.month : '')
+          + (d.call_put === 'P' ? ' 看跌 put' : ' 看涨 call')
+          + ' 行权价 ' + (d.strike_fmt || '—') + ' @' + fmtTrim(d.entry_price),
+  };
+  try {
+    const r = await fetchT('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)});
+    const j = await r.json();
+    if (!j.ok){ alert('加入记录失败：' + (j.error || '未知错误')); return; }
+    // 与期货/双买一致: 不弹成功框, 直接跳到「交易记录 · 期权买方」并打开这条记录
+    if (typeof TradeUI !== 'undefined'){
+      TradeUI.setMode('options');
+      await TradeUI.refresh();
+      const tab = document.querySelector('#mainTabs .maintab[data-tab="trades"]');
+      if (tab) tab.click();
+      TradeUI.loadDetail(d.code, payload.batch);
+    }
+  } catch(e){ alert('加入记录失败：' + e); }
 }
 
 function showEmpty(msg){
@@ -7567,9 +7814,19 @@ function renderPlans(){
       '</div>';
     }
     if (isOpt){
-      return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' 报价 ' + escHtml(p.entry) + '">' +
-        '<span class="nm">' + escHtml(p.contract) + ' <span class="d long">买</span> ' + escHtml(p.entry) + '</span>' +
-        '<span class="meta">' + escHtml(String(p.code||'').toUpperCase()) + ' · 开仓价 ' + escHtml(p.entry) + ' · 风险 ' + escHtml(p.riskPct) + '%' +
+      // v50.84: 卡片标出方向(看涨 call / 看跌 put)与合约年月·行权价, 老方案没有这些键则省略
+      const _cpTxt = (p.cp === 'P' || p.dir === 'short') ? '看跌 put' : '看涨 call';
+      const _cpCls = (p.cp === 'P' || p.dir === 'short') ? 'short' : 'long';
+      const _con = (p.month ? (String(p.code || '') + p.month + (p.cp === 'P' ? 'P' : 'C')
+        + (p.strike || '')) : '');
+      return '<div class="plans-item" data-idx="' + i + '" title="点击调出: ' + escHtml(p.contract) + ' ' + _cpTxt
+        + ' 期权价格 ' + escHtml(p.entry) + '">' +
+        '<span class="nm">' + escHtml(p.contract) + ' <span class="d ' + _cpCls + '">' + _cpTxt + '</span> '
+        + escHtml(p.entry) + '</span>' +
+        '<span class="meta">' + (_con ? escHtml(_con) + ' · ' : '')
+        + escHtml(String(p.code || '').toUpperCase()) + ' · 期权价格 ' + escHtml(p.entry)
+        + (p.delta ? ' · Δ' + escHtml(p.delta) : '')
+        + ' · 风险 ' + escHtml(p.riskPct) + '%' +
         (p.eqWan ? ' · 权益 ' + escHtml(p.eqWan) + '万' : '') + '</span>' +
         '<span class="del" data-del="1" title="删除这条方案">✕</span>' +
         '<span class="go">调出</span>' +
@@ -7622,23 +7879,33 @@ function saveCurrentPlan(){
     persistPlans();
     return;
   }
-  /* 期权模式: 保存 标的 / 每手权利金 / 风险额度 / 权益 */
+  /* 期权买方: 保存 标的 / 方向 / 合约年月·行权价·delta / 期权价格 / 风险额度 / 权益 (v50.84) */
   if (curMode === 'options'){
     if (!selCode.O){ alert('请先选择开仓标的'); return; }
     const eqWanO = parseFloat($('equity').value);
     const prem = parseFloat($('entryO').value);
     if (!(eqWanO > 0 && prem > 0)){
-      alert('请先完整填写：总权益、开仓价（期权报价），再保存方案');
+      alert('请先完整填写：总权益、期权价格，再保存方案');
       return;
     }
     const co = CONTRACTS.find(x=>x.code.toLowerCase() === String(selCode.O).toLowerCase())
       || {name: selCode.O, code: selCode.O};
-    const sigO = String(co.code).toLowerCase() + '|' + prem;
-    planListO = planListO.filter(x => (String(x.code).toLowerCase() + '|' + parseFloat(x.entry)) !== sigO);
+    const moO = String($('optMonth') ? $('optMonth').value : '').trim();
+    const kO = String($('optStrike') ? $('optStrike').value : '').trim();
+    // 同「标的 + 方向 + 年月 + 行权价」视为同一组方案(覆盖旧的); 期权价格不同也算同一组
+    const sigO = String(co.code).toLowerCase() + '|' + dirO + '|' + moO + '|' + kO;
+    planListO = planListO.filter(x => (String(x.code).toLowerCase() + '|' + (x.dir || 'long') + '|'
+      + (x.month || '') + '|' + (x.strike || '')) !== sigO);
     planListO.unshift({
       code: co.code,
       contract: co.name,
-      entry: rawVal('entryO'),
+      dir: dirO,
+      month: rawVal('optMonth'),
+      strike: rawVal('optStrike'),
+      delta: rawVal('optDelta'),
+      entry: rawVal('entryO'),                 // 期权价格(报价口径)
+      premium: rawVal('optPremium'),
+      cp: optCpO(),
       riskPct: String($('riskAmountO').value || '3'),
       eqWan: rawVal('equity'),
     });
@@ -7680,7 +7947,15 @@ function recallPlan(p){
     setMode('options');
     $('cSearchO').value = c.name + ' ' + c.code + ' · ' + c.exchange;   // 同步搜索框显示
     pickContract(c, 'O');                                 // 设置单位/行情(内部会触发一次计算)
+    // v50.84: 方向 + 合约参数一起恢复(老方案没有这些键 → 退化为原来的「只恢复期权价格」)
+    dirO = (p.dir === 'short') ? 'short' : 'long';
+    document.querySelectorAll('#dirSegO button').forEach(b=>b.classList.toggle('active', b.dataset.dir === dirO));
+    if ($('optMonth')) $('optMonth').value = p.month || '';
+    if ($('optStrike')) $('optStrike').value = p.strike || '';
+    if ($('optDelta')) $('optDelta').value = p.delta || '';
     $('entryO').value = p.entry;
+    if ($('optPremium')) $('optPremium').value = p.premium || optPremFromPrice(p.entry);
+    updateEntryOUI();
     const wantO = Number(p.riskPct);
     if (RISK_OPTS.indexOf(wantO) >= 0) $('riskAmountO').value = String(wantO);
     if (p.eqWan){                                          // 恢复该方案当时的总权益
