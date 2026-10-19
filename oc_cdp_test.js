@@ -4907,6 +4907,103 @@ async function main() {
         v87.tip.slice(0, 120));
   check('夏普年化(v50.87): 用例清理干净', v87.cleaned === true, String(v87.cleaned));
 
+  // ===== v50.88: 交易记录工具栏「当前权益」+ 风险比例 =====
+  const v88Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const out = {};
+    await post({mode:'options', underlying:'e2eeq88', contract:'e2eeq88C9000', batch:'B88',
+      op_type:'open', direction:'buy', call_put:'C', open_date:'2026-10-10',
+      open_price:60, qty:2, premium:1200});
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(800);
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(700);
+    const eqBar = document.getElementById('curEqBar');
+    const eq = document.getElementById('curEquity');
+    const bar = document.getElementById('openRisk');
+    // ① 位置: 紧跟在「手续费」口径条右边
+    out.afterFee = !!(eqBar && eqBar.previousElementSibling && eqBar.previousElementSibling.id === 'feeSeg');
+    out.inToolbar = !!(eqBar && eqBar.closest('.trades-toolbar'));
+    // ② 没填权益 → 风险比例显示 —
+    eq.value = ''; eq.dispatchEvent(new Event('input', {bubbles:true})); await w(400);
+    out.emptyTxt = bar.textContent;
+    out.emptyTip = bar.getAttribute('title') || '';
+    // ③ 填 12 万 → 风险比例 = 最大亏损 ÷ 120000
+    const rk = await (await fetch('/api/trades/open-risk?mode=options&fee=ex')).json();
+    eq.value = '12'; eq.dispatchEvent(new Event('input', {bubbles:true})); await w(500);
+    out.rk = {maxLoss: rk.max_loss, partial: rk.max_loss_is_partial};
+    out.ratioText = (bar.textContent.match(/风险比例\\s*(≥\\s*)?[\\d.]+%/) || [])[0] || '';
+    out.ratioTip = bar.getAttribute('title') || '';
+    out.exp = (rk.max_loss / 120000 * 100).toFixed(2) + '%';
+    // ④ 记住: localStorage + 切模式再回来
+    out.ls = localStorage.getItem('oc-cur-equity');
+    TradeUI.setMode('futures'); await w(400);
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(600);
+    out.afterSwitch = eq.value;
+    // ⑤ 进 .opcalc 备份(plansSnapshot) + 恢复(不计入方案组数)
+    out.snapEq = plansSnapshot().curEquity;
+    const nBack = plansRestore({futures:[], options:[], dual:[], curEquity:'88'});
+    out.restoreCnt = nBack;
+    out.restoredEq = eq.value;
+    eq.value = '12'; eq.dispatchEvent(new Event('input', {bubbles:true}));
+    // ⑥ 期货模式: 一笔有止损 + 一笔没设止损 → 比例前面要带「≥」(只是下限)
+    await post({mode:'futures', underlying:'e2efq88a', contract:'e2efq88a2611', batch:'B88f',
+      op_type:'open', direction:'buy', open_date:'2026-10-10', open_price:3200, qty:2,
+      premium:0, init_stop:3100});
+    await post({mode:'futures', underlying:'e2efq88b', contract:'e2efq88b2611', batch:'B88g',
+      op_type:'open', direction:'buy', open_date:'2026-10-10', open_price:3400, qty:1, premium:0});
+    TradeUI.setMode('futures'); await TradeUI.refresh(); await w(800);
+    const fbar = document.getElementById('openRisk');
+    out.futTxt = fbar.textContent;
+    out.futTip = fbar.getAttribute('title') || '';
+    // 清理
+    const gf = await (await fetch('/api/trades/groups?mode=futures&fee=ex')).json();
+    for (const x of (gf.groups || [])){
+      if (String(x.underlying).indexOf('e2efq88') !== 0) continue;
+      const df = await (await fetch('/api/trades/detail?mode=futures&underlying=' + x.underlying
+        + '&batch=' + encodeURIComponent(x.batch || ''))).json();
+      for (const op of (df.operations || [])){
+        await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: op.id})});
+      }
+    }
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(300);
+    // 清理(期权)
+    const g = await (await fetch('/api/trades/groups?mode=options&fee=ex')).json();
+    for (const x of (g.groups || [])){
+      if (x.underlying !== 'e2eeq88') continue;
+      const d = await (await fetch('/api/trades/detail?mode=options&underlying=e2eeq88&batch='
+        + encodeURIComponent(x.batch || ''))).json();
+      for (const op of (d.operations || [])){
+        await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: op.id})});
+      }
+    }
+    out.cleaned = ((await (await fetch('/api/trades/groups?mode=options&fee=ex')).json()).groups || [])
+      .filter(x => x.underlying === 'e2eeq88').length === 0;
+    return JSON.stringify(out);
+  })()`);
+  const v88 = JSON.parse(v88Run);
+  check('当前权益(v50.88): 输入框在「手续费」口径条的右边(同一工具栏)',
+        v88.afterFee === true && v88.inToolbar === true, JSON.stringify({after: v88.afterFee}));
+  check('风险比例(v50.88): 没填权益时显示「—」并在悬停里提示先填',
+        /风险比例\s*—/.test(v88.emptyTxt) && /先在工具栏「当前权益」填/.test(v88.emptyTip),
+        v88.emptyTxt.slice(0, 80));
+  check('风险比例(v50.88): 填 12 万 → 最大亏损 ÷ 120000（页面 = 独立算出的 ' + v88.exp + '）',
+        v88.ratioText.indexOf(v88.exp) >= 0, v88.ratioText + ' vs ' + v88.exp);
+  check('风险比例(v50.88): 悬停里给出算式（最大亏损 ÷ 当前权益 = x%）',
+        /风险比例 = 最大亏损/.test(v88.ratioTip) && /÷ 当前权益/.test(v88.ratioTip),
+        v88.ratioTip.slice(-90));
+  check('当前权益(v50.88): 记住上次填的值（localStorage + 切模式不丢）',
+        v88.ls === '12' && v88.afterSwitch === '12', v88.ls + ' / ' + v88.afterSwitch);
+  check('当前权益(v50.88): 进 .opcalc 备份快照，恢复时写回且不计入方案组数',
+        v88.snapEq === '12' && v88.restoreCnt === 0 && v88.restoredEq === '88',
+        JSON.stringify({snap: v88.snapEq, n: v88.restoreCnt, back: v88.restoredEq}));
+  check('风险比例(v50.88): 期货模式也有这一项, 且有手数没设止损时前面带「≥」（下限）',
+        /风险比例\s*≥\s*[\d.]+%/.test(v88.futTxt) && /下限/.test(v88.futTip),
+        v88.futTxt.slice(-60) + ' | ' + (v88.futTip || '').slice(-40));
+  check('当前权益(v50.88): 用例清理干净', v88.cleaned === true, String(v88.cleaned));
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

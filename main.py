@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5087            # 与 README 版本号 v50.87 对齐(数值比较用于单实例接管)
+APP_VERSION = 5088            # 与 README 版本号 v50.88 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -5118,6 +5118,10 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .segbar .fee-opt:hover{background:var(--panel2);color:var(--text)}
 .segbar .fee-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .segbar .fee-opt.active:hover{color:#fff}
+/* v50.88: 工具栏「当前权益」输入(手续费口径右边) —— 跟工具栏按钮同高, 别用全局 input 的大内边距 */
+.eqbar{display:flex;align-items:center;gap:6px;flex:none}
+.eqbar input{width:76px;margin:0;padding:5px 8px;font-size:var(--fz-btn);text-align:right;border-radius:8px}
+.eqbar .eq-u{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap}
 /* v50.76: 统计区间工具条(在统计卡上方一行): 区间 + 口径 + 当前区间说明 */
 #rangeBar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px}
 .range-note{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap;line-height:1.5}
@@ -6083,6 +6087,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               <button type="button" class="fee-opt active" data-fee="ex" aria-pressed="true">交易所 + 0.01</button>
               <button type="button" class="fee-opt" data-fee="off" aria-pressed="false">不计算</button>
             </span>
+          </span>
+          <!-- v50.88: 当前权益(用户手填, 万元) —— 用来自动算下面风险条里的「风险比例」
+               = 未平仓最大亏损 ÷ 当前权益; 与计算器里的权益一样按「万元」填 -->
+          <span class="eqbar" id="curEqBar" title="当前账户权益（万元）：用来自动算下方「风险比例」= 未平仓最大亏损 ÷ 当前权益（状态会记住）">
+            <span class="fee-lbl">当前权益</span>
+            <input id="curEquity" type="number" min="0" step="any" inputmode="decimal" placeholder="如 120">
+            <span class="eq-u">万</span>
           </span>
           <span class="spacer"></span>
           <button class="btn xs rose" id="btnNewOpen">➕ 新建开仓</button>
@@ -7740,8 +7751,12 @@ function plansSnapshot(){
   let tradeRange = 'all', tradeRangeBasis = 'open';
   try { tradeRange = localStorage.getItem('oc-trade-range') || 'all'; } catch(e){}
   try { tradeRangeBasis = localStorage.getItem('oc-trade-range-basis') || 'open'; } catch(e){}
+  // v50.88: 交易记录工具栏的「当前权益」(万元) 也一并打包
+  let curEquity = '';
+  try { curEquity = localStorage.getItem('oc-cur-equity') || ''; } catch(e){}
   return { futures: planList.slice(), options: planListO.slice(), dual: planListD.slice(),
            feeMode: (feeMode === 'off') ? 'off' : 'ex',
+           curEquity: /^\d*\.?\d*$/.test(curEquity) ? curEquity : '',
            tradeRange: (['1m','3m','1y','ytd','all'].indexOf(tradeRange) >= 0) ? tradeRange : 'all',
            tradeRangeBasis: (tradeRangeBasis === 'close') ? 'close' : 'open' };
 }
@@ -7771,6 +7786,11 @@ function plansRestore(pl){
     try { localStorage.setItem('oc-trade-range-basis', pl.tradeRangeBasis); } catch(e){}
   }
   if (typeof TradeUI !== 'undefined' && TradeUI.applyRangePref) TradeUI.applyRangePref();
+  // v50.88: 恢复「当前权益」(老备份没有该键 → 保持本机设置; 不计入 n)
+  if (typeof pl.curEquity === 'string' && /^\d*\.?\d*$/.test(pl.curEquity)){
+    try { localStorage.setItem('oc-cur-equity', pl.curEquity); } catch(e){}
+    if (typeof TradeUI !== 'undefined' && TradeUI.applyCurEquityPref) TradeUI.applyCurEquityPref();
+  }
   if (n){ loadPlans(); renderPlans(); }
   return n;
 }
@@ -8320,6 +8340,12 @@ const TradeUI = {
       if (b && b.dataset.fee !== this.feeMode) this.setFeeMode(b.dataset.fee);
     });
     this.applyFeePref();
+    // v50.88: 当前权益(用户手填) —— 记在 localStorage, 输入即重画风险条(风险比例跟着变)
+    this.applyCurEquityPref();
+    if ($('curEquity')) $('curEquity').addEventListener('input', () => {
+      try { localStorage.setItem('oc-cur-equity', String($('curEquity').value || '')); } catch(e){}
+      this.renderRisk();
+    });
     // v50.76 统计区间 + 区间口径: 切换只改前端过滤 → 立刻重画(不用重拉接口)
     const rangeBar = $('rangeBar');
     if (rangeBar) rangeBar.addEventListener('click', e => {
@@ -8693,6 +8719,18 @@ const TradeUI = {
     this.feeMode = (v === 'off') ? 'off' : 'ex';
     this.syncFeeSeg();
   },
+  /* v50.88: 当前权益(万元) —— 用户手填, 存 localStorage; 没填返回 0 */
+  applyCurEquityPref(){
+    const el = $('curEquity');
+    if (!el) return;
+    let v = '';
+    try { v = localStorage.getItem('oc-cur-equity') || ''; } catch(e){ v = ''; }
+    el.value = v;
+  },
+  curEquityYuan(){
+    const v = parseFloat(($('curEquity') || {}).value);
+    return (isFinite(v) && v > 0) ? v * 10000 : 0;
+  },
   /* 分段控件的选中态: 与 #feeSeg 里按钮的 data-fee 对齐 */
   syncFeeSeg(){
     document.querySelectorAll('#feeSeg .fee-opt').forEach(b => {
@@ -8796,10 +8834,16 @@ const TradeUI = {
     const lossLabel = isOpt ? '最大亏损' : '理论最大亏损';
     const item = (k, v, cls) => '<span class="rb-item"><span class="rb-k">' + k + '</span>'
       + '<span class="rb-v ' + (cls || '') + '">' + v + '</span></span>';
+    /* v50.88: 风险比例 = 未平仓最大亏损 ÷ 当前权益(工具栏手填, 万元)
+       ⚠ max_loss = 0 时不报 0%（那通常是一笔都没设止损, 真实风险未知）→ 显示「—」;
+         有没设止损的手数时是下限 → 前面加「≥」 */
+    const eqYuan = this.curEquityYuan();
+    const ratio = (eqYuan > 0 && r.max_loss > 0) ? (r.max_loss / eqYuan * 100) : null;
     box.innerHTML =
       item('未平仓', r.positions + ' 笔 · ' + r.lots + ' 手')
       + item(occLabel, money(r.occupied))
       + item(lossLabel, money(r.max_loss), 'warn')
+      + item('风险比例', ratio == null ? '—' : ((r.max_loss_is_partial ? '≥ ' : '') + ratio.toFixed(2) + '%'))
       + (r.max_loss_is_partial
           ? '<span class="rb-tip">还有 ' + r.no_stop_lots + ' 手没设初始止损，实际可能更大</span>' : '')
       + '<span class="rb-spacer"></span>'
@@ -8813,7 +8857,14 @@ const TradeUI = {
       + ' · ' + x.lots + ' 手 · 占用 ' + money(x.occupied) + ' · 最大亏损 ' + money(x.max_loss)
       + ((r.margin_rate_custom && (x.margin_rates || []).length)
           ? ' · 保证金率 ' + x.margin_rates.map(v => Math.round(v * 100 * 100) / 100 + '%').join('/') : '')).join('\n')
-      + ((r.items || []).length > 12 ? '\n…' : '');
+      + ((r.items || []).length > 12 ? '\n…' : '')
+      // v50.88: 明细后面附带风险比例的算式, 一眼能核对
+      + '\n\n' + (ratio != null
+          ? ('风险比例 = 最大亏损 ' + money(r.max_loss) + ' ÷ 当前权益 ' + money(eqYuan)
+             + ' = ' + ratio.toFixed(2) + '%' + (r.max_loss_is_partial ? '（下限，有手数没设止损）' : ''))
+          : (eqYuan > 0
+             ? '风险比例：当前没有可算的最大亏损（未设止损或空仓）'
+             : '风险比例：先在工具栏「当前权益」填上账户权益（万元）'));
     box.classList.remove('hidden');
   },
 
