@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5088            # 与 README 版本号 v50.88 对齐(数值比较用于单实例接管)
+APP_VERSION = 5089            # 与 README 版本号 v50.89 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -7751,12 +7751,16 @@ function plansSnapshot(){
   let tradeRange = 'all', tradeRangeBasis = 'open';
   try { tradeRange = localStorage.getItem('oc-trade-range') || 'all'; } catch(e){}
   try { tradeRangeBasis = localStorage.getItem('oc-trade-range-basis') || 'open'; } catch(e){}
-  // v50.88: 交易记录工具栏的「当前权益」(万元) 也一并打包
-  let curEquity = '';
-  try { curEquity = localStorage.getItem('oc-cur-equity') || ''; } catch(e){}
+  // v50.88/89: 交易记录工具栏的「当前权益」(万元) 也一并打包 —— 三个模式各一份(分账户)
+  const eqOf = m => {
+    try { const v = localStorage.getItem('oc-cur-equity-' + m); if (v != null && v !== '') return v; } catch(e){}
+    try { return localStorage.getItem('oc-cur-equity') || ''; } catch(e){ return ''; }   // 老版本共用键
+  };
+  const okEq = v => /^\d*\.?\d*$/.test(String(v || '')) ? String(v) : '';
   return { futures: planList.slice(), options: planListO.slice(), dual: planListD.slice(),
            feeMode: (feeMode === 'off') ? 'off' : 'ex',
-           curEquity: /^\d*\.?\d*$/.test(curEquity) ? curEquity : '',
+           curEquity: { futures: okEq(eqOf('futures')), options: okEq(eqOf('options')),
+                        dual: okEq(eqOf('dual')) },
            tradeRange: (['1m','3m','1y','ytd','all'].indexOf(tradeRange) >= 0) ? tradeRange : 'all',
            tradeRangeBasis: (tradeRangeBasis === 'close') ? 'close' : 'open' };
 }
@@ -7786,10 +7790,22 @@ function plansRestore(pl){
     try { localStorage.setItem('oc-trade-range-basis', pl.tradeRangeBasis); } catch(e){}
   }
   if (typeof TradeUI !== 'undefined' && TradeUI.applyRangePref) TradeUI.applyRangePref();
-  // v50.88: 恢复「当前权益」(老备份没有该键 → 保持本机设置; 不计入 n)
-  if (typeof pl.curEquity === 'string' && /^\d*\.?\d*$/.test(pl.curEquity)){
-    try { localStorage.setItem('oc-cur-equity', pl.curEquity); } catch(e){}
+  // v50.88/89: 恢复「当前权益」—— 新备份是按模式存的; 老备份只有一个字符串(→ 三个模式都写)
+  const okEq2 = v => (typeof v === 'string' && /^\d*\.?\d*$/.test(v)) ? v : null;
+  if (pl.curEquity && typeof pl.curEquity === 'object'){
+    ['futures', 'options', 'dual'].forEach(m => {
+      const v = okEq2(pl.curEquity[m]);
+      if (v != null){ try { localStorage.setItem('oc-cur-equity-' + m, v); } catch(e){} }
+    });
     if (typeof TradeUI !== 'undefined' && TradeUI.applyCurEquityPref) TradeUI.applyCurEquityPref();
+  } else {
+    const v = okEq2(pl.curEquity);
+    if (v != null){
+      ['futures', 'options', 'dual'].forEach(m => {
+        try { localStorage.setItem('oc-cur-equity-' + m, v); } catch(e){}
+      });
+      if (typeof TradeUI !== 'undefined' && TradeUI.applyCurEquityPref) TradeUI.applyCurEquityPref();
+    }
   }
   if (n){ loadPlans(); renderPlans(); }
   return n;
@@ -8259,6 +8275,12 @@ const TradeUI = {
       if ($('tradesSearchClear')) $('tradesSearchClear').hidden = true;
       this.closeDetail();
     }
+    // v50.89: 分账户 → 换模式就把「当前权益」换成该模式自己的值
+    //   ⚠ 旧风险数据属于上一个模式, 换模式后要等 refresh() 重拉 → 先清空, 免得
+    //     「新模式权益 + 旧模式最大亏损」算出一个错的百分比
+    if (changed) this.risk = null;
+    this.applyCurEquityPref();
+    this.renderRisk();
   },
 
   /* 方向文案: 期权 买入/卖出; 期货 多头/空头 */
@@ -8343,7 +8365,7 @@ const TradeUI = {
     // v50.88: 当前权益(用户手填) —— 记在 localStorage, 输入即重画风险条(风险比例跟着变)
     this.applyCurEquityPref();
     if ($('curEquity')) $('curEquity').addEventListener('input', () => {
-      try { localStorage.setItem('oc-cur-equity', String($('curEquity').value || '')); } catch(e){}
+      this.setCurEquity($('curEquity').value);
       this.renderRisk();
     });
     // v50.76 统计区间 + 区间口径: 切换只改前端过滤 → 立刻重画(不用重拉接口)
@@ -8719,13 +8741,32 @@ const TradeUI = {
     this.feeMode = (v === 'off') ? 'off' : 'ex';
     this.syncFeeSeg();
   },
-  /* v50.88: 当前权益(万元) —— 用户手填, 存 localStorage; 没填返回 0 */
+  /* v50.88/89: 当前权益(万元) —— 用户手填
+     ⚠ v50.89: 三个模式**分账户**, 各自存一份(`oc-cur-equity-futures` / `-options` / `-dual`),
+       切模式时输入框跟着换成该模式的值; 老版本只有一个共用键 `oc-cur-equity`,
+       首次读取时把它当默认值(三个模式都继承一次, 之后再各改各的) */
+  curEquityKey(m){ return 'oc-cur-equity-' + ((m || this.mode) === 'futures' ? 'futures'
+                        : ((m || this.mode) === 'dual' ? 'dual' : 'options')); },
+  getCurEquity(m){
+    const k = this.curEquityKey(m);
+    let v = null, legacy = null;
+    try { v = localStorage.getItem(k); } catch(e){ v = null; }
+    if (v != null && v !== '') return v;
+    // 兼容老版本: 只有一个共用键 → 当作该模式的初值(写回到自己的键, 之后互不影响)
+    try { legacy = localStorage.getItem('oc-cur-equity'); } catch(e){ legacy = null; }
+    if (legacy != null && legacy !== ''){
+      try { localStorage.setItem(k, legacy); } catch(e){}
+      return legacy;
+    }
+    return '';
+  },
+  setCurEquity(v){
+    try { localStorage.setItem(this.curEquityKey(), String(v == null ? '' : v)); } catch(e){}
+  },
   applyCurEquityPref(){
     const el = $('curEquity');
     if (!el) return;
-    let v = '';
-    try { v = localStorage.getItem('oc-cur-equity') || ''; } catch(e){ v = ''; }
-    el.value = v;
+    el.value = this.getCurEquity();
   },
   curEquityYuan(){
     const v = parseFloat(($('curEquity') || {}).value);

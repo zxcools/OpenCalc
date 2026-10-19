@@ -4913,6 +4913,9 @@ async function main() {
     const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
                               body: JSON.stringify(p)}).then(r=>r.json());
     const out = {};
+    // 干净的起点: 三个模式的权益都清掉(复用同一 profile 重跑时不会带上一轮的值)
+    ['futures', 'options', 'dual'].forEach(m => localStorage.removeItem('oc-cur-equity-' + m));
+    localStorage.removeItem('oc-cur-equity');
     await post({mode:'options', underlying:'e2eeq88', contract:'e2eeq88C9000', batch:'B88',
       op_type:'open', direction:'buy', call_put:'C', open_date:'2026-10-10',
       open_price:60, qty:2, premium:1200});
@@ -4935,16 +4938,27 @@ async function main() {
     out.ratioText = (bar.textContent.match(/风险比例\\s*(≥\\s*)?[\\d.]+%/) || [])[0] || '';
     out.ratioTip = bar.getAttribute('title') || '';
     out.exp = (rk.max_loss / 120000 * 100).toFixed(2) + '%';
-    // ④ 记住: localStorage + 切模式再回来
-    out.ls = localStorage.getItem('oc-cur-equity');
-    TradeUI.setMode('futures'); await w(400);
+    // ④ 分账户: 期权买方 12 万 / 期货 20 万 / 双买空着, 三个互不影响
+    out.ls = localStorage.getItem('oc-cur-equity-options');
+    TradeUI.setMode('futures'); await w(500);
+    out.futEqBefore = eq.value;                     // 期货还没填过 → 空
+    eq.value = '20'; eq.dispatchEvent(new Event('input', {bubbles:true})); await w(300);
+    TradeUI.setMode('options'); await w(500);
+    out.backOpt = eq.value;                         // 回期权买方 → 还是 12
+    TradeUI.setMode('dual'); await w(500);
+    out.dualEq = eq.value;                          // 双买独立 → 空
+    TradeUI.setMode('futures'); await w(500);
+    out.futEq = eq.value;                           // 期货 → 20
     TradeUI.setMode('options'); await TradeUI.refresh(); await w(600);
-    out.afterSwitch = eq.value;
-    // ⑤ 进 .opcalc 备份(plansSnapshot) + 恢复(不计入方案组数)
+    // ⑤ 进 .opcalc 备份(按模式存) + 恢复(不计入方案组数; 老格式字符串仍兼容)
     out.snapEq = plansSnapshot().curEquity;
     const nBack = plansRestore({futures:[], options:[], dual:[], curEquity:'88'});
     out.restoreCnt = nBack;
-    out.restoredEq = eq.value;
+    out.restoredEq = eq.value;                      // 老格式 → 三个模式都写 88
+    const nBack2 = plansRestore({futures:[], options:[], dual:[],
+      curEquity:{futures:'30', options:'12', dual:'7'}});
+    out.restoreCnt2 = nBack2;
+    out.restoredEq2 = eq.value;                     // 新格式 → 只改本模式(期权买方 12)
     eq.value = '12'; eq.dispatchEvent(new Event('input', {bubbles:true}));
     // ⑥ 期货模式: 一笔有止损 + 一笔没设止损 → 比例前面要带「≥」(只是下限)
     await post({mode:'futures', underlying:'e2efq88a', contract:'e2efq88a2611', batch:'B88f',
@@ -4994,11 +5008,20 @@ async function main() {
   check('风险比例(v50.88): 悬停里给出算式（最大亏损 ÷ 当前权益 = x%）',
         /风险比例 = 最大亏损/.test(v88.ratioTip) && /÷ 当前权益/.test(v88.ratioTip),
         v88.ratioTip.slice(-90));
-  check('当前权益(v50.88): 记住上次填的值（localStorage + 切模式不丢）',
-        v88.ls === '12' && v88.afterSwitch === '12', v88.ls + ' / ' + v88.afterSwitch);
-  check('当前权益(v50.88): 进 .opcalc 备份快照，恢复时写回且不计入方案组数',
-        v88.snapEq === '12' && v88.restoreCnt === 0 && v88.restoredEq === '88',
-        JSON.stringify({snap: v88.snapEq, n: v88.restoreCnt, back: v88.restoredEq}));
+  check('当前权益(v50.89): 三个模式分账户 —— 期权买方 12 / 期货 20 互不影响, 双买默认空',
+        v88.ls === '12' && v88.futEqBefore === '' && v88.backOpt === '12'
+        && v88.dualEq === '' && v88.futEq === '20',
+        JSON.stringify({ls: v88.ls, futBefore: v88.futEqBefore, backOpt: v88.backOpt,
+                        dual: v88.dualEq, fut: v88.futEq}));
+  check('当前权益(v50.89): 备份按模式存(futures/options/dual 三个键)',
+        v88.snapEq && v88.snapEq.options === '12' && v88.snapEq.futures === '20'
+        && v88.snapEq.dual === '',
+        JSON.stringify(v88.snapEq));
+  check('当前权益(v50.89): 恢复新格式(按模式) → 只改本模式; 老格式(字符串) → 三个都写',
+        v88.restoreCnt === 0 && v88.restoredEq === '88'
+        && v88.restoreCnt2 === 0 && v88.restoredEq2 === '12',
+        JSON.stringify({n1: v88.restoreCnt, back1: v88.restoredEq,
+                        n2: v88.restoreCnt2, back2: v88.restoredEq2}));
   check('风险比例(v50.88): 期货模式也有这一项, 且有手数没设止损时前面带「≥」（下限）',
         /风险比例\s*≥\s*[\d.]+%/.test(v88.futTxt) && /下限/.test(v88.futTip),
         v88.futTxt.slice(-60) + ' | ' + (v88.futTip || '').slice(-40));
