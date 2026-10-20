@@ -825,18 +825,18 @@ try:
 except ValueError:
     check("delta 绝对值>1 被拒", True)
 
-# 止盈目标价: 2× / 4× / 8× / 16× 当前期权价格
+# 止盈目标价: 2× / 3× / 4× / 6× 当前期权价格(v50.90 改档)
 _tg = _op["targets"] if isinstance(_op.get("targets"), list) else []
-check("止盈目标价共 4 档 = 2/4/8/16 倍",
-      [x["n"] for x in _tg] == [2, 4, 8, 16], str([x["n"] for x in _tg]))
-check("目标报价 = 当前 72 × N(2→144 / 4→288 / 8→576 / 16→1152)",
-      [x["price_unit"] for x in _tg] == [144.0, 288.0, 576.0, 1152.0],
+check("止盈目标价共 4 档 = 2/3/4/6 倍",
+      [x["n"] for x in _tg] == [2, 3, 4, 6], str([x["n"] for x in _tg]))
+check("目标报价 = 当前 72 × N(2→144 / 3→216 / 4→288 / 6→432)",
+      [x["price_unit"] for x in _tg] == [144.0, 216.0, 288.0, 432.0],
       str([x["price_unit"] for x in _tg]))
-check("每手权利金 = 720 × N", [x["premium_per_lot"] for x in _tg] == [1440.0, 2880.0, 5760.0, 11520.0],
+check("每手权利金 = 720 × N", [x["premium_per_lot"] for x in _tg] == [1440.0, 2160.0, 2880.0, 4320.0],
       str([x["premium_per_lot"] for x in _tg]))
-check("合计价值 = 每手 × 5 手", [x["value"] for x in _tg] == [7200.0, 14400.0, 28800.0, 57600.0],
+check("合计价值 = 每手 × 5 手", [x["value"] for x in _tg] == [7200.0, 10800.0, 14400.0, 21600.0],
       str([x["value"] for x in _tg]))
-check("浮盈 = 目标价值 − 成本(3600)", [x["profit"] for x in _tg] == [3600.0, 10800.0, 25200.0, 54000.0],
+check("浮盈 = 目标价值 − 成本(3600)", [x["profit"] for x in _tg] == [3600.0, 7200.0, 10800.0, 18000.0],
       str([x["profit"] for x in _tg]))
 try:
     calc_options({"equity": 1000000, "code": "m", "entry": 800, "risk_percent": 0})
@@ -1703,7 +1703,7 @@ check("止盈价测算(v50.63): 全平后退回开仓记录回算",
 for _o in trade_detail(_dt_u, mode="dual", batch=_dt_b)["operations"]:
     trade_delete(_o["id"])
 
-# ---- v50.85: 期权买方(单腿)详情止盈目标价 = 当前持仓的期权价格 × 2/4/8/16 ----
+# ---- v50.85: 期权买方(单腿)详情止盈目标价 = 当前持仓的期权价格 × 2/3/4/6 ----
 _S85 = "p2701x85"
 trade_upsert({'mode': 'options', 'underlying': _S85, 'contract': 'p2701P9000', 'batch': 'B85a',
               'op_type': 'open', 'direction': 'buy', 'call_put': 'P', 'open_date': '2026-10-01',
@@ -1716,8 +1716,8 @@ check("单腿止盈(v50.85): 有 1 组(合约/手数/报价/乘数)",
 check("单腿止盈(v50.85): 每手权利金 = 报价 87.5 × 乘数 10 = 875(成本 2625)",
       abs(_g85[0]["premium_per_lot"] - 875) < 1e-9 and abs(_g85[0]["cost"] - 2625) < 0.01,
       "%s / %s" % (_g85[0]["premium_per_lot"], _g85[0]["cost"]))
-check("单腿止盈(v50.85): 4 档目标价 = 报价 × N(175/350/700/1400)",
-      [t["price_unit"] for t in _g85[0]["targets"]] == [175.0, 350.0, 700.0, 1400.0],
+check("单腿止盈(v50.85): 4 档目标价 = 报价 × N(175/262.5/350/525)",
+      [t["price_unit"] for t in _g85[0]["targets"]] == [175.0, 262.5, 350.0, 525.0],
       str([t["price_unit"] for t in _g85[0]["targets"]]))
 check("单腿止盈(v50.85): 合计价值 = 每手 × 手数(2× → 1750×3 = 5250) / 浮盈 − 成本",
       _g85[0]["targets"][0]["value"] == 5250.0 and _g85[0]["targets"][0]["profit"] == 2625.0,
@@ -1734,9 +1734,9 @@ trade_upsert({'mode': 'options', 'underlying': _S85, 'contract': 'p2703P9500', '
               'op_type': 'open', 'direction': 'buy', 'call_put': 'P', 'open_date': '2026-10-12',
               'open_price': 120, 'qty': 2, 'premium': 2400, 'open_delta': -0.3})
 _n85 = trade_detail(_S85, mode="options", batch='B85a')["tp_targets"]
-check("单腿止盈(v50.85): 换成新合约后只按新合约算(120 → 240/480/960/1920)",
+check("单腿止盈(v50.85): 换成新合约后只按新合约算(120 → 240/360/480/720)",
       len(_n85) == 1 and _n85[0]["contract"] == "p2703P9500" and _n85[0]["qty"] == 2
-      and [t["price_unit"] for t in _n85[0]["targets"]] == [240.0, 480.0, 960.0, 1920.0],
+      and [t["price_unit"] for t in _n85[0]["targets"]] == [240.0, 360.0, 480.0, 720.0],
       str([(g["contract"], [t["price_unit"] for t in g["targets"]]) for g in _n85]))
 # 同时持有两个合约 → 各算各的
 trade_upsert({'mode': 'options', 'underlying': _S85, 'contract': 'p2701P9000', 'batch': 'B85a',

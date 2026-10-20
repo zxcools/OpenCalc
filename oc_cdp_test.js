@@ -4667,9 +4667,11 @@ async function main() {
   check('期权买方(v50.84): 手数 3600÷275 = 13 / 占用 ¥3,575 / delta 4 位小数',
         v84.long.lots === '13' && /3,575/.test(v84.long.funds) && v84.long.delta === '0.3200',
         JSON.stringify({lots: v84.long.lots, funds: v84.long.funds, delta: v84.long.delta}));
-  check('期权买方(v50.84): 止盈目标价表 4 档 = 2×/4×/8×/16×(报价 110/220/440/880)',
-        v84.long.rows.length === 4 && v84.long.rows[0][0] === '2×' && /110/.test(v84.long.rows[0][1])
-        && /220/.test(v84.long.rows[1][1]) && /440/.test(v84.long.rows[2][1]) && /880/.test(v84.long.rows[3][1]),
+  check('期权买方(v50.90): 止盈目标价表 4 档 = 2×/3×/4×/6×(报价 110/165/220/330)',
+        v84.long.rows.length === 4 && v84.long.rows[0][0] === '2×' && v84.long.rows[1][0] === '3×'
+        && v84.long.rows[2][0] === '4×' && v84.long.rows[3][0] === '6×'
+        && /110/.test(v84.long.rows[0][1]) && /165/.test(v84.long.rows[1][1])
+        && /220/.test(v84.long.rows[2][1]) && /330/.test(v84.long.rows[3][1]),
         JSON.stringify(v84.long.rows));
   check('期权买方(v50.84): 止盈表列出 每手权利金 / 合计价值 / 浮盈(2× → 550 / 7,150 / +3,575)',
         /550/.test(v84.long.rows[0][2]) && /7,150/.test(v84.long.rows[0][3]) && /3,575/.test(v84.long.rows[0][4]),
@@ -4696,8 +4698,8 @@ async function main() {
   check('期权买方(v50.84): 用例清理干净(记录数回到原值)', v84.cleaned === true, String(v84.cleaned));
   check('期权买方(v50.85): 加入记录的「标的」带上合约年月(cu2612, 不再只是 cu)',
         v84.added.underlying === 'cu2612', String(v84.added.underlying));
-  check('期权买方(v50.85): 详情接口返回 tp_targets(报价目标 110/220/440/880)',
-        v84.added.tpTargets === 1 && (v84.added.tpFirst || []).join(',') === '110,220,440,880',
+  check('期权买方(v50.90): 详情接口返回 tp_targets(报价目标 110/165/220/330)',
+        v84.added.tpTargets === 1 && (v84.added.tpFirst || []).join(',') === '110,165,220,330',
         JSON.stringify(v84.added.tpFirst));
   check('期权买方(v50.85): 详情页真的画出「期权止盈目标价位」板块',
         /期权止盈目标价位/.test(v84.added.tpBox) && /2×/.test(v84.added.tpBox),
@@ -4751,14 +4753,14 @@ async function main() {
     return JSON.stringify(out);
   })()`);
   const v85 = JSON.parse(v85Run);
-  check('期权买方(v50.85): 手动新建的记录详情按当前持仓算目标价(87.5 → 175/350/700/1400)',
+  check('期权买方(v50.90): 手动新建的记录详情按当前持仓算目标价(87.5 → 175/262.5/350/525)',
         v85.one.length === 1 && v85.one[0][0] === 'p2701P9000' && v85.one[0][1] === 3
-        && v85.one[0][3].join(',') === '175,350,700,1400', JSON.stringify(v85.one));
+        && v85.one[0][3].join(',') === '175,262.5,350,525', JSON.stringify(v85.one));
   check('期权买方(v50.85): 全部平掉(还没开新合约)时退回开仓记录，仍有目标价',
         v85.closed.join(',') === 'p2701P9000', JSON.stringify(v85.closed));
-  check('期权买方(v50.85): 老合约平完 + 新开合约 → 目标价改成按新合约(120 → 240/480/960/1920)',
+  check('期权买方(v50.90): 老合约平完 + 新开合约 → 目标价改成按新合约(120 → 240/360/480/720)',
         v85.two.length === 1 && v85.two[0][0] === 'p2703P9500' && v85.two[0][1] === 2
-        && v85.two[0][3].join(',') === '240,480,960,1920', JSON.stringify(v85.two));
+        && v85.two[0][3].join(',') === '240,360,480,720', JSON.stringify(v85.two));
   check('期权买方(v50.85): 详情页板块可见且写出合约/当前价/倍数(不是仅接口有数据)',
         v85.dom.visible === true && v85.dom.sep === 1
         && /p2703P9500/.test(v85.dom.txt) && /120/.test(v85.dom.txt) && /2×/.test(v85.dom.txt),

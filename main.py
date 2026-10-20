@@ -33,14 +33,14 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5089            # 与 README 版本号 v50.89 对齐(数值比较用于单实例接管)
+APP_VERSION = 5090            # 与 README 版本号 v50.90 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
 FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期货风险额度可选档位(%)
 OPTIONS_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期权风险额度可选档位(%)
 OPTIONS_RISK_RATIO = 0.03    # 期权默认开仓金额比例 3% (可选项 0.5/1/1.5/2/3/4/5, 默认 3%)
-OPTIONS_TP_MULTIPLES = (2, 4, 8, 16)   # v50.84 期权买方止盈目标价 = 当前期权价格 × N
+OPTIONS_TP_MULTIPLES = (2, 3, 4, 6)    # 期权买方止盈目标价 = 当前期权价格 × N (v50.90: 2/4/8/16 → 2/3/4/6)
 MIN_PROFIT_LOSS_RATIO = 1.5  # 盈亏比阈值
 
 # 行情相关
@@ -767,7 +767,7 @@ def calc_options(params):
     开仓额度 = 权益 × risk_percent% (默认 3%, 可选项 0.5/1/1.5/2/3/4/5)
     ⚠ 口径: entry 是**期权报价**(单吨/单点价, 不含乘数), 每手权利金 = 报价 × 合约乘数 ——
       与「交易记录·期权买方」弹窗、期权双买两腿同口径。
-    止盈目标价: 期权价格涨到 N 倍(N = 2/4/8/16)时该腿的报价 / 每手权利金 / 持仓价值 / 浮盈
+    止盈目标价: 期权价格涨到 N 倍(N = OPTIONS_TP_MULTIPLES = 2/3/4/6)时该腿的报价 / 每手权利金 / 持仓价值 / 浮盈
     返回: dict
     """
     equity = _num(params.get("equity"), "总权益")
@@ -3278,7 +3278,7 @@ def trade_groups(strategy=None, mode="options", fee_mode=FEE_MODE_DEFAULT):
 
 
 def _options_tp_targets(underlying, mode, holdings, opens):
-    """期权买方(单腿) v50.85: 按 N = 2/4/8/16 倍「当前期权价格」给止盈目标价, 详情页用。
+    """期权买方(单腿) v50.85: 按 N = OPTIONS_TP_MULTIPLES(2/3/4/6) 倍「当前期权价格」给止盈目标价, 详情页用。
 
     口径与开仓计算器一致 —— 目标价位 = 当前期权价格 × N（该腿权利金市值涨到 N 倍时该挂在哪）。
     ⚠ 必须用**当前剩余持仓**(holdings)的加权均价: 老合约全平完、之后又开了新合约时,
@@ -3725,7 +3725,7 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             "net_pnl": round(total_pnl - fee_total, 2),
             # v50.63: 双买止盈价测算(详情页持仓汇总上方展示) —— 前端不再自己算
             "dual_targets": _dual_targets(underlying, mode, holdings, opens),
-            # v50.85: 期权买方(单腿)止盈目标价 —— 按**当前持仓**的期权价格现算 2/4/8/16 倍
+            # v50.85: 期权买方(单腿)止盈目标价 —— 按**当前持仓**的期权价格现算 2/3/4/6 倍(v50.90 改档)
             "tp_targets": _options_tp_targets(underlying, mode, holdings, opens),
             "holdings": holdings, "operations": ops}
 
@@ -5910,7 +5910,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="dcell"><span class="k">delta</span><span class="v" id="rDeltaO">—</span></div>
           <div class="dcell"><span class="k" title="权利金 × 手数">占用资金</span><span class="v money gold" id="rFundsO">—</span></div>
         </div>
-        <!-- v50.84: 期权止盈目标价位(2× / 4× / 8× / 16× 当前期权价格), 与双买共用一套表格样式 -->
+        <!-- v50.84/90: 期权止盈目标价位(2× / 3× / 4× / 6× 当前期权价格), 与双买共用一套表格样式 -->
         <div id="rTargetsO" class="anim" style="margin-top:16px"></div>
         <div class="opt-actions anim">
           <button class="btn cyan sm" id="btnAddOpt" title="把这次测算写入「交易记录 · 期权买方」的开仓记录，并跳过去">📥 加入记录</button>
@@ -7567,7 +7567,7 @@ function renderO(d){
   b.className = 'badge good';
   const pct = (d.risk_percent != null ? d.risk_percent : 3).toFixed(1).replace(/\.0$/, '');
   b.innerHTML = '<span class="ico">◈</span>权益 × ' + pct + '%';
-  /* v50.84: 止盈目标价位 —— 期权价格涨到 2/4/8/16 倍时, 直接给出下单价位与持仓价值
+  /* v50.84/90: 止盈目标价位 —— 期权价格涨到 2/3/4/6 倍时, 直接给出下单价位与持仓价值
      ⚠ 单腿买方: 目标价 = 当前期权价格 × N(该腿权利金市值), 与左侧「期权价格」同一口径 */
   if ($('rTargetsO')){
     const isPut = (d.call_put === 'P');
@@ -9195,7 +9195,7 @@ const TradeUI = {
       + '涨到 Call 目标价就平 call 腿（此时 put 基本归零），跌到 Put 目标价就平 put 腿。</div>';
   },
 
-  /* 期权买方(单腿) v50.85: 止盈目标价位 = 当前期权价格 × 2/4/8/16
+  /* 期权买方(单腿) v50.85: 止盈目标价位 = 当前期权价格 × 2/3/4/6
      数据来自后端 trade_detail().tp_targets —— 手动新建 / 计算器加入的记录都按**当前持仓**现算:
      老合约平完、只拿着新合约时, 目标价自然跟着新合约的价格走 */
   renderOptTargets(d){
