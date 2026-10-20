@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5090            # 与 README 版本号 v50.90 对齐(数值比较用于单实例接管)
+APP_VERSION = 5091            # 与 README 版本号 v50.91 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -4959,8 +4959,10 @@ select{cursor:pointer;appearance:none;
 .dual-target-tbl td.cp-put{background:var(--cp-put-bg2)}
 /* v50.84: 单腿(期权买方)止盈表多两列数值 —— 表格里没有 .details .v 那套颜色类, 补上 */
 .dual-target-tbl td.gold{color:var(--gold);font-weight:700}
-.dual-target-tbl td.good{color:var(--good);font-weight:700}
-.dual-target-tbl td.bad{color:var(--bad);font-weight:700}
+/* v50.91: 浮盈列统一「红涨绿跌」—— 跟主表 pos/neg 同一套(bad=红 / good=绿),
+   ⚠ 别用 good/bad 这两个语义色, 那是「好消息=绿」的西方习惯, 在这个软件里会反色 */
+.dual-target-tbl td.pos{color:var(--bad);font-weight:700}
+.dual-target-tbl td.neg{color:var(--good);font-weight:700}
 /* v50.85: 单腿止盈表的「合约小标题」行(一个批次里可能同时持有多个合约) */
 .dual-target-tbl tr.tp-sep td{background:rgba(122,86,190,.09);color:var(--sub);font-size:var(--fz-small);
   text-align:left;font-weight:600;padding:7px 13px}
@@ -7588,7 +7590,7 @@ function renderO(d){
           + '<span class="dt-mult">' + t.n + '×</span></td>'
           + '<td>' + fmtMoney(t.premium_per_lot) + '</td>'
           + '<td class="gold">' + fmtMoney(t.value) + '</td>'
-          + '<td class="' + (t.profit >= 0 ? 'good' : 'bad') + '">'
+          + '<td class="' + (t.profit >= 0 ? 'pos' : 'neg') + '">'
           + (t.profit >= 0 ? '+' : '−') + fmtMoney(Math.abs(t.profit)) + '</td></tr>'
         ).join('')
       + '</tbody></table>'
@@ -9226,7 +9228,7 @@ const TradeUI = {
             + '<span class="dt-mult">' + x.n + '×</span></td>'
             + '<td>' + money(x.premium_per_lot) + '</td>'
             + '<td class="gold">' + money(x.value) + '</td>'
-            + '<td class="' + (x.profit >= 0 ? 'good' : 'bad') + '">'
+            + '<td class="' + (x.profit >= 0 ? 'pos' : 'neg') + '">'
             + (x.profit >= 0 ? '+' : '−') + money(Math.abs(x.profit)) + '</td></tr>'
           ).join('');
     }).join('');

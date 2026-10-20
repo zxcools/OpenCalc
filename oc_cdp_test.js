@@ -4617,6 +4617,15 @@ async function main() {
                  code: q('rCodeO').textContent,
                  hint: q('entryOHint').textContent,
                  firstTgt: (document.querySelector('#rTargetsO tbody tr td:nth-child(2)') || {}).textContent || ''};
+    // v50.91: 浮盈列必须是「红涨」→ 与 --bad 的实测颜色一致(别只断言 class)
+    const pc = document.querySelector('#rTargetsO tbody tr td.pos, #rTargetsO tbody tr td.neg');
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--bad)'; document.body.appendChild(probe);
+    out.red = getComputedStyle(probe).color;
+    probe.style.color = 'var(--good)';
+    out.green = getComputedStyle(probe).color;
+    out.profitColor = pc ? getComputedStyle(pc).color : '';
+    probe.remove();
     // ④ 加入记录 → 交易记录 · 期权买方 多一条(合约/方向/价格/手数/权利金都要对上)
     const g0 = await (await fetch('/api/trades/groups?mode=options')).json();
     const n0 = (g0.groups || []).length;
@@ -4667,6 +4676,9 @@ async function main() {
   check('期权买方(v50.84): 手数 3600÷275 = 13 / 占用 ¥3,575 / delta 4 位小数',
         v84.long.lots === '13' && /3,575/.test(v84.long.funds) && v84.long.delta === '0.3200',
         JSON.stringify({lots: v84.long.lots, funds: v84.long.funds, delta: v84.long.delta}));
+  check('止盈表(v50.91): 计算器的「浮盈」列是红色（红涨绿跌，不是 good 的绿）',
+        v84.profitColor && v84.profitColor === v84.red && v84.profitColor !== v84.green,
+        JSON.stringify({profit: v84.profitColor, red: v84.red, green: v84.green}));
   check('期权买方(v50.90): 止盈目标价表 4 档 = 2×/3×/4×/6×(报价 110/165/220/330)',
         v84.long.rows.length === 4 && v84.long.rows[0][0] === '2×' && v84.long.rows[1][0] === '3×'
         && v84.long.rows[2][0] === '4×' && v84.long.rows[3][0] === '6×'
@@ -4735,6 +4747,14 @@ async function main() {
     TradeUI.setMode('options'); await TradeUI.refresh(); await w(500);
     await TradeUI.loadDetail(U, 'B85a'); await w(800);
     const box = document.getElementById('tdTpTargets');
+    // v50.91: 详情页浮盈列也得是红
+    const dcell = box.querySelector('tbody tr td.pos, tbody tr td.neg');
+    const pb2 = document.createElement('span');
+    pb2.style.color = 'var(--bad)'; document.body.appendChild(pb2);
+    out.domRed = getComputedStyle(pb2).color;
+    pb2.style.color = 'var(--good)'; out.domGreen = getComputedStyle(pb2).color;
+    out.domProfitColor = dcell ? getComputedStyle(dcell).color : '';
+    pb2.remove();
     out.dom = {visible: box.offsetParent !== null, display: getComputedStyle(box).display,
                txt: box.textContent.replace(/\\s+/g, ' ').trim().slice(0, 240),
                sep: box.querySelectorAll('tbody tr.tp-sep').length,
@@ -4765,6 +4785,10 @@ async function main() {
         v85.dom.visible === true && v85.dom.sep === 1
         && /p2703P9500/.test(v85.dom.txt) && /120/.test(v85.dom.txt) && /2×/.test(v85.dom.txt),
         JSON.stringify(v85.dom));
+  check('止盈表(v50.91): 交易记录详情页的「浮盈」列同样是红色',
+        v85.domProfitColor && v85.domProfitColor === v85.domRed
+        && v85.domProfitColor !== v85.domGreen,
+        JSON.stringify({profit: v85.domProfitColor, red: v85.domRed, green: v85.domGreen}));
   check('期权买方(v50.85): 期货模式下这块不显示(display:none)',
         v85.inFutures === 'none', v85.inFutures);
 
