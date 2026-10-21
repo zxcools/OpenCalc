@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5092            # 与 README 版本号 v50.92 对齐(数值比较用于单实例接管)
+APP_VERSION = 5093            # 与 README 版本号 v50.93 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -5136,6 +5136,25 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .prod-tbl td.pos{color:var(--bad);font-weight:700}
 .prod-tbl td.neg{color:var(--good);font-weight:700}
 .prod-tbl .p-dim{color:var(--sub)}
+/* v50.93: 行背景柱状图 —— 宽度 = 该品种|盈亏| ÷ 全部品种里最大的那个(参考柱状图, 直观看出量级)
+   ⚠ 柱子是**行的背景**(低透明度 .16/.13), 表格文字画在背景之上 → 数据不会被颜色盖住;
+     用「硬停止」渐变而不是 background-size: 表格行的 background-size 在部分场景不生效 */
+.prod-tbl tbody tr{background-repeat:no-repeat}
+.prod-tbl tbody tr.bar-pos{
+  background-image:linear-gradient(90deg,rgba(255,107,107,.16) 0 var(--w,0%),rgba(255,107,107,0) var(--w,0%));
+}
+.prod-tbl tbody tr.bar-neg{
+  background-image:linear-gradient(90deg,rgba(46,204,143,.15) 0 var(--w,0%),rgba(46,204,143,0) var(--w,0%));
+}
+[data-theme="light"] .prod-tbl tbody tr.bar-pos{
+  background-image:linear-gradient(90deg,rgba(224,82,82,.14) 0 var(--w,0%),rgba(224,82,82,0) var(--w,0%));
+}
+[data-theme="light"] .prod-tbl tbody tr.bar-neg{
+  background-image:linear-gradient(90deg,rgba(22,160,107,.13) 0 var(--w,0%),rgba(22,160,107,0) var(--w,0%));
+}
+/* 悬停时别把柱子盖掉 */
+.prod-tbl tr:hover td{background:transparent}
+.prod-tbl tr:hover{filter:brightness(1.12)}
 /* v50.88: 工具栏「当前权益」输入(手续费口径右边) —— 跟工具栏按钮同高, 别用全局 input 的大内边距 */
 .eqbar{display:flex;align-items:center;gap:6px;flex:none}
 .eqbar input{width:76px;margin:0;padding:5px 8px;font-size:var(--fz-btn);text-align:right;border-radius:8px}
@@ -8930,19 +8949,29 @@ const TradeUI = {
                     : (d.winSum > 0 ? '∞' : '—');
     const tot = rows.reduce((t, d) => ({n: t.n + d.n, closed: t.closed + d.closed,
                                         pnl: t.pnl + d.pnl}), {n: 0, closed: 0, pnl: 0});
+    // v50.93: 背景柱状图宽度 = |本品种盈亏| ÷ 最大 |盈亏|(与参考图一致, 一眼看出量级差)
+    const maxAbs = rows.reduce((m, d) => Math.max(m, Math.abs(d.pnl)), 0) || 1;
+    const barOf = d => {
+      if (!d.pnl) return {cls: '', w: ''};
+      const pctW = Math.max(2, Math.round(Math.abs(d.pnl) / maxAbs * 100));   // 至少 2%, 太小看不见
+      return {cls: (d.pnl > 0 ? 'bar-pos' : 'bar-neg'), w: ' style="--w:' + pctW + '%" title="占最大品种盈亏的 '
+        + pctW + '%"'};
+    };
     box.innerHTML =
       '<table class="prod-tbl"><thead><tr>'
       + '<th>品种</th><th>记录数</th><th>已平仓</th><th>盈亏</th><th>胜率</th><th>盈亏比</th>'
       + '</tr></thead><tbody>'
-      + rows.map(d =>
-          '<tr><td><span class="p-name">' + escHtml(this.productName(d.key)) + '</span>'
+      + rows.map(d => {
+          const bar = barOf(d);
+          return '<tr class="' + bar.cls + '"' + bar.w + '>'
+          + '<td><span class="p-name">' + escHtml(this.productName(d.key)) + '</span>'
           + '<span class="p-code">' + escHtml(d.key) + '</span></td>'
           + '<td>' + d.n + '</td>'
           + '<td>' + (d.closed ? d.closed : '<span class="p-dim">—</span>') + '</td>'
           + '<td class="' + (d.pnl > 0 ? 'pos' : (d.pnl < 0 ? 'neg' : 'p-dim')) + '">'
           + (d.closed ? money(d.pnl) : '—') + '</td>'
-          + '<td>' + rate(d) + '</td><td>' + ratio(d) + '</td></tr>'
-        ).join('')
+          + '<td>' + rate(d) + '</td><td>' + ratio(d) + '</td></tr>';
+        }).join('')
       + '</tbody></table>'
       + '<div class="tip" style="margin:8px 0 0">共 ' + rows.length + ' 个品种 · ' + tot.n
       + ' 条记录（已平仓 ' + tot.closed + '）· 盈亏合计 ' + money(tot.pnl)

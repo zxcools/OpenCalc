@@ -2500,7 +2500,9 @@ async function main() {
     q('dmPutQty').value = '3'; q('dmPutQty').dispatchEvent(new Event('input'));
     await w(250);
     await TradeUI.submitDualModal();
-    await w(1900);
+    // ⚠ 固定等待 1900ms 在机器忙时不够 → 这条用例曾偶发假红两次;
+    //   改成轮询「等到真出行为止」(最多 6s, 一出就往下走)
+    for (let i = 0; i < 40 && boxRows() < 1; i++) await w(150);
     const mRows = boxRows();
     const mTxt = boxTxt();
     const mCall = box() && box().querySelector('tbody tr td:nth-child(2)')
@@ -5071,6 +5073,7 @@ async function main() {
     await mk('zzp2701', 'zzp2701P9000', 'B92a', 1000, true);
     await mk('zzp2703', 'zzp2703P9500', 'B92b', -400, true);
     await mk('zzf2612多', 'zzf2612C5200', 'B92c', 600, true);
+    await mk('zzg2612多', 'zzg2612C5300', 'B92e', 2400, true);   // 最大 → 柱宽 100%
     await mk('zzc2701', 'zzc2701C9000', 'B92d', 0, false);
     document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
     TradeUI.setMode('options'); await TradeUI.refresh(); await w(900);
@@ -5089,6 +5092,20 @@ async function main() {
     out.zzf = rowOf('zzf');
     out.zzc = rowOf('zzc');
     out.tip = (box.querySelector('.tip') || {}).textContent || '';
+    // v50.93: 排序 + 背景柱状图(宽度/颜色)
+    const allTr = [...box.querySelectorAll('tbody tr')];
+    out.keys = allTr.map(tr => (tr.querySelector('.p-code') || {}).textContent || '');
+    out.pnls = allTr.map(tr => (tr.children[3] || {}).textContent || '');
+    out.bars = allTr.map(tr => ({
+      cls: tr.className,
+      w: (tr.getAttribute('style') || '').replace(/\s/g, ''),
+      bg: getComputedStyle(tr).backgroundImage.slice(0, 220)}));
+    // 文字没被柱子盖住: 单元格还是 6 个(柱子不是额外图层), 且名称格子颜色仍是正常正文色
+    out.tdCount = allTr[0] ? allTr[0].children.length : 0;
+    const pn = allTr[0] ? allTr[0].querySelector('.p-name') : null;
+    const ps = document.createElement('span'); ps.style.color = 'var(--text)';
+    document.body.appendChild(ps); out.textColor = getComputedStyle(ps).color; ps.remove();
+    out.nameColor = pn ? getComputedStyle(pn).color : '';
     // 盈亏必须是红(红涨绿跌)
     const trp = [...box.querySelectorAll('tbody tr')].find(x => {
       const c = x.querySelector('.p-code'); return c && c.textContent.trim() === 'zzp';
@@ -5139,6 +5156,20 @@ async function main() {
         JSON.stringify({color: v92.pnlColor, red: v92.red, tip: (v92.tip || '').slice(0, 60)}));
   check('品种统计(v50.92): 切到期货模式不混入期权品种',
         v92.futHasZzp === false, String(v92.futHasZzp));
+  check('品种统计(v50.93): 按盈亏从多到少排（2400 → 600 → 600 → 0，同额按记录数）',
+        v92.keys.join(',') === 'zzg,zzp,zzf,zzc',
+        JSON.stringify({keys: v92.keys, pnls: v92.pnls}));
+  check('品种统计(v50.93): 行背景柱状图宽度 = |盈亏| ÷ 最大 |盈亏|（2400→100% / 600→25% / 0→无柱）',
+        v92.bars[0].w === '--w:100%' && v92.bars[1].w === '--w:25%'
+        && v92.bars[2].w === '--w:25%' && v92.bars[3].w === ''
+        && /100%/.test(v92.bars[0].bg) && /25%/.test(v92.bars[1].bg),
+        JSON.stringify(v92.bars.map(x => [x.w, x.bg.slice(-30)])));
+  check('品种统计(v50.93): 盈利行红柱 / 亏损行绿柱（柱子是行背景，不是覆盖层）',
+        /bar-pos/.test(v92.bars[0].cls) && /rgba\(255, 107, 107, 0\.16\)/.test(v92.bars[0].bg),
+        JSON.stringify(v92.bars[0]));
+  check('品种统计(v50.93): 柱子不挡数据 —— 仍是 6 列、品种名颜色 = 正常正文色',
+        v92.tdCount === 6 && v92.nameColor === v92.textColor,
+        JSON.stringify({td: v92.tdCount, name: v92.nameColor, text: v92.textColor}));
   check('品种统计(v50.92): 用例清理干净', v92.cleaned === true, String(v92.cleaned));
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
