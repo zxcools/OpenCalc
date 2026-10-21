@@ -5053,6 +5053,94 @@ async function main() {
         v88.futTxt.slice(-60) + ' | ' + (v88.futTip || '').slice(-40));
   check('当前权益(v50.88): 用例清理干净', v88.cleaned === true, String(v88.cleaned));
 
+  // ===== v50.92: 交易记录最下方「品种统计」(按开仓标的的品种归并, 期权不按合约) =====
+  const v92Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    const out = {};
+    // 同一品种两个月份/合约 → 必须合成一行; 另一品种; 还有一个只开仓没平的
+    const mk = async (u, c, batch, pnl, closed) => {
+      await post({mode:'options', underlying:u, contract:c, batch:batch, op_type:'open',
+        direction:'buy', call_put:'P', open_date:'2026-10-01', open_price:80, qty:2, premium:1600});
+      if (closed){
+        await post({mode:'options', underlying:u, contract:c, batch:batch, op_type:'close',
+          direction:'sell', close_date:'2026-10-05', close_qty:2, close_price:130, pnl:pnl});
+      }
+    };
+    await mk('zzp2701', 'zzp2701P9000', 'B92a', 1000, true);
+    await mk('zzp2703', 'zzp2703P9500', 'B92b', -400, true);
+    await mk('zzf2612多', 'zzf2612C5200', 'B92c', 600, true);
+    await mk('zzc2701', 'zzc2701C9000', 'B92d', 0, false);
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(900);
+    TradeUI.onlyOpen = false; TradeUI.mainQuery = ''; TradeUI.range = 'all'; TradeUI.renderMain(); await w(500);
+    const box = document.getElementById('prodStats');
+    const rowOf = key => {
+      const tr = [...box.querySelectorAll('tbody tr')].find(x => {
+        const c = x.querySelector('.p-code'); return c && c.textContent.trim() === key;
+      });
+      return tr ? [...tr.children].map(td => td.textContent.trim()) : null;
+    };
+    out.belowPool = document.getElementById('poolCard').nextElementSibling.id === 'prodCard';
+    out.heads = [...box.querySelectorAll('thead th')].map(x => x.textContent.trim());
+    out.zzpCount = [...box.querySelectorAll('tbody .p-code')].filter(x => x.textContent.trim() === 'zzp').length;
+    out.zzp = rowOf('zzp');
+    out.zzf = rowOf('zzf');
+    out.zzc = rowOf('zzc');
+    out.tip = (box.querySelector('.tip') || {}).textContent || '';
+    // 盈亏必须是红(红涨绿跌)
+    const trp = [...box.querySelectorAll('tbody tr')].find(x => {
+      const c = x.querySelector('.p-code'); return c && c.textContent.trim() === 'zzp';
+    });
+    const pcell = trp ? trp.children[3] : null;
+    const pr = document.createElement('span'); pr.style.color = 'var(--bad)';
+    document.body.appendChild(pr); out.red = getComputedStyle(pr).color; pr.remove();
+    out.pnlColor = pcell ? getComputedStyle(pcell).color : '';
+    out.pnlCls = pcell ? pcell.className : '';
+    // 期货模式: 不该出现这些期权品种
+    TradeUI.setMode('futures'); await TradeUI.refresh(); await w(700);
+    const fbox = document.getElementById('prodStats');
+    out.futHasZzp = !!(fbox.querySelector('.p-code') && [...fbox.querySelectorAll('.p-code')]
+      .some(x => x.textContent.trim() === 'zzp'));
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(400);
+    // 清理
+    const g = await (await fetch('/api/trades/groups?mode=options&fee=ex')).json();
+    for (const x of (g.groups || [])){
+      if (String(x.underlying).indexOf('zz') !== 0) continue;
+      const d = await (await fetch('/api/trades/detail?mode=options&underlying='
+        + encodeURIComponent(x.underlying) + '&batch=' + encodeURIComponent(x.batch || ''))).json();
+      for (const op of (d.operations || [])){
+        await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({id: op.id})});
+      }
+    }
+    out.cleaned = ((await (await fetch('/api/trades/groups?mode=options&fee=ex')).json()).groups || [])
+      .filter(x => String(x.underlying).indexOf('zz') === 0).length === 0;
+    return JSON.stringify(out);
+  })()`);
+  const v92 = JSON.parse(v92Run);
+  check('品种统计(v50.92): 位置在监控池下面 · 表头 = 品种/记录数/已平仓/盈亏/胜率/盈亏比',
+        v92.belowPool === true
+        && v92.heads.join(',') === '品种,记录数,已平仓,盈亏,胜率,盈亏比',
+        JSON.stringify({below: v92.belowPool, heads: v92.heads}));
+  check('品种统计(v50.92): 期权按开仓标的归并 —— zzp2701 + zzp2703 合成一行(不是按合约)',
+        v92.zzpCount === 1 && v92.zzp && v92.zzp[1] === '2', JSON.stringify(v92.zzp));
+  check('品种统计(v50.92): 盈亏/胜率/盈亏比 = +600 / 50.0% / 2.50（+1000 与 −400 两笔）',
+        v92.zzp && v92.zzp[3] === '+CN¥600' && v92.zzp[4] === '50.0%' && v92.zzp[5] === '2.50',
+        JSON.stringify(v92.zzp));
+  check('品种统计(v50.92): 只有盈利时盈亏比显示 ∞ · 胜率 100.0%',
+        v92.zzf && v92.zzf[4] === '100.0%' && v92.zzf[5] === '∞', JSON.stringify(v92.zzf));
+  check('品种统计(v50.92): 只开仓没平的品种也占一行(已平仓/盈亏/胜率都显示 —)',
+        v92.zzc && v92.zzc[2] === '—' && v92.zzc[3] === '—' && v92.zzc[4] === '—',
+        JSON.stringify(v92.zzc));
+  check('品种统计(v50.92): 盈亏是红(红涨绿跌) · 底部有合计说明',
+        v92.pnlColor === v92.red && /pos/.test(v92.pnlCls) && /盈亏合计/.test(v92.tip),
+        JSON.stringify({color: v92.pnlColor, red: v92.red, tip: (v92.tip || '').slice(0, 60)}));
+  check('品种统计(v50.92): 切到期货模式不混入期权品种',
+        v92.futHasZzp === false, String(v92.futHasZzp));
+  check('品种统计(v50.92): 用例清理干净', v92.cleaned === true, String(v92.cleaned));
+
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));

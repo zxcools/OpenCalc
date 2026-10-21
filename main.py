@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5091            # 与 README 版本号 v50.91 对齐(数值比较用于单实例接管)
+APP_VERSION = 5092            # 与 README 版本号 v50.92 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -5120,6 +5120,22 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .segbar .fee-opt:hover{background:var(--panel2);color:var(--text)}
 .segbar .fee-opt.active{background:linear-gradient(135deg,#3ecf8f,#28b470);color:#fff}
 .segbar .fee-opt.active:hover{color:#fff}
+/* v50.92: 品种统计(监控池下面) —— 数值列右对齐, 盈亏用 pos/neg(红涨绿跌) */
+#prodCard h2 .prod-sub{font-weight:400;font-size:var(--fz-small);color:var(--sub);margin-left:8px;letter-spacing:0}
+.prod-tbl{width:100%;border-collapse:collapse;font-size:var(--fz-td2);margin-top:4px}
+.prod-tbl th{text-align:right;padding:9px 10px;color:var(--sub);font-weight:600;font-size:var(--fz-th);
+  letter-spacing:.5px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.prod-tbl th:first-child{text-align:left}
+.prod-tbl td{text-align:right;padding:10px;border-bottom:1px solid var(--border);
+  font-variant-numeric:tabular-nums}
+.prod-tbl td:first-child{text-align:left}
+.prod-tbl tr:last-child td{border-bottom:none}
+.prod-tbl tr:hover td{background:var(--panel2)}
+.prod-tbl .p-name{font-weight:600;color:var(--text)}
+.prod-tbl .p-code{font-size:var(--fz-small);color:var(--sub);margin-left:5px;text-transform:uppercase}
+.prod-tbl td.pos{color:var(--bad);font-weight:700}
+.prod-tbl td.neg{color:var(--good);font-weight:700}
+.prod-tbl .p-dim{color:var(--sub)}
 /* v50.88: 工具栏「当前权益」输入(手续费口径右边) —— 跟工具栏按钮同高, 别用全局 input 的大内边距 */
 .eqbar{display:flex;align-items:center;gap:6px;flex:none}
 .eqbar input{width:76px;margin:0;padding:5px 8px;font-size:var(--fz-btn);text-align:right;border-radius:8px}
@@ -6160,6 +6176,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
               <button class="btn xs" id="btnNewPool">➕ 新建监控池快照</button>
               <button class="btn xs ghost" id="btnPoolHistory" hidden>📜 查看历史快照</button>
             </div>
+          </div>
+
+          <!-- v50.92: 品种统计 —— 按「开仓标的的品种」归并(期权按标的, 不按合约号), 与上方统计区间同口径 -->
+          <div class="card results" id="prodCard" style="margin-top:14px">
+            <h2><span class="dot"></span>品种统计
+              <span class="prod-sub">按标的品种归并 · 期权按开仓标的（如 p2701 → p），不按合约</span>
+            </h2>
+            <div id="prodStats"></div>
           </div>
         </div>
 
@@ -8861,6 +8885,70 @@ const TradeUI = {
              : ('共 ' + s.closedN + ' 笔已平仓，不足 2 笔算不出标准差。\n' + scopeTip));
   },
 
+  /* ===== v50.92: 品种统计(监控池下面) =====
+     用户要求: **期权按开仓的期货标的统计, 不按期权合约统计**
+       p2701 / p2703 / fu2612多 / si2611空 → 分别归到 p / p / fu / si
+     ⚠ 归一规则 = 取标的名开头的字母前缀(与 fee_product 同一条规则); 认不出来的原样保留
+     ⚠ 口径与上方统计卡完全一致: 用 scopedGroups()(受「统计区间」影响, 不受搜索/只展示未平仓影响) */
+  productKey(u){
+    const str = String(u || '').trim();
+    const m = str.match(/^([A-Za-z]+)/);
+    return (m ? m[1] : str).toLowerCase();
+  },
+  productName(key){
+    const c = (typeof CONTRACTS !== 'undefined')
+      ? CONTRACTS.find(x => String(x.code).toLowerCase() === key) : null;
+    return c ? c.name : key;
+  },
+  renderByProduct(){
+    const box = $('prodStats');
+    if (!box) return;
+    const map = new Map();
+    this.scopedGroups().forEach(g => {
+      const k = this.productKey(g.underlying);
+      if (!k) return;
+      const d = map.get(k) || {key: k, n: 0, closed: 0, wins: 0, losses: 0,
+                               pnl: 0, winSum: 0, lossSum: 0};
+      d.n++;
+      const p = Number(g.total_pnl) || 0;
+      if (p !== 0){                       // 与统计卡同口径: 有已实现盈亏才算「已平仓」
+        d.closed++;
+        d.pnl += p;
+        if (p > 0){ d.wins++; d.winSum += p; } else { d.losses++; d.lossSum += p; }
+      }
+      map.set(k, d);
+    });
+    const rows = [...map.values()].sort((a, b) => b.pnl - a.pnl || b.n - a.n);
+    if (!rows.length){
+      box.innerHTML = '<div class="tip" style="margin:2px 0 0">暂无记录</div>';
+      return;
+    }
+    const money = v => (v > 0 ? '+CN¥' : (v < 0 ? '-CN¥' : 'CN¥'))
+      + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+    const rate = d => d.closed ? (d.wins / d.closed * 100).toFixed(1) + '%' : '—';
+    const ratio = d => d.lossSum ? (d.winSum / Math.abs(d.lossSum)).toFixed(2)
+                    : (d.winSum > 0 ? '∞' : '—');
+    const tot = rows.reduce((t, d) => ({n: t.n + d.n, closed: t.closed + d.closed,
+                                        pnl: t.pnl + d.pnl}), {n: 0, closed: 0, pnl: 0});
+    box.innerHTML =
+      '<table class="prod-tbl"><thead><tr>'
+      + '<th>品种</th><th>记录数</th><th>已平仓</th><th>盈亏</th><th>胜率</th><th>盈亏比</th>'
+      + '</tr></thead><tbody>'
+      + rows.map(d =>
+          '<tr><td><span class="p-name">' + escHtml(this.productName(d.key)) + '</span>'
+          + '<span class="p-code">' + escHtml(d.key) + '</span></td>'
+          + '<td>' + d.n + '</td>'
+          + '<td>' + (d.closed ? d.closed : '<span class="p-dim">—</span>') + '</td>'
+          + '<td class="' + (d.pnl > 0 ? 'pos' : (d.pnl < 0 ? 'neg' : 'p-dim')) + '">'
+          + (d.closed ? money(d.pnl) : '—') + '</td>'
+          + '<td>' + rate(d) + '</td><td>' + ratio(d) + '</td></tr>'
+        ).join('')
+      + '</tbody></table>'
+      + '<div class="tip" style="margin:8px 0 0">共 ' + rows.length + ' 个品种 · ' + tot.n
+      + ' 条记录（已平仓 ' + tot.closed + '）· 盈亏合计 ' + money(tot.pnl)
+      + '。胜率 = 盈利记录 ÷ 有已实现盈亏的记录；盈亏比 = 总盈利 ÷ 总亏损（未扣手续费）。</div>';
+  },
+
   /* v50.78: 未平仓头寸风险汇总 —— 一把看清「现在压着多少钱、最坏亏多少」
      口径(与后端 open_risk_summary 一致):
        · 期权买方/双买: 占用 = 剩余权利金; 最大亏损 = 剩余权利金(买方最多亏光权利金)
@@ -8992,6 +9080,7 @@ const TradeUI = {
   renderMain(){
     const tb = document.querySelector('#tradesTable tbody');
     this.renderStats();          // v50.53: 顶部统计卡片随数据一起刷新
+    this.renderByProduct();      // v50.92: 品种统计(与统计卡同一份 scopedGroups 口径)
     // v50.76: 先用「统计区间」收窄(与统计卡同一份口径), 再叠加「只展示未平仓」与搜索
     let rows = this.scopedGroups();
     const scopedN = rows.length;
