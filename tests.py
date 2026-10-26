@@ -2358,6 +2358,25 @@ _import_urllib.urlopen = _real_urlopen
 M._update_manifest = _orig_manifest
 M._read_url_bytes = _orig_read
 
+# ---- v50.94: 监控池品种拆分 —— 反斜杠/斜杠/竖线/分号 也算分隔符 ----
+check("监控池拆分(v50.94): 反斜杠 si\\lc\\fu",
+      M.split_pool_contracts([r"si\lc\fu"]) == ["si", "lc", "fu"],
+      str(M.split_pool_contracts([r"si\lc\fu"])))
+check("监控池拆分(v50.94): 顿号/逗号/空格照旧",
+      M.split_pool_contracts(["si、lc，fu, ao"]) == ["si", "lc", "fu", "ao"], '')
+check("监控池拆分(v50.94): 斜杠/竖线/中英文分号",
+      M.split_pool_contracts(["si/lc|fu;ao；br"]) == ["si", "lc", "fu", "ao", "br"], '')
+check("监控池拆分(v50.94): 去重且保序(si\\lc\\si → si, lc)",
+      M.split_pool_contracts([r"si\lc\si"]) == ["si", "lc"], '')
+check("监控池拆分(v50.94): 空串/纯分隔符 → 空数组",
+      M.split_pool_contracts(["", " \\ "]) == [], '')
+_pid94 = trade_pool_upsert({"contracts": [r"si\lc\fu"], "mode": "options"})
+_p94 = [x for x in trade_pool_list(mode="options") if x["id"] == _pid94]
+check("监控池拆分(v50.94): 落库时元素里带反斜杠也会拆开(si/lc/fu 三条)",
+      bool(_p94) and _p94[0]["contracts"] == ["si", "lc", "fu"],
+      str(_p94 and _p94[0]["contracts"]))
+trade_pool_delete(_pid94)
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

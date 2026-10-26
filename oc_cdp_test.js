@@ -5171,6 +5171,54 @@ async function main() {
         v92.tdCount === 6 && v92.nameColor === v92.textColor,
         JSON.stringify({td: v92.tdCount, name: v92.nameColor, text: v92.textColor}));
   check('品种统计(v50.92): 用例清理干净', v92.cleaned === true, String(v92.cleaned));
+  // ===== v50.94: 监控池品种用 \ 分隔也能拆开(三个模式同一个弹窗) =====
+  const v94Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const out = {};
+    const listPool = async () => (await (await fetch('/api/trades/pool?mode=options')).json()).snapshots || [];
+    // ⚠ 反斜杠在「模板字符串 + 字符串字面量」里会被解析两次(\f 会变成换页符) → 用码点拼, 别写转义
+    const BS = String.fromCharCode(92);
+    // 清空期权模式的监控池, 便于断言
+    for (const it of await listPool()){
+      await fetch('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: it.id})});
+    }
+    // ① 接口层: 一个元素里带反斜杠 → 后端也要拆
+    await fetch('/api/trades/pool/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({contracts: ['si' + BS + 'lc' + BS + 'fu'], mode: 'options'})});
+    out.api = (await listPool())[0].contracts;
+    for (const it of await listPool()){
+      await fetch('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: it.id})});
+    }
+    // ② 界面层: 输入框里敲 si\lc|fu/ao → 四个 chip
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(700);
+    TradeUI.setMode('options'); await TradeUI.refresh(); await w(600);
+    const realPrompt = window.prompt;
+    window.prompt = () => 'si' + BS + 'lc|fu/ao';
+    document.getElementById('btnNewPool').click();
+    for (let i = 0; i < 30 && !document.querySelector('#poolArea .pool-chip'); i++) await w(150);
+    await w(300);
+    window.prompt = realPrompt;
+    out.ui = [...document.querySelectorAll('#poolArea .pool-chip')].map(x => x.textContent.trim());
+    out.stored = (await listPool())[0].contracts;
+    // 清理
+    for (const it of await listPool()){
+      await fetch('/api/trades/pool/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: it.id})});
+    }
+    out.cleaned = (await listPool()).length === 0;
+    return JSON.stringify(out);
+  })()`);
+  const v94 = JSON.parse(v94Run);
+  check('监控池分隔符(v50.94): 接口收到「反斜杠分隔」的一个元素 → 落库拆成 3 个品种',
+        (v94.api || []).join(',') === 'si,lc,fu', JSON.stringify(v94.api));
+  check('监控池分隔符(v50.94): 输入框敲「反斜杠 + 竖线 + 斜杠」混合分隔 → 界面 4 个 chip 且落库 4 条',
+        (v94.ui || []).join(',') === 'si,lc,fu,ao'
+        && (v94.stored || []).join(',') === 'si,lc,fu,ao',
+        JSON.stringify({ui: v94.ui, stored: v94.stored}));
+  check('监控池分隔符(v50.94): 用例清理干净', v94.cleaned === true, String(v94.cleaned));
+
 
   // ===== v50.56: 资金曲线「累计提现」字号与同行一致 + 跟随字号设置 =====
   const wdRun = await evalJs(ws, `(async () => {

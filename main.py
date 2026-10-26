@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5093            # 与 README 版本号 v50.93 对齐(数值比较用于单实例接管)
+APP_VERSION = 5094            # 与 README 版本号 v50.94 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -3731,6 +3731,28 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
 
 
 # ----- 监控池快照 -----
+def split_pool_contracts(items):
+    """监控池品种拆分(v50.94).
+
+    前端输入框里可以用 逗号/顿号/分号/空格/换行/反斜杠/斜杠/竖线 分隔 ——
+    用户习惯用 si+lc+fu 这种反斜杠写法, 以前只认前几种, 于是整串被当成一个品种(显示成一个 chip、加不上)。
+    ⚠ 这里再做一次兜底: 元素本身若还带着分隔符就继续拆(老数据/直接调接口都能修正),
+      品种代码里不会出现这些字符, 拆分是安全的。
+    """
+    out = []
+    for it in items or []:
+        # ⚠ 元素可能不是字符串: 老监控池/导入数据里有 {"contract": "si", ...} 这种 dict
+        #   (见 normalize_contract 的注释) → 原样保留, 别 str() 掉, 否则那条记录就废了
+        if not isinstance(it, str):
+            out.append(it)
+            continue
+        for part in re.split(r"[,，、;；/|\\\s]+", it):
+            part = part.strip()
+            if part and part not in out:      # 去重(保留顺序): si\lc\si 只留 si 一次
+                out.append(part)
+    return out
+
+
 def trade_pool_list(strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
     db = _fund_db()
     rows = db.execute(
@@ -3744,6 +3766,7 @@ def trade_pool_list(strategy=TRADE_STRATEGY_DEFAULT, mode="options"):
             cs = json.loads(r["contracts"]) if r["contracts"] else []
         except Exception:
             cs = []
+        cs = split_pool_contracts(cs)     # v50.94: 老数据里可能存着 "si\lc" 整串
         out.append({
             "id": r["id"],
             "snapshot_date": r["snapshot_date"] or "",
@@ -3763,7 +3786,7 @@ def trade_pool_upsert(payload):
     contracts = payload.get("contracts") or []
     if not isinstance(contracts, list):
         raise ValueError("contracts 必须是数组")
-    contracts = [normalize_contract(c) for c in contracts]
+    contracts = [normalize_contract(c) for c in split_pool_contracts(contracts)]
     cs = json.dumps(contracts, ensure_ascii=False)
     note = payload.get("note") or ""
     mode = payload.get("mode") if payload.get("mode") in TRADE_MODES else TRADE_MODE_DEFAULT
@@ -10466,9 +10489,10 @@ const TradeUI = {
   openPoolModal(preset){
     preset = preset || {};
     const cur = preset.contracts ? preset.contracts.join('、') : '';
-    const input = prompt('监控品种(逗号或顿号分隔, 如 si、lc、fu、ao、br):', cur);
+    const input = prompt('监控品种(逗号、顿号、空格、反斜杠 都能分隔, 如 si\\lc\\fu 或 si、lc、fu):', cur);
     if (input === null) return;
-    const contracts = input.split(/[,、， \t\n]+/).map(s => s.trim()).filter(Boolean);
+    // v50.94: 分隔符补上反斜杠\ / 斜杠 / 竖线 / 分号 —— 用户习惯敲 si\lc\fu, 以前整串被当成一个品种
+    const contracts = input.split(/[,，、;；/|\\\s]+/).map(s => s.trim()).filter(Boolean);
     if (!contracts.length) { alert('至少输入一个品种'); return; }
     const date = preset.snapshot_date || new Date().toISOString().slice(0,10);
     // ⚠ 必须带 mode(v50.50): 不带的话后端按默认 'options' 落库 → 在期货模式里新建的监控池
