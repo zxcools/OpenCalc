@@ -5539,13 +5539,18 @@ async function main() {
         && v95.modalWithQty.indexOf(v95money(v95.modalApi.fee_open + v95.modalApi.fee_prev)) >= 0,
         v95.modalWithQty);
 
-  // ===== v50.97: 双买「组合价」止盈（3×call + 5×put 那种合成价）—— 计算器 + 交易记录详情 =====
-  const v97Run = await evalJs(ws, `(async () => {
+  // ===== v50.98: 双买「组合价」并进 Call/Put 同一张表（第 4 列，不再单独占一块） =====
+  const v98Run = await evalJs(ws, `(async () => {
     const w = ms => new Promise(r => setTimeout(r, ms));
-    const q = id => document.getElementById(id);
     const out = {};
+    const cells = tr => [...tr.children].map(td => td.textContent.trim().replace(/\\s+/g, ' '));
+    // 每格只取「大字」(.dt-px) —— 拼起来的 textContent 会把「¥7,135」和「2×」粘成 71352, 没法解析
+    const px = tr => [...tr.children].map(td => {
+      const x = td.querySelector('.dt-px');
+      return x ? x.textContent.trim() : td.textContent.trim().replace(/\\s+/g, ' ');
+    });
 
-    // ① 计算器: 用接口结果直接渲染(双买要填 6 个输入框, 这里只验块本身)
+    // ① 计算器
     document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(500);
     setMode('dual'); await w(300);
     out.api = await (await fetch('/api/calc/dual', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -5553,82 +5558,82 @@ async function main() {
         call_strike:3050, call_delta:0.52, call_premium:1660,
         put_strike:3150, put_delta:-0.42, put_premium:355, risk_percent:3})})).json();
     if (out.api.ok){ renderD(out.api); await w(700); }
-    const box = q('rComboD');
-    const tbl = box ? box.querySelector('.combo-tbl') : null;
-    out.calc = {exists: !!tbl, visible: tbl ? tbl.offsetParent !== null : false,
+    const box = document.getElementById('rTargetsD');
+    const tbl = box ? box.querySelector('.dual-target-tbl') : null;
+    out.calc = {tables: box ? box.querySelectorAll('table').length : 0,
       heads: tbl ? [...tbl.querySelectorAll('thead th')].map(x => x.textContent.trim()) : [],
-      rows: tbl ? [...tbl.querySelectorAll('tbody tr')].map(tr => [...tr.children].map(td => td.textContent.trim())) : [],
+      rows: tbl ? [...tbl.querySelectorAll('tbody tr')].map(cells) : [],
+      rowsPx: tbl ? [...tbl.querySelectorAll('tbody tr')].map(px) : [],
       sum: box ? ((box.querySelector('.dt-sum') || {}).textContent || '') : '',
-      title: box ? ((box.querySelector('.dt-title') || {}).textContent || '') : '',
-      tip: box ? ((box.querySelector('.tip') || {}).textContent || '') : ''};
+      tip: box ? ((box.querySelector('.tip') || {}).textContent || '') : '',
+      comboColor: tbl ? getComputedStyle(tbl.querySelector('td.combo .dt-px')).color : '',
+      callColor: tbl ? getComputedStyle(tbl.querySelector('td.cp-call .dt-px')).color : '',
+      gold: (() => { const el = document.createElement('span'); el.style.color = 'var(--gold)';
+        document.body.appendChild(el); const c = getComputedStyle(el).color; el.remove(); return c; })()};
 
-    // ② 交易记录·期权双买详情: 造一条与截图同口径的记录(5 call 3050 @166 + 13 put 3150 @35.5)
+    // ② 交易记录·双买详情（截图纸质那条：5C@166 + 13P@35.5）
     const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
                               body: JSON.stringify(p)}).then(r=>r.json());
-    await post({mode:'dual', underlying:'m2701', contract:'m2701-C-3050', call_put:'C', batch:'B97e',
+    await post({mode:'dual', underlying:'m2701', contract:'m2701-C-3050', call_put:'C', batch:'B98e',
       op_type:'open', direction:'buy', open_date:'2026-10-28', open_price:166, qty:5, premium:8300});
-    await post({mode:'dual', underlying:'m2701', contract:'m2701-P-3150', call_put:'P', batch:'B97e',
+    await post({mode:'dual', underlying:'m2701', contract:'m2701-P-3150', call_put:'P', batch:'B98e',
       op_type:'open', direction:'buy', open_date:'2026-10-28', open_price:35.5, qty:13, premium:4615});
     document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
     TradeUI.setMode('dual'); await TradeUI.refresh(); await w(800);
-    await TradeUI.loadDetail('m2701', 'B97e'); await w(1000);
-    const dt = await (await fetch('/api/trades/detail?mode=dual&underlying=m2701&batch=B97e')).json();
-    const dbox = q('tdDualTargets');
-    const dtbl = dbox ? dbox.querySelector('.combo-tbl') : null;
-    out.detail = {exists: !!dtbl, visible: dtbl ? dtbl.offsetParent !== null : false,
+    await TradeUI.loadDetail('m2701', 'B98e'); await w(1000);
+    const dt = await (await fetch('/api/trades/detail?mode=dual&underlying=m2701&batch=B98e')).json();
+    const dbox = document.getElementById('tdDualTargets');
+    const dtbl = dbox ? dbox.querySelector('.dual-target-tbl') : null;
+    out.detail = {tables: dbox ? dbox.querySelectorAll('table').length : 0,
       heads: dtbl ? [...dtbl.querySelectorAll('thead th')].map(x => x.textContent.trim()) : [],
-      rows: dtbl ? [...dtbl.querySelectorAll('tbody tr')].map(tr => [...tr.children].map(td => td.textContent.trim())) : [],
-      sum: dbox ? ((() => { const xs = [...dbox.querySelectorAll('.dt-sum')];
-                             return xs.length ? xs[xs.length - 1].textContent : ''; })()) : '',
+      rows: dtbl ? [...dtbl.querySelectorAll('tbody tr')].map(cells) : [],
+      rowsPx: dtbl ? [...dtbl.querySelectorAll('tbody tr')].map(px) : [],
+      sum: dbox ? ((dbox.querySelector('.dt-sum') || {}).textContent || '') : '',
       api: (dt.dual_targets || {}).targets || [],
       apiCombo: (dt.dual_targets || {}).combo_price};
 
-    // 清理
     for (const op of (dt.operations || [])){
       await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({id: op.id})});
     }
     out.cleaned = ((await (await fetch('/api/trades/groups?mode=dual&fee=ex')).json()).groups || [])
-      .filter(x => x.underlying === 'm2701' && x.batch === 'B97e').length === 0;
+      .filter(x => x.underlying === 'm2701' && x.batch === 'B98e').length === 0;
     setMode('futures'); await w(150);
     return JSON.stringify(out);
   })()`);
-  const v97 = JSON.parse(v97Run);
+  const v98 = JSON.parse(v98Run);
   const numOf = s => parseFloat(String(s || '').replace(/[¥,\s]/g, '').replace(/−/g, '-'));
-  check('组合价(v50.97): 计算器双买结果多一块「组合价止盈」且可见(4 列)',
-        v97.calc.exists === true && v97.calc.visible === true
-        && v97.calc.heads.join(',') === '目标,组合价（元/吨）,组合市值,浮盈',
-        JSON.stringify({heads: v97.calc.heads, vis: v97.calc.visible}));
-  check('组合价(v50.97): 每档组合价 = 接口 combo_target，且 = N × 当前组合价',
-        v97.calc.rows.length === 4
-        && v97.calc.rows.every((r, i) => {
-             const t = v97.api.targets[i];
-             return Math.abs(numOf(r[1]) - t.combo_target) < 0.02
-               && Math.abs(numOf(r[1]) - v97.api.combo_price * (i + 2)) < 0.02
-               && Math.abs(numOf(r[2]) - t.value) < 0.6;
-           }),
-        JSON.stringify({rows: v97.calc.rows.map(r => r.slice(1, 3)),
-                        combo: v97.api.combo_price, exp: v97.api.targets.map(t => t.combo_target)}));
-  check('组合价(v50.97): 标题写「组合价止盈」, 右上角报当前组合价与手数配比',
-        /组合价止盈/.test(v97.calc.title) && /当前组合价/.test(v97.calc.sum)
-        && /\d+C \+ \d+P/.test(v97.calc.sum)
-        && Math.abs(parseFloat((v97.calc.sum.match(/[\d,.]+/) || ['0'])[0].replace(/,/g, ''))
-                    - v97.api.combo_price) < 0.02,
-        v97.calc.title + ' | ' + v97.calc.sum);
-  check('组合价(v50.97): 说明里区分了「单腿口径」与「两腿按同一比例一起涨」',
-        /单腿口径/.test(v97.calc.tip) && /同一比例/.test(v97.calc.tip),
-        v97.calc.tip.slice(0, 90));
-  check('组合价(v50.97): 交易记录·双买详情也有这一块(4 档 · 同表头)',
-        v97.detail.exists === true && v97.detail.visible === true
-        && v97.detail.heads.join(',') === '目标,组合价（元/吨）,组合市值,浮盈',
-        JSON.stringify({heads: v97.detail.heads, vis: v97.detail.visible}));
-  check('组合价(v50.97): 详情页 5×166 + 13×35.5 = 1,291.5, 2× = 2,583 / 4× = 5,166',
-        v97.detail.rows.length === 4
-        && Math.abs(numOf(v97.detail.rows[0][1]) - 2583.0) < 0.02
-        && Math.abs(numOf(v97.detail.rows[2][1]) - 5166.0) < 0.02
-        && v97.detail.api.every((t, i) => Math.abs(numOf(v97.detail.rows[i][1]) - t.combo_target) < 0.02),
-        JSON.stringify({rows: v97.detail.rows.map(r => r[1]), apiCombo: v97.detail.apiCombo}));
-  check('组合价(v50.97): 用例清理干净', v97.cleaned === true, String(v97.cleaned));
+  const comboOf = s => parseFloat(String(s || '').replace(/[¥,\s]/g, '').split(/[^\d.]/)[0]);
+  check('组合价并入同表(v50.98): 计算器只剩一张表, 4 列 = 目标 / Call / Put / 组合价',
+        v98.calc.tables === 1
+        && v98.calc.heads.join(',') === '目标,Call 目标价（元/吨）,Put 目标价（元/吨）,组合价（元/吨）',
+        JSON.stringify({tables: v98.calc.tables, heads: v98.calc.heads}));
+  check('组合价并入同表(v50.98): 每行第 4 格 = 接口 combo_target(= N × 当前组合价), 第 2/3 格仍是单腿价',
+        v98.calc.rowsPx.length === 4 && v98.calc.rowsPx.every((r, i) => {
+          const t = v98.api.targets[i];
+          return Math.abs(numOf(r[3]) - t.combo_target) < 0.02
+            && Math.abs(numOf(r[3]) - v98.api.combo_price * (i + 2)) < 0.02
+            && Math.abs(numOf(r[1]) - t.call_price_unit) < 0.02
+            && Math.abs(numOf(r[2]) - t.put_price_unit) < 0.02;
+        }),
+        JSON.stringify({px: v98.calc.rowsPx.map(r => r.slice(1)),
+                        combo: v98.api.combo_price}));
+  check('组合价并入同表(v50.98): 组合价用金色(--gold), 与 Call 的腿色区分开',
+        v98.calc.comboColor === v98.calc.gold && v98.calc.comboColor !== v98.calc.callColor,
+        JSON.stringify({combo: v98.calc.comboColor, gold: v98.calc.gold, call: v98.calc.callColor}));
+  check('组合价并入同表(v50.98): 右上角带「组合价」与手数配比, 脚注讲清两种口径',
+        /组合价/.test(v98.calc.sum) && /\d+C \/ \d+P/.test(v98.calc.sum)
+        && /组合价/.test(v98.calc.tip) && /单腿|归零/.test(v98.calc.tip),
+        v98.calc.sum + ' || ' + v98.calc.tip.slice(0, 60));
+  check('组合价并入同表(v50.98): 详情页也只有一张表(4 列), 数值 = 后端(2× = 2,583 / 4× = 5,166)',
+        v98.detail.tables === 1
+        && v98.detail.heads.join(',') === '目标,Call 目标价（元/吨）,Put 目标价（元/吨）,组合价（元/吨）'
+        && Math.abs(numOf(v98.detail.rowsPx[0][3]) - 2583.0) < 0.02
+        && Math.abs(numOf(v98.detail.rowsPx[2][3]) - 5166.0) < 0.02
+        && v98.detail.api.every((t, i) => Math.abs(numOf(v98.detail.rowsPx[i][3]) - t.combo_target) < 0.02),
+        JSON.stringify({tables: v98.detail.tables, px: v98.detail.rowsPx.map(r => r[3]),
+                        combo: v98.detail.apiCombo}));
+  check('组合价并入同表(v50.98): 用例清理干净', v98.cleaned === true, String(v98.cleaned));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
