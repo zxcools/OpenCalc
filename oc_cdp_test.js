@@ -4116,6 +4116,8 @@ async function main() {
     //   整个 display:none → 文本设进去了但用户看不到(E2E 只看 textContent 会漏)
     out.openFeeVisible = !!(fh && fh.offsetParent !== null);
     out.openFeeInHiddenWrap = !!(fh && fh.closest('#tmCloseTodayWrap'));
+    // v50.95: 开仓弹窗仍然**不应该**出现平今/平昨的选择控件(金额可以列在提示里)
+    out.closeTodayHidden = getComputedStyle(document.getElementById('tmCloseTodayWrap')).display === 'none';
     // 「未填数量」时的引导语也要是开仓口径(不是"平今/平昨")
     setV('tmQty', '');
     await w(700);
@@ -4173,13 +4175,13 @@ async function main() {
   check('开仓手续费(v50.79): 开仓弹窗显示「开仓手续费 ¥12.93」(棉花 3 手 = 3×4.31)',
         v79.isOpenModal === true && /开仓手续费：¥12[.]93/.test(v79.openFeeText),
         v79.openFeeText);
-  check('开仓手续费(v50.79): 开仓弹窗不出现「平今/平昨」字样(那是平仓口径)',
-        !/[平]今|[平]昨/.test(v79.openFeeText), v79.openFeeText);
+  check('开仓手续费(v50.79/95): 开仓弹窗不出现「平今/平昨」的选择控件(金额可列在提示里)',
+        v79.closeTodayHidden === true, String(v79.closeTodayHidden) + ' | ' + v79.openFeeText);
   check('开仓手续费(v50.79): 提示真的看得见(没被平今/平昨那格的 display:none 一起藏掉)',
         v79.openFeeVisible === true && v79.openFeeInHiddenWrap === false,
         'visible=' + v79.openFeeVisible + ' inHiddenWrap=' + v79.openFeeInHiddenWrap);
-  check('开仓手续费(v50.79): 没填数量时给的是开仓引导语',
-        /填了开仓数量/.test(v79.openFeeEmpty), v79.openFeeEmpty);
+  check('开仓手续费(v50.95): 没填数量时先给「每手」费率 + 往返(以前只有一句引导语)',
+        /\/手/.test(v79.openFeeEmpty) && /往返/.test(v79.openFeeEmpty), v79.openFeeEmpty);
   check('平仓两档(v50.79): 平仓弹窗仍是平今/平昨两档(开仓口径没串味)',
         v79.isCloseModal === true && /平今/.test(v79.closeFeeText) && /平昨/.test(v79.closeFeeText),
         v79.closeFeeText);
@@ -5418,6 +5420,122 @@ async function main() {
         (await evalJs(ws, `(document.getElementById('updDownload').textContent||'').trim()`)) === '⬇ 下载最新版');
   check('更新: 下载走轮询显示进度(源码含 /api/update/progress)',
         /api\/update\/progress/.test(await evalJs(ws, `UpdUI.download.toString()`)));
+
+  // ===== v50.95: 计算器结果区加手续费(三个模式) + 手工开仓弹窗的手续费提示 =====
+  const v95Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const out = {};
+    const money2 = v => '¥' + Number(v || 0).toLocaleString('en-US',
+      {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+    // ① 期货: rb 3500 / 止损 3450 / 止盈 3650, 权益 9 万, 风险额度 1%
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(300);
+    setMode('futures'); await w(250);
+    const rb = CONTRACTS.find(x => String(x.code).toLowerCase() === 'rb');
+    pickContract(rb, 'F'); await w(200);
+    q('equity').value = '9'; q('equity').dispatchEvent(new Event('input', {bubbles:true}));
+    q('entry').value = '3500'; q('stop').value = '3450'; q('target').value = '3650';
+    q('riskAmount').value = '1'; q('riskAmount').dispatchEvent(new Event('change', {bubbles:true}));
+    onInput(); await w(1200);
+    const fs = q('rFeeF') ? q('rFeeF').querySelector('.fee-strip') : null;
+    out.fut = {exists: !!fs,
+               txt: fs ? fs.textContent.replace(/\\s+/g, ' ') : '',
+               net: fs && fs.querySelector('.fs-net') ? fs.querySelector('.fs-net').textContent.replace(/\\s+/g, ' ') : '',
+               visible: fs ? fs.offsetParent !== null : false};
+    out.futApi = await (await fetch('/api/calc/futures', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({equity: 90000, code: 'rb', direction: 'long',
+                            entry: 3500, stop: 3450, target: 3650, risk_percent: 1})})).json();
+    out.futFeeTxt = money2((out.futApi.fees || {}).fee_open);
+
+    // ② 期权买方: cu 报价 55 / 13 手
+    setMode('options'); await w(250);
+    const cu = CONTRACTS.find(x => String(x.code).toLowerCase() === 'cu');
+    pickContract(cu, 'O'); await w(300);
+    q('optMonth').value = '2612'; q('optMonth').dispatchEvent(new Event('input', {bubbles:true}));
+    q('optStrike').value = '80000'; q('optStrike').dispatchEvent(new Event('input', {bubbles:true}));
+    q('entryO').value = '55'; q('entryO').dispatchEvent(new Event('input', {bubbles:true}));
+    onInput(); await w(1300);
+    const fo = q('rFeeO') ? q('rFeeO').querySelector('.fee-strip') : null;
+    out.opt = {exists: !!fo,
+               txt: fo ? fo.textContent.replace(/\\s+/g, ' ') : '',
+               net: fo && fo.querySelector('.fs-net') ? fo.querySelector('.fs-net').textContent.replace(/\\s+/g, ' ') : '',
+               heads: [...document.querySelectorAll('#rTargetsO thead th')].map(x => x.textContent.trim()),
+               lastCells: [...document.querySelectorAll('#rTargetsO tbody tr')].map(tr => {
+                 const tds = [...tr.children]; return tds.length ? tds[tds.length - 1].textContent.trim() : '';
+               })};
+    out.optApi = await (await fetch('/api/calc/options', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({equity: 120000, code: 'cu', direction: 'short', month: '2612',
+                            strike: 80000, delta: -0.28, entry: 55, risk_percent: 3})})).json();
+
+    // ③ 双买: 直接拿接口结果渲染(填 6 个输入框太啰嗦, 这里只验手续费条本身)
+    out.dualApi = await (await fetch('/api/calc/dual', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({equity: 120000, code: 'fg', month: '2701',
+        call_strike: 1300, call_delta: 0.38, call_premium: 1260,
+        put_strike: 1100, put_delta: -0.25, put_premium: 150, risk_percent: 3})})).json();
+    if (out.dualApi.ok){ renderD(out.dualApi); await w(400); }
+    const fd = q('rFeeD') ? q('rFeeD').querySelector('.fee-strip') : null;
+    out.dual = {exists: !!fd,
+                txt: fd ? fd.textContent.replace(/\\s+/g, ' ') : '',
+                net: fd && fd.querySelector('.fs-net') ? fd.querySelector('.fs-net').textContent.replace(/\\s+/g, ' ') : ''};
+
+    // ④ 手工开仓弹窗: 数量没填 → 每手费率; 填了 → 合计 + 往返
+    TradeUI.setMode('futures'); await w(300);
+    TradeUI.openEditModal('open', {}); await w(300);
+    q('tmUnderlying').value = 'rb2610'; q('tmUnderlying').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmContract').value = 'rb2610'; q('tmContract').dispatchEvent(new Event('input', {bubbles:true}));
+    q('tmOpenPrice').value = '3500'; q('tmOpenPrice').dispatchEvent(new Event('input', {bubbles:true}));
+    await w(700);
+    out.modalNoQty = q('tmFeeHint').textContent.replace(/\\s+/g, ' ');
+    out.modalVisible = q('tmFeeRow') ? q('tmFeeRow').offsetParent !== null : false;
+    q('tmQty').value = '3'; q('tmQty').dispatchEvent(new Event('input', {bubbles:true}));
+    await w(800);
+    out.modalWithQty = q('tmFeeHint').textContent.replace(/\\s+/g, ' ');
+    out.modalApi = await (await fetch('/api/fees/estimate?underlying=rb2610&contract=rb2610&mode=futures&price=3500&qty=3')).json();
+    q('tmCancel').click(); await w(200);
+    setMode('futures'); await w(150);
+    return JSON.stringify(out);
+  })()`);
+  const v95 = JSON.parse(v95Run);
+  const v95money = v => '¥' + Number(v || 0).toLocaleString('en-US',
+    {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  check('计算器手续费(v50.95): 期货结果区出手续费条(开仓 / 平仓 / 往返)且可见',
+        v95.fut.exists && v95.fut.visible && /开仓/.test(v95.fut.txt)
+        && /平仓/.test(v95.fut.txt) && /往返/.test(v95.fut.txt), v95.fut.txt.slice(0, 110));
+  check('计算器手续费(v50.95): 期货开仓手续费 = 接口 fees.fee_open(与交易记录同一套费率)',
+        v95.fut.txt.indexOf(v95.futFeeTxt) >= 0, v95.fut.txt.slice(0, 80) + ' vs ' + v95.futFeeTxt);
+  check('计算器手续费(v50.95): 期货「含费最大亏损 = 风险金额 + 往返费」显示在条尾',
+        v95.fut.net.indexOf(v95money(v95.futApi.max_loss_net)) >= 0
+        && v95.futApi.max_loss_net === Math.round((v95.futApi.risk_used + v95.futApi.fees.fee_round) * 100) / 100,
+        v95.fut.net + ' | ' + JSON.stringify({loss: v95.futApi.max_loss_net, risk: v95.futApi.risk_used,
+                                             fee: v95.futApi.fees.fee_round}));
+  check('计算器手续费(v50.95): 期权买方也有手续费条, 并报「含费最大亏损(权利金+往返费)」',
+        v95.opt.exists && /期权|开仓/.test(v95.opt.txt)
+        && v95.opt.net.indexOf(v95money(v95.optApi.max_loss_net)) >= 0
+        && v95.optApi.max_loss_net === Math.round((v95.optApi.funds_used + v95.optApi.fees.fee_round) * 100) / 100,
+        v95.opt.net + ' | ' + JSON.stringify({loss: v95.optApi.max_loss_net, prem: v95.optApi.funds_used}));
+  check('计算器手续费(v50.95): 期权止盈表多一列「净浮盈（含手续费）」，值 = 浮盈 − 往返费',
+        v95.opt.heads.length === 6 && /净浮盈/.test(v95.opt.heads[5])
+        && v95.opt.lastCells.length === v95.optApi.targets.length
+        && v95.opt.lastCells.every((txt, i) => {
+             const pn = v95.optApi.targets[i].profit_net;
+             return txt.replace(/[¥,\s]/g, '').replace(/−/g, '-')
+               === (pn < 0 ? '-' : '+') + String(Math.abs(Math.round(pn)));
+           }),
+        JSON.stringify({heads: v95.opt.heads, cells: v95.opt.lastCells,
+                        exp: v95.optApi.targets.map(t => t.profit_net)}));
+  check('计算器手续费(v50.95): 双买手续费条列出两腿手数, 并报含费实际付出',
+        v95.dual.exists && /call/.test(v95.dual.txt) && /put/.test(v95.dual.txt)
+        && v95.dual.net.indexOf(v95money(v95.dualApi.total_premium_net)) >= 0,
+        v95.dual.txt.slice(0, 120) + ' | ' + v95.dual.net);
+  check('开仓弹窗手续费(v50.95): 数量还没填也先报「每手」费率(且这块真的可见)',
+        v95.modalVisible === true && /\/手/.test(v95.modalNoQty) && /往返/.test(v95.modalNoQty),
+        String(v95.modalVisible) + ' | ' + v95.modalNoQty);
+  check('开仓弹窗手续费(v50.95): 填了 3 手 → 报合计 + 往返(开+平)',
+        /3 手合计/.test(v95.modalWithQty) && /往返（开\+平）/.test(v95.modalWithQty)
+        && v95.modalWithQty.indexOf(v95money(v95.modalApi.fee_open)) >= 0
+        && v95.modalWithQty.indexOf(v95money(v95.modalApi.fee_open + v95.modalApi.fee_prev)) >= 0,
+        v95.modalWithQty);
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

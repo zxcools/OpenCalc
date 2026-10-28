@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5094            # 与 README 版本号 v50.94 对齐(数值比较用于单实例接管)
+APP_VERSION = 5095            # 与 README 版本号 v50.95 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -728,6 +728,10 @@ def calc_futures(params):
     risk_used = max_lots * per_lot_risk          # 实际最大风险金额(应<=budget)
     max_reward = max_lots * per_lot_reward       # 按最大手数止盈可盈利金额
 
+    # v50.95: 手续费(按最大手数 + 开仓价估算) → 含费口径: 最大亏损 + 往返费 / 止盈净利 − 往返费
+    fees = calc_fees(contract["code"], "futures", entry, max_lots)
+    fee_round = (fees or {}).get("fee_round") or 0.0
+
     return {
         "ok": True,
         "contract": contract["name"],
@@ -750,6 +754,9 @@ def calc_futures(params):
         "per_lot_reward": per_lot_reward,
         "risk_used": risk_used,
         "max_reward": max_reward,
+        "fees": fees,                                  # v50.95: 手续费(开/平/往返)
+        "max_loss_net": round(risk_used + fee_round, 2),      # 含费最大亏损
+        "max_reward_net": round(max_reward - fee_round, 2),   # 含费止盈净利
         "ladder": ladder,
         "enough_lots": max_lots >= 1,
         "participate": pl_ratio >= MIN_PROFIT_LOSS_RATIO,
@@ -815,6 +822,10 @@ def calc_options(params):
     max_lots = int(budget // premium_per_lot)  # 最大手数
     funds_used = max_lots * premium_per_lot    # 占用资金
 
+    # v50.95: 手续费(期权费率) —— 买方最大亏损 = 权利金, 含费后还要加上开+平的手续费
+    fees = calc_fees(contract["code"], "options", entry, max_lots)
+    fee_round = (fees or {}).get("fee_round") or 0.0
+
     # 止盈目标价(v50.84): 期权价格涨到 N 倍 → 每手权利金 ×N, 持仓价值 = 每手 × 手数
     #   ⚠ 单腿买方的持仓价值就是这一腿的权利金市值(没有第二条腿分摊), 所以目标价 = 当前报价 × N
     targets = []
@@ -827,6 +838,7 @@ def calc_options(params):
             "premium_per_lot": per_lot,
             "value": value,
             "profit": round(value - funds_used, 2),     # 浮盈 = 目标价值 − 权利金成本
+            "profit_net": round(value - funds_used - fee_round, 2),   # v50.95: 再扣往返手续费
         })
 
     return {
@@ -851,6 +863,8 @@ def calc_options(params):
         "premium_per_lot": premium_per_lot,       # 每手权利金 = 报价 × 乘数
         "max_lots": max_lots,
         "funds_used": funds_used,
+        "fees": fees,                                   # v50.95: 手续费(开/平/往返)
+        "max_loss_net": round(funds_used + fee_round, 2),   # 含费最大亏损 = 权利金 + 往返费
         "enough_lots": max_lots >= 1,
         "targets": targets,
     }
@@ -973,6 +987,25 @@ def calc_dual(params):
     c_price = c_prem / _om
     p_price = p_prem / _om
 
+    # v50.95: 两腿手续费(各自按「报价 × 乘数 × 手数」算成交金额) + 合计 + 往返
+    fee_c = calc_fees(code, "dual", c_price, call_qty)
+    fee_p = calc_fees(code, "dual", p_price, put_qty)
+    fee_open_all = ((fee_c or {}).get("fee_open") or 0.0) + ((fee_p or {}).get("fee_open") or 0.0)
+    fee_close_all = ((fee_c or {}).get("fee_close") or 0.0) + ((fee_p or {}).get("fee_close") or 0.0)
+    fee_today_all = ((fee_c or {}).get("fee_close_today") or 0.0) + ((fee_p or {}).get("fee_close_today") or 0.0)
+    fee_round_all = fee_open_all + fee_close_all
+    fees = {
+        "call": fee_c, "put": fee_p,
+        # 两腿只要有一边费率表没收录 → 合计不可信, 前端显示「—」而不是一个偏小的数
+        "known": bool((fee_c or {}).get("known")) and bool((fee_p or {}).get("known")),
+        "qty": call_qty + put_qty,
+        "fee_open": round(fee_open_all, 2),
+        "fee_close": round(fee_close_all, 2),                 # 两腿平昨合计
+        "fee_close_today": round(fee_today_all, 2),           # 两腿平今合计
+        "same_close": abs(fee_today_all - fee_close_all) < 1e-9,
+        "fee_round": round(fee_round_all, 2),
+    }
+
     # 止盈目标: 持仓总价值到 N 倍权利金 → 单腿每手权利金目标价 + 期权价格目标价
     targets = []
     for n in (2, 3, 4, 5):
@@ -1024,6 +1057,8 @@ def calc_dual(params):
         "put_per_call": round(k, 4),               # 每 1 手 call 配几手 put(中性配比)
         "total_premium": round(total_premium, 2),
         "funds_used": round(total_premium, 2),
+        "fees": fees,                                    # v50.95: 两腿手续费(开/往返)
+        "total_premium_net": round(total_premium + fee_round_all, 2),   # 含费实际付出
         "budget_left": round(budget - total_premium, 2),
         "next_pair": next_pair,                    # 下一档规模(预算不够时的解释用)
         "net_delta": round(net_delta, 4),          # 越接近 0 越中性
@@ -3632,12 +3667,61 @@ def fee_estimate(underlying, contract="", mode="futures", price=0, qty=0):
     c = get_contract(prod)
     if c:
         mult = (c["opt_mult"] if is_opt else c["mult"]) or 1
+    # v50.95: 每手费率(手数还没填时前端也能先提示) —— 按 1 手、同一价格算
+    _open1 = row_fee({"mode": mode, "underlying": underlying, "contract": contract,
+                      "op_type": "open", "open_price": price, "qty": 1}, mode, FEE_MODE_EX)
+    _close1 = {"mode": mode, "underlying": underlying, "contract": contract,
+               "op_type": "close", "close_price": price, "close_qty": 1}
     return {
         "code": prod, "is_option": is_opt, "known": known, "mult": mult,
         "fee_open": round(fee_open, 2),
         "fee_today": round(fee_today, 2), "fee_prev": round(fee_prev, 2),
+        "per_lot": {
+            "open": round(_open1, 2),
+            "today": round(row_fee(dict(_close1, close_today="1"), mode, FEE_MODE_EX), 2),
+            "prev": round(row_fee(dict(_close1, close_today="0"), mode, FEE_MODE_EX), 2),
+            "round": round(_open1 + row_fee(dict(_close1, close_today="0"), mode, FEE_MODE_EX), 2),
+        },
         # 两档相同(该品种没单列平今, 或费率本来就一样) → 前端不用强调"两档"
         "same": abs(fee_today - fee_prev) < 1e-9,
+    }
+
+
+def calc_fees(code, mode, price, qty):
+    """计算器结果区用的手续费(v50.95): 开仓 / 平仓(平昨·平今两档) / 往返合计。
+
+    ⚠ 费率与算法全部走 row_fee + FEE_TABLE —— 与交易记录同一套, 不另写一份,
+      否则计算器算出来的手续费迟早跟记录里的对不上。
+    ⚠ 平仓按**同一价格**估算: 比例费率的品种(如螺纹)实际平仓手续费按平仓价算,
+      止盈价平仓会略高于这里的数字 —— 界面上注明「按开仓价估算」即可, 不追求到分。
+    返回 None = 算不出来(品种解析不出 / 手数 < 1), 前端据此显示「—」。
+    """
+    q = int(qty or 0)
+    if not code or q <= 0:
+        return None
+    mode = str(mode or "futures").lower()
+    is_opt = mode in ("options", "dual")
+    prod = fee_product(code, "")
+    if not prod:
+        return None
+    base = {"mode": mode, "underlying": prod, "contract": "", "op_type": "open",
+            "open_price": price, "qty": q}
+    fee_open = row_fee(base, mode, FEE_MODE_EX)
+    known = fee_known(base, mode)
+    close_row = {"mode": mode, "underlying": prod, "contract": "", "op_type": "close",
+                 "close_price": price, "close_qty": q}
+    fee_prev = row_fee(dict(close_row, close_today="0"), mode, FEE_MODE_EX)
+    fee_today = row_fee(dict(close_row, close_today="1"), mode, FEE_MODE_EX)
+    fee_round = fee_open + fee_prev
+    return {
+        "known": known, "code": prod, "qty": q, "is_option": is_opt,
+        "fee_open": round(fee_open, 2),
+        "fee_close": round(fee_prev, 2),          # 平昨 / 基准费率(默认口径)
+        "fee_close_today": round(fee_today, 2),   # 平今(与基准不同时前端会标出来)
+        "same_close": abs(fee_today - fee_prev) < 1e-9,
+        "fee_round": round(fee_round, 2),         # 往返 = 开 + 平(平昨)
+        "fee_per_lot": round(fee_open / q, 2),    # 开仓每手
+        "fee_round_per_lot": round(fee_round / q, 2),
     }
 
 
@@ -4981,6 +5065,9 @@ select{cursor:pointer;appearance:none;
 .dual-target-tbl td.cp-call{background:var(--cp-call-bg2)}
 .dual-target-tbl td.cp-put{background:var(--cp-put-bg2)}
 /* v50.84: 单腿(期权买方)止盈表多两列数值 —— 表格里没有 .details .v 那套颜色类, 补上 */
+.dual-target-tbl.opt-tbl th,.dual-target-tbl.opt-tbl td{padding:10px 7px;white-space:nowrap}
+.dual-target-tbl.opt-tbl th{font-size:var(--fz-micro)}
+.dual-target-tbl.opt-tbl .dt-n b{min-width:0;padding:2px 7px}
 .dual-target-tbl td.gold{color:var(--gold);font-weight:700}
 /* v50.91: 浮盈列统一「红涨绿跌」—— 跟主表 pos/neg 同一套(bad=红 / good=绿),
    ⚠ 别用 good/bad 这两个语义色, 那是「好消息=绿」的西方习惯, 在这个软件里会反色 */
@@ -4991,6 +5078,27 @@ select{cursor:pointer;appearance:none;
   text-align:left;font-weight:600;padding:7px 13px}
 [data-theme="light"] .dual-target-tbl tr.tp-sep td{background:rgba(60,90,60,.06)}
 /* 期权买方的「加入记录」一行 */
+/* v50.95: 计算器结果区的「手续费」条 —— 三个模式共用一套 markup(.fee-strip), 别各写一种
+   ⚠ 手续费金额带两位小数(¥0.65/手这种), 不能用 fmtMoney(它取整到元) */
+.fee-strip{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:12px;
+  background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:9px 14px;
+  font-size:var(--fz-lbl);line-height:1.7}
+.fee-strip.warn{border-color:rgba(240,180,60,.45)}
+.fee-strip .fs-hd{display:flex;align-items:center;gap:7px;font-weight:700;color:var(--text);white-space:nowrap}
+.fee-strip .fs-hd small{font-weight:400;color:var(--sub);font-size:var(--fz-micro);margin-left:1px}
+.fee-strip .fs-item{color:var(--sub);white-space:nowrap}
+.fee-strip .fs-item b{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
+.fee-strip .fs-item em{font-style:normal;color:var(--sub);font-size:var(--fz-micro);margin-left:6px;opacity:.9}
+.fee-strip .fs-item.today b{color:var(--gold)}
+.fee-strip .fs-dot{color:var(--sub);opacity:.45}
+/* 含费口径单独占一行并右对齐 —— 跟着明细挤在一行时, 换行后会跑到左边, 看着乱 */
+.fee-strip .fs-net{flex-basis:100%;text-align:right;margin-top:3px;padding-top:6px;
+  border-top:1px dashed var(--border);color:var(--sub);font-size:var(--fz-small)}
+.fee-strip .fs-net b{color:var(--text);font-weight:700;font-variant-numeric:tabular-nums}
+.fee-strip .fs-net b.pos{color:var(--bad)}
+.fee-strip .fs-net b.neg{color:var(--good)}
+.fee-strip .fs-net b.gold{color:var(--gold)}
+
 .opt-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
 .plans-empty{font-size:12px;color:var(--sub);background:var(--panel2);border:1px dashed var(--border);
   border-radius:10px;padding:10px 14px;line-height:1.6}
@@ -5927,6 +6035,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="dcell"><span class="k" title="每手止盈 × 手数">按最大手数止盈可盈利</span><span class="v money bad" id="rMaxRewardF">—</span></div>
           <div class="dcell"><span class="k" title="每手保证金 × 手数">最大占用保证金</span><span class="v money gold" id="rMarginUsedF">—</span></div>
         </div>
+        <!-- v50.95: 手续费(开仓 / 平仓 / 往返) + 含费口径的最大亏损与止盈净利 -->
+        <div id="rFeeF" class="anim"></div>
         <div class="anim" style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn xs cyan" id="btnAddToTrade" title="把当前开仓价/止损价/止盈价与上面的测算结果一键写入「交易记录：期货模式」；上面填了合约年月，合约与标的都会带上（如 rb2610）">📥 加入记录</button>
           <span class="dim" style="font-size:11.5px">写入「交易记录：期货模式」；标的默认取品种代码，可在记录里点 ✎ 补月份</span>
@@ -5970,6 +6080,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="dcell"><span class="k">delta</span><span class="v" id="rDeltaO">—</span></div>
           <div class="dcell"><span class="k" title="权利金 × 手数">占用资金</span><span class="v money gold" id="rFundsO">—</span></div>
         </div>
+        <!-- v50.95: 手续费(开仓 / 平仓 / 往返) + 含费最大亏损(权利金 + 往返费) -->
+        <div id="rFeeO" class="anim"></div>
         <!-- v50.84/90: 期权止盈目标价位(2× / 3× / 4× / 6× 当前期权价格), 与双买共用一套表格样式 -->
         <div id="rTargetsO" class="anim" style="margin-top:16px"></div>
         <div class="opt-actions anim">
@@ -6013,6 +6125,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <div class="dcell"><span class="k">当前 IV（开仓时）</span><span class="v" id="rIvD">—</span></div>
           <div class="dcell"><span class="k">当前 IV 百分位</span><span class="v" id="rIvPctD">—</span></div>
         </div>
+        <!-- v50.95: 手续费(两腿开仓 / 往返) + 含费实际付出 -->
+        <div id="rFeeD" class="anim"></div>
         <div class="warnbox hidden" id="rWarnD"></div>
         <div style="display:flex;align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
           <button class="btn xs cyan" id="btnAddDual" title="把这次测算的 call / put 两条腿一键写入「交易记录：期权双买」">📥 加入记录</button>
@@ -7429,6 +7543,21 @@ function renderD(d){
   const _ivV = parseFloat($('dualIv').value), _ivPV = parseFloat($('dualIvPct').value);
   if ($('rIvD')) $('rIvD').textContent = (_ivV > 0) ? fmtTrim(_ivV) + '%' : '—';
   if ($('rIvPctD')) $('rIvPctD').textContent = isFinite(_ivPV) ? fmtTrim(_ivPV) + '%' : '—';
+  // v50.95: 手续费条 —— 两腿各按「报价 × 乘数 × 手数」算, 含费实际付出 = 权利金 + 往返费
+  if ($('rFeeD')){
+    const f = d.fees;
+    const legsTxt = (f && f.call && f.put)
+      ? ('call ' + d.call.qty + ' 手 ' + feeMoney(f.call.fee_open)
+         + ' + put ' + d.put.qty + ' 手 ' + feeMoney(f.put.fee_open))
+      : '';
+    $('rFeeD').innerHTML = f ? feeStripHTML(f, {
+      isOpt: true, legsText: legsTxt,
+      net: '含费实际付出 <b>' + feeMoney(d.total_premium_net)
+        + '</b><span style="opacity:.75">（权利金 + 往返费）</span>',
+      tip: '两腿手续费分开算（按各自的报价 × 乘数 × 手数）；往返 = 开仓 + 平仓。'
+        + '含费实际付出 = 两腿权利金 + 往返手续费。',
+    }) : '';
+  }
   const warn = $('rWarnD');
   if (!d.enough_lots){
     warn.classList.remove('hidden');
@@ -7514,6 +7643,40 @@ function calcFutures(){
     }).catch(()=>showError('应用服务连接已断开：请关闭窗口后重新双击桌面「期货开仓计算器」图标启动。测算在本机完成，无需联网。'));
 }
 
+/* v50.95: 手续费金额一律带两位小数(¥0.65/手这种), 不能用 fmtMoney(它取整到元) */
+const feeMoney = v => '¥' + Number(v || 0).toLocaleString('en-US',
+  {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+/* v50.95: 计算器结果区的「手续费」条 —— 三个模式共用一套 markup(.fee-strip)
+   ⚠ 金额全部来自后端 calc_*.fees(= row_fee + FEE_TABLE, 与交易记录同一套),
+     前端只排版不重算 —— 否则计算器算出来的手续费跟记录里迟早对不上 */
+function feeStripHTML(f, o){
+  o = o || {};
+  if (!f) return '';
+  const head = '<span class="fs-hd">💸 手续费<small>交易所 + ¥0.01/手</small></span>';
+  if (f.known === false){
+    return '<div class="fee-strip warn">' + head
+      + '<span class="fs-item">费率表里没收录该品种的' + (o.isOpt ? '期权' : '期货')
+      + '费率 → 这里按 ¥0 计（不代表真的免手续费）</span></div>';
+  }
+  const qty = Number(f.qty) || 0;
+  const items = [];
+  items.push('<span class="fs-item">开仓 <b>' + feeMoney(f.fee_open) + '</b><em>'
+    + (o.legsText || (qty > 1 ? (qty + ' 手 × ' + feeMoney(f.fee_per_lot)) : (qty + ' 手'))) + '</em></span>');
+  items.push('<span class="fs-item">平仓 <b>' + feeMoney(f.fee_close) + '</b><em>'
+    + (o.closeHint || '平昨费率') + '</em></span>');
+  items.push('<span class="fs-item">往返 <b>' + feeMoney(f.fee_round) + '</b><em>开 + 平</em></span>');
+  // 平今费率与平昨不同时才额外列一行(期权很多品种平今只收申报费, 差得不少)
+  if (!f.same_close){
+    items.push('<span class="fs-item today">平今 <b>' + feeMoney(f.fee_close_today)
+      + '</b><em>当天平</em></span>');
+  }
+  const net = o.net ? '<span class="fs-net">' + o.net + '</span>' : '';
+  return '<div class="fee-strip" title="' + (o.tip
+    || '手续费按当前手数与价格估算：交易所标准 + 0.01 元/手（宏源口径）；平仓按同一价格算，比例费率的品种会略有出入') + '">'
+    + head + items.join('<span class="fs-dot">·</span>') + net + '</div>';
+}
+
 let lastCalcF = null;   // 最近一次期货测算结果, 供「📥 加入记录」用
 function renderF(d){
   lastCalcF = d;
@@ -7539,6 +7702,17 @@ function renderF(d){
   $('rRiskUsedF').textContent = fmtMoney(d.risk_used);
   $('rMaxRewardF').textContent = fmtMoney(d.max_reward);
   $('rMarginUsedF').textContent = fmtMoney(d.margin_used);
+  // v50.95: 手续费条(开仓 / 平仓 / 往返) + 含费口径的最大亏损与止盈净利
+  if ($('rFeeF')){
+    $('rFeeF').innerHTML = d.fees ? feeStripHTML(d.fees, {
+      isOpt: false,
+      net: '含费：最大亏损 <b>' + feeMoney(d.max_loss_net) + '</b> ｜ 止盈净利 <b class="gold">'
+        + feeMoney(d.max_reward_net) + '</b>',
+      tip: '手续费 = 交易所标准 + 0.01 元/手（开、平各收一次）。'
+        + '含费最大亏损 = 实际最大风险金额 + 往返手续费；含费止盈净利 = 止盈金额 − 往返手续费。'
+        + '平仓手续费按开仓价估算（比例费率的品种实际按平仓价算，会略有出入）。',
+    }) : '';
+  }
   $('rBadgeLabel').textContent = d.direction==='long' ? '做多决策' : '做空决策';
 
   /* 阶梯止盈: 2R~5R 逐级止盈价, 按方向对齐颜色 (做多红/做空青) */
@@ -7631,6 +7805,16 @@ function renderO(d){
   if ($('rCodeO')) $('rCodeO').textContent = d.contract_code || '—（填合约年月 + 行权价后自动拼出）';
   if ($('rDeltaO')) $('rDeltaO').textContent = (d.delta == null) ? '—' : fmtDelta4(d.delta);
   $('rFundsO').textContent = fmtMoney(d.funds_used);
+  // v50.95: 手续费条 —— 期权买方最大亏损 = 权利金, 含费后要加上开 + 平的手续费
+  if ($('rFeeO')){
+    $('rFeeO').innerHTML = d.fees ? feeStripHTML(d.fees, {
+      isOpt: true,
+      net: '含费最大亏损 <b>' + feeMoney(d.max_loss_net)
+        + '</b><span style="opacity:.75">（权利金 + 往返费）</span>',
+      tip: '期权买方最大亏损 = 已付权利金；含费后再加开仓 + 平仓两笔手续费。'
+        + '很多品种平今只收申报费（比平昨便宜很多），这里两个费率都列出来了。',
+    }) : '';
+  }
   const b = $('rIvBadge');
   b.className = 'badge good';
   const pct = (d.risk_percent != null ? d.risk_percent : 3).toFixed(1).replace(/\.0$/, '');
@@ -7647,9 +7831,10 @@ function renderO(d){
       + fmt(d.entry_price) + ' × N）时的价位与持仓价值</small></span>'
       + '<span class="dt-sum">权利金成本 <b>' + fmtMoney(d.funds_used) + '</b></span>'
       + '</div>'
-      + '<table class="dual-target-tbl"><thead><tr>'
+      + '<table class="dual-target-tbl opt-tbl"><thead><tr>'
       + '<th>目标</th><th class="' + cpCls + '">期权价格目标（元/' + _u0 + '）</th>'
-      + '<th>每手权利金</th><th>合计价值</th><th>浮盈</th></tr></thead><tbody>'
+      + '<th>每手权利金</th><th>合计价值</th><th>浮盈</th>'
+      + '<th title="浮盈 − 开仓与平仓的往返手续费">净浮盈（含手续费）</th></tr></thead><tbody>'
       + d.targets.map(t =>
           '<tr><td class="dt-n"><b>' + t.n + '×</b></td>'
           + '<td class="big ' + cpCls + '"><span class="dt-px">¥' + fmt(t.price_unit) + '</span>'
@@ -7657,11 +7842,15 @@ function renderO(d){
           + '<td>' + fmtMoney(t.premium_per_lot) + '</td>'
           + '<td class="gold">' + fmtMoney(t.value) + '</td>'
           + '<td class="' + (t.profit >= 0 ? 'pos' : 'neg') + '">'
-          + (t.profit >= 0 ? '+' : '−') + fmtMoney(Math.abs(t.profit)) + '</td></tr>'
+          + (t.profit >= 0 ? '+' : '−') + fmtMoney(Math.abs(t.profit)) + '</td>'
+          + '<td class="' + (t.profit_net >= 0 ? 'pos' : 'neg') + '">'
+          + (t.profit_net >= 0 ? '+' : '−') + fmtMoney(Math.abs(t.profit_net)) + '</td></tr>'
         ).join('')
       + '</tbody></table>'
       + '<div class="tip">目标价与左侧「期权价格」同一口径（元/' + _u0 + '），可直接照着盘面报价挂单；'
-      + '按 ' + d.max_lots + ' 手算的持仓价值与浮盈。</div>'
+      + '按 ' + d.max_lots + ' 手算的持仓价值与浮盈。'
+      + (d.fees ? '「净浮盈」再扣掉开仓 + 平仓的往返手续费 ' + feeMoney(d.fees.fee_round) + '。' : '')
+      + '</div>'
     ) : '';
   }
   const warnO = $('rWarnO');
@@ -10232,15 +10421,12 @@ const TradeUI = {
     const isOpen = !this._closeModal;
     const price = parseFloat(($(isOpen ? 'tmOpenPrice' : 'tmClosePrice') || {}).value) || 0;
     const qty = parseFloat(($(isOpen ? 'tmQty' : 'tmCloseQty') || {}).value) || 0;
-    if (!(qty > 0)){
-      el.innerHTML = '<span style="opacity:.8">' + (isOpen
-        ? '填了开仓数量就能算出这笔的手续费'
-        : '填了平仓数量就能算出平今 / 平昨各多少钱') + '</span>';
-      return;
-    }
+    // v50.95: 数量还没填时也给「每手」费率(以前直接返回一句提示, 用户根本不知道有这项)
+    const perLot = !(qty > 0);
     // 打字时别每按一键就发一次请求
     clearTimeout(this._feeTimer);
-    this._feeTimer = setTimeout(() => this._fetchModalFee(src.underlying, src.contract, price, qty, isOpen), 150);
+    this._feeTimer = setTimeout(() => this._fetchModalFee(src.underlying, src.contract, price,
+      perLot ? 1 : qty, isOpen, perLot), 150);
   },
   /* 弹窗里的「标的 / 合约」原样取出 —— 两个都传给后端, 由 fee_product 解析品种
      ⚠ 只传其中一个会解析失败(记录里的标的可能写成 CF2701空 这类) → 会误报"费率表未收录" */
@@ -10251,7 +10437,7 @@ const TradeUI = {
     const contract = cEl ? String(cEl.value || '').trim() : '';
     return { underlying, contract };
   },
-  async _fetchModalFee(underlying, contract, price, qty, isOpen){
+  async _fetchModalFee(underlying, contract, price, qty, isOpen, perLot){
     const el = $('tmFeeHint');
     if (!el) return;
     this._feeReqSeq = (this._feeReqSeq || 0) + 1;
@@ -10263,7 +10449,9 @@ const TradeUI = {
         + '&mode=' + encodeURIComponent(this.mode)
         + '&price=' + price + '&qty=' + qty)).json();
       if (seq !== this._feeReqSeq) return;      // 已有更新的请求, 丢弃这次结果
-      this._feeLast = (d && d.ok) ? Object.assign({}, d, { _isOpen: !!isOpen, _qty: qty }) : null;
+      // v50.95: _perLot = 数量没填, 这次是按 1 手算的「每手费率」
+      this._feeLast = (d && d.ok)
+        ? Object.assign({}, d, { _isOpen: !!isOpen, _qty: qty, _perLot: !!perLot }) : null;
       this._paintModalFee();
     } catch (e) { /* 算不出就不显示, 不打扰 */ }
   },
@@ -10278,11 +10466,31 @@ const TradeUI = {
       return;
     }
     const m = v => Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    // v50.95: 数量还没填 → 先报「每手费率」(以前这里什么都不显示, 用户不知道开仓也有手续费)
+    if (d._perLot){
+      const pl = d.per_lot || {};
+      const tail = ' <span style="opacity:.8">（填数量后显示合计）</span>';
+      if (d._isOpen){
+        el.innerHTML = '开仓手续费：<b class="on">¥' + m(pl.open || 0) + '/手</b>'
+          + ' <span style="opacity:.6">·</span> 往返（开+平）<b>¥' + m(pl.round || 0) + '/手</b>' + tail;
+        return;
+      }
+      const cur0 = this._closeToday || '';
+      el.innerHTML = '手续费（每手）：'
+        + '<b class="' + (cur0 === '1' ? 'on' : '') + '">平今 ¥' + m(pl.today || 0) + '</b>'
+        + ' <span style="opacity:.6">/</span> '
+        + '<b class="' + (cur0 === '0' ? 'on' : '') + '">平昨 ¥' + m(pl.prev || 0) + '</b>' + tail;
+      return;
+    }
     // 开仓: 只有一档, 与平今/平昨无关
     if (d._isOpen){
       const q = Number(d._qty) || 0;
       el.innerHTML = '开仓手续费：<b class="on">¥' + m(d.fee_open) + '</b>'
-        + ' <span style="opacity:.8">（' + q + ' 手合计' + (q > 1 ? '，¥' + m(d.fee_open / q) + '/手' : '') + '）</span>';
+        + ' <span style="opacity:.8">（' + q + ' 手合计' + (q > 1 ? '，¥' + m(d.fee_open / q) + '/手' : '') + '）</span>'
+        // v50.95: 一并给「往返」(开 + 平), 这是真正要付的两笔
+        + ' <span style="opacity:.6">·</span> 往返（开+平）<b>¥' + m(d.fee_open + d.fee_prev) + '</b>'
+        + ' <span style="opacity:.8">（平仓按平昨费率'
+        + (d.same ? '' : '；平今 ¥' + m(d.fee_open + d.fee_today)) + '）</span>';
       return;
     }
     const cur = this._closeToday || '';

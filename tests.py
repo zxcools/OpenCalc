@@ -2358,6 +2358,65 @@ _import_urllib.urlopen = _real_urlopen
 M._update_manifest = _orig_manifest
 M._read_url_bytes = _orig_read
 
+# ---- v50.95: 计算器结果区的手续费(calc_fees) + 三个模式的含费口径 ----
+from main import calc_fees  # noqa: E402
+
+_f_rb = calc_fees("rb", "futures", 3200, 3)
+check("手续费(v50.95): 期货按手数线性(3 手 = 3 × 单笔, 每手 0.65)",
+      _f_rb["fee_open"] == 1.95 and _f_rb["fee_per_lot"] == 0.65, str(_f_rb))
+check("手续费(v50.95): 往返 = 开 + 平(平昨)",
+      _f_rb["fee_round"] == round(_f_rb["fee_open"] + _f_rb["fee_close"], 2), str(_f_rb))
+check("手续费(v50.95): 平今与平昨同价时 same_close=True",
+      _f_rb["same_close"] is True, str(_f_rb))
+check("手续费(v50.95): 手数 0 / 品种解析不出 → None(前端显示「—」)",
+      calc_fees("rb", "futures", 3200, 0) is None and calc_fees("", "futures", 1, 1) is None)
+
+_f_cu = calc_fees("cu", "options", 55, 13)
+check("手续费(v50.95): cu 期权平今只收申报费 → 明显低于平昨, 且 same_close=False",
+      (not _f_cu["same_close"]) and _f_cu["fee_close_today"] < _f_cu["fee_close"],
+      str(_f_cu))
+check("手续费(v50.95): 期权按「报价 × 乘数 × 手数」算成交金额(55×5×13×0.005…>0)",
+      _f_cu["fee_open"] > 0 and _f_cu["fee_per_lot"] > 0, str(_f_cu))
+check("手续费(v50.95): 费率表没有该品种的期权费率 → known=False(不是 ¥0)",
+      calc_fees("wr", "options", 100, 1)["known"] is False,
+      str(calc_fees("wr", "options", 100, 1)))
+
+_fut95 = calc_futures({"equity": 90000, "code": "rb", "direction": "long",
+                       "entry": 3200, "stop": 3150, "target": 3400, "risk_percent": 1})
+check("手续费(v50.95): 期货结果带 fees, 含费最大亏损 = 风险金额 + 往返费",
+      _fut95["fees"] and _fut95["max_loss_net"] == round(_fut95["risk_used"] + _fut95["fees"]["fee_round"], 2),
+      "%s vs %s" % (_fut95.get("max_loss_net"), _fut95.get("risk_used")))
+check("手续费(v50.95): 期货含费止盈净利 = 止盈金额 − 往返费",
+      _fut95["max_reward_net"] == round(_fut95["max_reward"] - _fut95["fees"]["fee_round"], 2),
+      str(_fut95["max_reward_net"]))
+
+_opt95 = calc_options({"equity": 120000, "code": "cu", "direction": "short", "month": "2612",
+                       "strike": 80000, "delta": -0.28, "entry": 55, "risk_percent": 3})
+check("手续费(v50.95): 期权含费最大亏损 = 权利金 + 往返费",
+      _opt95["max_loss_net"] == round(_opt95["funds_used"] + _opt95["fees"]["fee_round"], 2),
+      "%s vs %s" % (_opt95["max_loss_net"], _opt95["funds_used"]))
+check("手续费(v50.95): 目标价每档都带净浮盈 = 浮盈 − 往返费",
+      all(abs(t["profit_net"] - (t["profit"] - _opt95["fees"]["fee_round"])) < 0.011
+          for t in _opt95["targets"]),
+      str([(t["profit"], t["profit_net"]) for t in _opt95["targets"]]))
+
+_dual95 = calc_dual({"equity": 120000, "code": "fg", "month": "2701",
+                     "call_strike": 1300, "call_delta": 0.38, "call_premium": 1260,
+                     "put_strike": 1100, "put_delta": -0.25, "put_premium": 150,
+                     "risk_percent": 3})
+check("手续费(v50.95): 双买手续费 = 两腿之和(开仓 / 往返)",
+      _dual95["fees"]["fee_open"] == round(_dual95["fees"]["call"]["fee_open"] + _dual95["fees"]["put"]["fee_open"], 2)
+      and _dual95["fees"]["fee_round"] == round(_dual95["fees"]["fee_open"] + _dual95["fees"]["fee_close"], 2),
+      str(_dual95["fees"]))
+check("手续费(v50.95): 双买含费实际付出 = 两腿权利金 + 往返费",
+      _dual95["total_premium_net"] == round(_dual95["total_premium"] + _dual95["fees"]["fee_round"], 2),
+      "%s vs %s" % (_dual95["total_premium_net"], _dual95["total_premium"]))
+check("手续费(v50.95): 双买两腿 qty 合计与费率表已知",
+      _dual95["fees"]["known"] is True
+      and _dual95["fees"]["qty"] == _dual95["call"]["qty"] + _dual95["put"]["qty"],
+      str(_dual95["fees"].get("qty")))
+
+
 # ---- v50.94: 监控池品种拆分 —— 反斜杠/斜杠/竖线/分号 也算分隔符 ----
 check("监控池拆分(v50.94): 反斜杠 si\\lc\\fu",
       M.split_pool_contracts([r"si\lc\fu"]) == ["si", "lc", "fu"],
