@@ -440,12 +440,12 @@ async function main() {
   // 4. tradesArea 内无重复标题(全局 header 由 appTitle 驱动)
   const tradeTitles = await evalJs(ws, `[...document.querySelectorAll('#tradesArea h1')].length`);
   check('tradesArea 内无重复 h1(标题仅全局 header 一个)', tradeTitles === 0, 'count=' + tradeTitles);
-  // 5. 侧边栏 side-extras 含 5 个图标按钮(导出/导入/数据位置/检查更新/联系作者)
+  // 5. 侧边栏 side-extras 含 6 个图标按钮(显示设置/导出/导入/数据位置/检查更新/联系作者)
   const sideBtnsCount = await evalJs(ws, `document.querySelectorAll('.side-extras .side-btn').length`);
-  check('侧边栏底部 5 个图标按钮(导出/导入/数据位置/检查更新/联系作者)', sideBtnsCount === 5, 'count=' + sideBtnsCount);
+  check('侧边栏底部 6 个图标按钮(显示设置/导出/导入/数据位置/检查更新/联系作者)', sideBtnsCount === 6, 'count=' + sideBtnsCount);
   const sideBtnIds = await evalJs(ws, `[...document.querySelectorAll('.side-extras .side-btn')].map(b=>b.id).join(',')`);
-  check('侧边栏按钮 id 顺序 = btnExport/btnImport/btnDataDir/btnUpdate/btnContact',
-        sideBtnIds === 'btnExport,btnImport,btnDataDir,btnUpdate,btnContact', sideBtnIds);
+  check('侧边栏按钮 id 顺序 = btnTabPrefs/btnExport/btnImport/btnDataDir/btnUpdate/btnContact',
+        sideBtnIds === 'btnTabPrefs,btnExport,btnImport,btnDataDir,btnUpdate,btnContact', sideBtnIds);
   // 6. 资金曲线页面移除导入/导出/数据位置按钮(只保留「清除全部」, 用 fundsArea 内 querySelector 避免侧边栏 id 干扰)
   await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="funds"]').click()`);
   await sleep(600);
@@ -453,6 +453,58 @@ async function main() {
   const fb = JSON.parse(fundsBtns);
   check('资金曲线页移除 导入/导出/数据位置', fb.dataDir === false && fb.export === false && fb.import === false, fundsBtns);
   check('资金曲线页保留「清除全部」', fb.clearAll === true, fundsBtns);
+
+  // ---- v50.99 侧边栏显示设置: 勾选控制入口显隐, 数据不受影响 ----
+  await evalJs(ws, `(()=>{localStorage.removeItem('oc-side-tabs'); FundUI.applySideTabs();})()`);
+  const tabAllOn = await evalJs(ws, `document.querySelectorAll('#mainTabs .maintab:not(.tab-off)').length`);
+  check('默认 5 个侧栏入口全部显示', tabAllOn === 5, 'count=' + tabAllOn);
+  await evalJs(ws, `document.getElementById('btnTabPrefs').click()`);
+  await sleep(300);
+  const tpOpen = await evalJs(ws, `!document.getElementById('tabPrefsBg').classList.contains('hidden')`);
+  check('点 ☰ 打开「侧边栏显示设置」弹窗', tpOpen === true);
+  const tpBoxes = await evalJs(ws, `document.querySelectorAll('#tpList input[data-ptab]').length`);
+  check('设置弹窗列出 5 个可勾选页面', tpBoxes === 5, 'count=' + tpBoxes);
+  // 取消 资金曲线 + 期权双买, 保存
+  await evalJs(ws, `(()=>{
+    document.querySelectorAll('#tpList input[data-ptab]').forEach(b=>{ b.checked = (b.dataset.ptab!=='funds' && b.dataset.ptab!=='tradesDual'); });
+    document.getElementById('tpSave').click();
+  })()`);
+  await sleep(500);
+  const tpState = await evalJs(ws, `JSON.stringify({
+    vis: [...document.querySelectorAll('#mainTabs .maintab:not(.tab-off)')].map(t=>t.dataset.tab),
+    stored: localStorage.getItem('oc-side-tabs'),
+    active: document.querySelector('#mainTabs .maintab.active')?.dataset.tab,
+    closed: !document.getElementById('tabPrefsBg').classList.contains('hidden')
+  })`);
+  const ts = JSON.parse(tpState);
+  check('取消勾选后侧栏只剩 3 个入口', ts.vis.join(',') === 'calc,trades,tradesFut', tpState);
+  check('偏好写入 localStorage(oc-side-tabs)', ts.stored === '["calc","trades","tradesFut"]', String(ts.stored));
+  check('保存后弹窗关闭', ts.closed === false, tpState);
+  check('当前页被关掉 → 自动落到第一个可见页', ts.active === 'calc', 'active=' + ts.active);
+  // 隐藏页仍可程序跳转(「加入记录」跳交易记录·双买): 页面切过去 + 入口临时显示
+  const jump = await evalJs(ws, `(()=>{
+    document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]').click();
+    const el = document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]');
+    return JSON.stringify({off: el.classList.contains('tab-off'), shown: el.offsetParent !== null, tradesArea: !document.getElementById('tradesArea').classList.contains('hidden')});
+  })()`);
+  const jp = JSON.parse(jump);
+  check('隐藏页被程序跳转时内容仍可切换', jp.tradesArea === true, jump);
+  check('隐藏页成为当前页时入口临时可见(不会找不到自己在哪)', jp.off === true && jp.shown === true, jump);
+  // 至少保留一个
+  await evalJs(ws, `(()=>{
+    document.getElementById('btnTabPrefs').click();
+    document.querySelectorAll('#tpList input[data-ptab]').forEach(b=>{ b.checked = false; });
+    window.__alertMsg = null; window.alert = m => { window.__alertMsg = m; };
+    document.getElementById('tpSave').click();
+  })()`);
+  await sleep(200);
+  const guard = await evalJs(ws, `JSON.stringify({msg: window.__alertMsg, kept: localStorage.getItem('oc-side-tabs'), open: !document.getElementById('tabPrefsBg').classList.contains('hidden')})`);
+  const gd = JSON.parse(guard);
+  check('一个都不勾时拒绝保存并提示', !!gd.msg && gd.open === true, guard);
+  check('拒绝保存不污染已存偏好', gd.kept === '["calc","trades","tradesFut"]', String(gd.kept));
+  // 恢复默认(后续用例依赖侧栏完整)
+  await evalJs(ws, `(()=>{document.getElementById('tpCancel').click();localStorage.removeItem('oc-side-tabs');FundUI.applySideTabs();document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();})()`);
+  await sleep(400);
 
   // ---- 场景H: v50.3 主页面右推 + 操作列 ✎🗑 + 详情 header 三按钮右上 + grid 同时显示 + 移除策略自定义 ----
   await evalJs(ws, `document.querySelector('#mainTabs .maintab[data-tab="trades"]').click()`);

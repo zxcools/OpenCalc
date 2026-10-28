@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5098            # 与 README 版本号 v50.98 对齐(数值比较用于单实例接管)
+APP_VERSION = 5099            # 与 README 版本号 v50.99 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -5220,7 +5220,20 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
   box-shadow:0 10px 26px rgba(62,207,143,.35)}
 .maintab.active small{opacity:.92}
 .maintab:not(.active):hover{background:var(--panel2);color:var(--text)}
+/* v50.99 侧边栏显示设置: 关掉的入口不占位; 但它一旦成为当前页仍然显示
+   (「加入记录」等程序跳转不会跳到看不见的页面, 用户永远知道自己站在哪) */
+.maintab.tab-off{display:none}
+.maintab.tab-off.active{display:flex}
 .main{flex:1;min-width:0}
+
+/* v50.99 侧边栏显示设置弹窗 */
+.tp-list{display:flex;flex-direction:column;gap:8px;margin:12px 0 0}
+.tp-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);
+  border-radius:10px;background:var(--panel2);cursor:pointer;font-size:13.5px;transition:.15s}
+.tp-item:hover{border-color:var(--accent)}
+.tp-item input{width:16px;height:16px;flex:none;margin:0;cursor:pointer;accent-color:var(--accent)}
+.tp-item .tp-t{font-weight:600;color:var(--text)}
+.tp-item small{margin-left:auto;font-size:11.5px;color:var(--sub);font-weight:400}
 
 /* 侧边栏额外操作区(图标按钮, 不重叠) */
 .side-extras{margin-top:auto;width:100%;display:flex;flex-direction:column;gap:8px;
@@ -5737,6 +5750,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>期货模式</small></div>
     <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>多策略</small></div>
     <div class="side-extras">
+      <button class="side-btn" id="btnTabPrefs" title="侧边栏显示设置：勾选要显示的页面（没勾的只是隐藏入口，数据照常保存）">☰</button>
       <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径 / 统计区间设置）">⬆</button>
       <button class="side-btn" id="btnImport" title="导入备份（合并资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径 / 统计区间设置）">⬇</button>
       <button class="side-btn" id="btnDataDir" style="position:relative" title="把数据存到网盘同步文件夹，换电脑不丢记录">⚙<span id="dataRiskDot" class="hidden" style="position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#e5484d;box-shadow:0 0 0 2px var(--panel)"></span></button>
@@ -6734,6 +6748,26 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="tip">本应用开源分享，你的支持是持续维护的最大动力 🙌</div>
       <div class="modal-actions">
         <button class="btn" id="contactClose">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v50.99 侧边栏显示设置 -->
+  <div class="modalbg hidden" id="tabPrefsBg">
+    <div class="modal" style="width:min(430px,92vw)">
+      <h3><span class="dot"></span>☰ 侧边栏显示设置</h3>
+      <div class="tip">勾选要显示在左侧的页面。没勾的只是入口隐藏，<b>记录和数据照常保存</b>，随时勾回来即可。</div>
+      <div class="tp-list" id="tpList">
+        <label class="tp-item"><input type="checkbox" data-ptab="calc"><span class="tp-t">开仓计算</span><small>期货 · 期权</small></label>
+        <label class="tp-item"><input type="checkbox" data-ptab="trades"><span class="tp-t">交易记录</span><small>期权买方</small></label>
+        <label class="tp-item"><input type="checkbox" data-ptab="tradesDual"><span class="tp-t">交易记录</span><small>期权双买</small></label>
+        <label class="tp-item"><input type="checkbox" data-ptab="tradesFut"><span class="tp-t">交易记录</span><small>期货模式</small></label>
+        <label class="tp-item"><input type="checkbox" data-ptab="funds"><span class="tp-t">资金曲线</span><small>多策略</small></label>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="tpAll">全选</button>
+        <button class="btn ghost" id="tpCancel">取消</button>
+        <button class="btn" id="tpSave">保存</button>
       </div>
     </div>
   </div>
@@ -10840,6 +10874,52 @@ const FundUI = {
   //  ⚠ 故意只放内存: localStorage 的新键都得挂进 .opcalc 备份, 这里不值得动备份链路
   legendOff: {monthly:new Set(), yearly:new Set()},
 
+  /* ---- v50.99 侧边栏显示设置 (只隐藏入口, 数据照存) ---- */
+  sideTabKeys(){ return ['calc','trades','tradesDual','tradesFut','funds']; },
+  sideTabsOn(){
+    const all = this.sideTabKeys();
+    try{
+      const raw = localStorage.getItem('oc-side-tabs');
+      if (!raw) return all.slice();
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return all.slice();
+      const on = all.filter(k => arr.indexOf(k) >= 0);
+      return on.length ? on : all.slice();   // 空/全非法 → 当作没设过, 别把侧栏清空
+    }catch(e){ return all.slice(); }
+  },
+  applySideTabs(){
+    const on = this.sideTabsOn();
+    document.querySelectorAll('#mainTabs .maintab').forEach(el=>{
+      el.classList.toggle('tab-off', on.indexOf(el.dataset.tab) < 0);
+    });
+  },
+  initSideTabs(){
+    this.applySideTabs();
+    const bg = $('tabPrefsBg'); if (!bg || !$('btnTabPrefs')) return;
+    const boxes = ()=>Array.from(document.querySelectorAll('#tpList input[data-ptab]'));
+    $('btnTabPrefs').addEventListener('click', ()=>{
+      const on = this.sideTabsOn();
+      boxes().forEach(b=>{ b.checked = on.indexOf(b.dataset.ptab) >= 0; });
+      bg.classList.remove('hidden');
+    });
+    $('tpAll').addEventListener('click', ()=>boxes().forEach(b=>{ b.checked = true; }));
+    $('tpCancel').addEventListener('click', ()=>bg.classList.add('hidden'));
+    bg.addEventListener('click', e=>{ if (e.target === bg) bg.classList.add('hidden'); });
+    $('tpSave').addEventListener('click', ()=>{
+      const on = boxes().filter(b=>b.checked).map(b=>b.dataset.ptab);
+      if (!on.length){ alert('至少保留一个页面，否则左侧栏就空了'); return; }
+      localStorage.setItem('oc-side-tabs', JSON.stringify(on));
+      this.applySideTabs();
+      bg.classList.add('hidden');
+      // 当前页刚好被关掉 → 落到第一个还显示的页面
+      const cur = document.querySelector('#mainTabs .maintab.active');
+      if (cur && on.indexOf(cur.dataset.tab) < 0){
+        const first = document.querySelector('#mainTabs .maintab:not(.tab-off)');
+        if (first) first.click();
+      }
+    });
+  },
+
   /* ---- 主 tab 切换 ---- */
   initMainTabs(){
     document.querySelectorAll('#mainTabs .maintab').forEach(t=>{
@@ -10881,10 +10961,18 @@ const FundUI = {
         }
       });
     });
-    // 刷新后恢复上次所在页面(默认 calc)
+    // 刷新后恢复上次所在页面(默认 calc); v50.99: 只恢复「显示中」的页面, 隐藏了就落到第一个可见页
     const saved = localStorage.getItem('oc-last-tab');
-    if (saved && saved !== 'calc' && ['trades','tradesFut','funds'].includes(saved)) {
+    const on = this.sideTabsOn();
+    if (saved && saved !== 'calc' && on.indexOf(saved) >= 0
+        && document.querySelector('#mainTabs .maintab[data-tab="' + saved + '"]')) {
       document.querySelector('#mainTabs .maintab[data-tab="' + saved + '"]').click();
+    } else {
+      const act = document.querySelector('#mainTabs .maintab.active');
+      if (act && act.classList.contains('tab-off')) {
+        const first = document.querySelector('#mainTabs .maintab:not(.tab-off)');
+        if (first) first.click();
+      }
     }
   },
 
@@ -11820,6 +11908,7 @@ const FundUI = {
   },
 
   init(){
+    this.initSideTabs();   // v50.99: 先按偏好隐藏入口, 再恢复上次页面(才能判断该页是否被隐藏)
     this.initMainTabs();
     this.initStrategySeg();
     this.initModal();
