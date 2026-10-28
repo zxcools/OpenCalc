@@ -2475,7 +2475,9 @@ async function main() {
     const tab = t => document.querySelector('#mainTabs .maintab[data-tab="' + t + '"]').click();
     const box = () => q('tdDualTargets');
     const boxTxt = () => ((box() || {}).textContent || '').replace(/\\s+/g, ' ').trim();
-    const boxRows = () => box() ? box().querySelectorAll('tbody tr').length : 0;
+    // v50.96: 这块里现在有**两张**表(单腿目标价 + 组合价位), 这里只数第一张 —— 断言「4 档」才不跑偏
+    const boxRows = () => { const t = box() && box().querySelector('table');
+      return t ? t.querySelectorAll('tbody tr').length : 0; };
     const wipeDual = async () => {
       const g = await (await fetch('/api/trades/groups?mode=dual')).json();
       for (const it of (g.groups || [])) {
@@ -5536,6 +5538,99 @@ async function main() {
         && v95.modalWithQty.indexOf(v95money(v95.modalApi.fee_open)) >= 0
         && v95.modalWithQty.indexOf(v95money(v95.modalApi.fee_open + v95.modalApi.fee_prev)) >= 0,
         v95.modalWithQty);
+
+  // ===== v50.96: 双买「组合价位」止盈（标的价）—— 计算器 + 交易记录详情 =====
+  const v96Run = await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const out = {};
+    const norm = s => String(s || '').replace(/[¥,\\s]/g, '');
+    // 色值 probe: 涨用 --bad(红) / 跌用 --good(绿)
+    const probe = css => { const el = document.createElement('span'); el.style.color = css;
+      document.body.appendChild(el); const c = getComputedStyle(el).color; el.remove(); return c; };
+    out.red = probe('var(--bad)'); out.green = probe('var(--good)');
+
+    // ① 计算器: 用接口结果直接渲染(双买要填 6 个输入框, 这里只验块本身)
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(500);
+    setMode('dual'); await w(300);
+    out.api = await (await fetch('/api/calc/dual', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({equity: 1200000, code:'m', month:'2701',
+        call_strike:3050, call_delta:0.52, call_premium:1660,
+        put_strike:3150, put_delta:-0.42, put_premium:355, risk_percent:3})})).json();
+    if (out.api.ok){ renderD(out.api); await w(700); }
+    const box = q('rComboD');
+    const tbl = box ? box.querySelector('.combo-tbl') : null;
+    out.calc = {exists: !!tbl, visible: tbl ? tbl.offsetParent !== null : false,
+      heads: tbl ? [...tbl.querySelectorAll('thead th')].map(x => x.textContent.trim()) : [],
+      rows: tbl ? [...tbl.querySelectorAll('tbody tr')].map(tr => [...tr.children].map(td => td.textContent.trim())) : [],
+      upColor: tbl ? getComputedStyle(tbl.querySelector('td.combo-up')).color : '',
+      dnColor: tbl ? getComputedStyle(tbl.querySelector('td.combo-dn')).color : '',
+      tip: box ? ((box.querySelector('.tip') || {}).textContent || '') : ''};
+
+    // ② 交易记录·期权双买详情: 造一条与截图同口径的记录(5 call 3050 + 13 put 3150)
+    const post = p => fetch('/api/trades/upsert', {method:'POST', headers:{'Content-Type':'application/json'},
+                              body: JSON.stringify(p)}).then(r=>r.json());
+    await post({mode:'dual', underlying:'m2701', contract:'m2701-C-3050', call_put:'C', batch:'B96e',
+      op_type:'open', direction:'buy', open_date:'2026-10-28', open_price:166, qty:5, premium:8300});
+    await post({mode:'dual', underlying:'m2701', contract:'m2701-P-3150', call_put:'P', batch:'B96e',
+      op_type:'open', direction:'buy', open_date:'2026-10-28', open_price:35.5, qty:13, premium:4615});
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(900);
+    TradeUI.setMode('dual'); await TradeUI.refresh(); await w(800);
+    await TradeUI.loadDetail('m2701', 'B96e'); await w(1000);
+    const dt = await (await fetch('/api/trades/detail?mode=dual&underlying=m2701&batch=B96e')).json();
+    const dbox = q('tdDualTargets');
+    const dtbl = dbox ? dbox.querySelector('.combo-tbl') : null;
+    out.detail = {exists: !!dtbl, visible: dtbl ? dtbl.offsetParent !== null : false,
+      heads: dtbl ? [...dtbl.querySelectorAll('thead th')].map(x => x.textContent.trim()) : [],
+      rows: dtbl ? [...dtbl.querySelectorAll('tbody tr')].map(tr => [...tr.children].map(td => td.textContent.trim())) : [],
+      api: (dt.dual_targets || {}).targets || [],
+      apiStrikes: [(dt.dual_targets || {}).call_strike, (dt.dual_targets || {}).put_strike]};
+
+    // 清理
+    for (const op of (dt.operations || [])){
+      await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: op.id})});
+    }
+    out.cleaned = ((await (await fetch('/api/trades/groups?mode=dual&fee=ex')).json()).groups || [])
+      .filter(x => x.underlying === 'm2701' && x.batch === 'B96e').length === 0;
+    setMode('futures'); await w(150);
+    return JSON.stringify(out);
+  })()`);
+  const v96 = JSON.parse(v96Run);
+  const numOf = s => parseFloat(String(s || '').replace(/[¥,\s]/g, '').replace(/−/g, '-'));
+  check('组合价位(v50.96): 计算器双买结果多一块「组合价位止盈（标的价）」且可见',
+        v96.calc.exists === true && v96.calc.visible === true
+        && v96.calc.heads.join(',') === '目标,标的涨到（元/吨）,标的跌到（元/吨）,浮盈',
+        JSON.stringify({heads: v96.calc.heads, vis: v96.calc.visible}));
+  check('组合价位(v50.96): 涨到 / 跌到 = 接口的 under_up / under_dn（逐档逐列核对）',
+        v96.calc.rows.length === 4
+        && v96.calc.rows.every((r, i) => {
+             const t = v96.api.targets[i];
+             return Math.abs(numOf(r[1]) - t.under_up) < 0.01
+               && Math.abs(numOf(r[2]) - t.under_dn) < 0.01
+               && Math.abs(numOf(r[3]) - t.profit) < 0.6;
+           }),
+        JSON.stringify({rows: v96.calc.rows.map(r => r.slice(1, 4)),
+                        exp: v96.api.targets.map(t => [t.under_up, t.under_dn, t.profit])}));
+  check('组合价位(v50.96): 涨到是红(--bad) / 跌到是绿(--good)（红涨绿跌）',
+        v96.calc.upColor === v96.red && v96.calc.dnColor === v96.green
+        && v96.calc.upColor !== v96.calc.dnColor,
+        JSON.stringify({up: v96.calc.upColor, dn: v96.calc.dnColor}));
+  check('组合价位(v50.96): 写明「到期内在价值口径 / 实际提前止盈不用走这么远」',
+        /到期内在价值/.test(v96.calc.tip) && /时间价值/.test(v96.calc.tip),
+        v96.calc.tip.slice(0, 70));
+  check('组合价位(v50.96): 交易记录·双买详情也有这一块(4 档 · 同表头)',
+        v96.detail.exists === true && v96.detail.visible === true
+        && v96.detail.heads.join(',') === '目标,标的涨到（元/吨）,标的跌到（元/吨）,浮盈',
+        JSON.stringify({heads: v96.detail.heads, vis: v96.detail.visible}));
+  check('组合价位(v50.96): 详情页数值 = 后端 dual_targets（含年月标的的乘数没退化：2× = 3566.6 / 2951.31）',
+        v96.detail.rows.length === 4
+        && Math.abs(numOf(v96.detail.rows[0][1]) - 3566.6) < 0.01
+        && Math.abs(numOf(v96.detail.rows[0][2]) - 2951.31) < 0.01
+        && v96.detail.api.every((t, i) => Math.abs(numOf(v96.detail.rows[i][1]) - t.under_up) < 0.01
+                                          && Math.abs(numOf(v96.detail.rows[i][2]) - t.under_dn) < 0.01),
+        JSON.stringify({row0: v96.detail.rows[0], strikes: v96.detail.apiStrikes}));
+  check('组合价位(v50.96): 用例清理干净', v96.cleaned === true, String(v96.cleaned));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5095            # 与 README 版本号 v50.95 对齐(数值比较用于单实例接管)
+APP_VERSION = 5096            # 与 README 版本号 v50.96 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -1013,12 +1013,18 @@ def calc_dual(params):
         targets.append({
             "n": n,
             "value": round(t, 2),
+            "profit": round(t - total_premium, 2),         # v50.96: 该档浮盈
             "call_price": round(t / call_qty, 2) if call_qty else None,
             "put_price": round(t / put_qty, 2) if put_qty else None,
             "call_price_unit": round(t / call_qty / _om, 4) if call_qty else None,
             "put_price_unit": round(t / put_qty / _om, 4) if put_qty else None,
             "call_mult": round(t / (call_qty * c_prem), 2) if call_qty else None,
             "put_mult": round(t / (put_qty * p_prem), 2) if put_qty else None,
+            # v50.96 组合价位(标的价): 到期时「一边内在价值撑起全部市值、另一腿归零」
+            #   涨: call 行权价 + 总目标 ÷ (call手数 × 乘数)   ← 与单腿目标价同一条算式
+            #   跌: put  行权价 − 总目标 ÷ (put 手数 × 乘数)
+            "under_up": round(c_strike + t / call_qty / _om, 6) if call_qty else None,
+            "under_dn": round(p_strike - t / put_qty / _om, 6) if put_qty else None,
         })
 
     msg = ""
@@ -2893,6 +2899,27 @@ def find_cp_index(s):
     return found
 
 
+def strike_from_contract(contract):
+    """从合约代码里取行权价(v50.96): m2701-C-3050 / m2701C3050 / cu2612P80000 → 3050 / 3050 / 80000.
+    取不到返回 None。
+
+    ⚠ 定位 C/P 必须用 find_cp_index —— 品种前缀里自带 c/p(玉米 c / 棉花 cf / 聚丙烯 pp)时,
+      瞎找「最后一个 c/p」会把 hc2610P6000 判错。
+    """
+    s = str(contract or "")
+    i = find_cp_index(s)
+    if i is None:
+        return None
+    m = re.search(r"\d+(?:\.\d+)?", s[i + 1:])
+    if not m:
+        return None
+    try:
+        v = float(m.group(0))
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
 # 分隔符统一为 "-"(用户实际写法), 避免同一合约因 _ / / 空格 不同又分裂
 #   ⚠ 空白是「打字随手敲的」, 一律删掉; 只有 - _ / 才视为分段符
 _SPACE_RE = re.compile(r"\s+")
@@ -3372,7 +3399,12 @@ def _dual_targets(underlying, mode, holdings, opens):
     """
     if mode != "dual":
         return None
+    # ⚠ v50.96: 标的可能写成 m2701(带年月) —— 直接 get_contract("m2701") 取不到,
+    #   mult 会退化成 1, 目标价 / 组合价位整体放大「乘数」倍。先用 fee_product 取品种代码兜底。
     c = get_contract(underlying)
+    if c is None:
+        _prod = fee_product(underlying, "")
+        c = get_contract(_prod) if _prod else None
     mult = 1.0
     unit = ""
     if c:
@@ -3394,10 +3426,12 @@ def _dual_targets(underlying, mode, holdings, opens):
                 pq += q; pc += cost
         return cq, pq, cc, pc
 
-    cq, pq, cc, pc = _sum(holdings, "qty", "premium")
+    rows = holdings
+    cq, pq, cc, pc = _sum(rows, "qty", "premium")
     src = "holdings"
     if cq < 1 or pq < 1:
-        cq, pq, cc, pc = _sum(opens, "qty", "premium")
+        rows = opens
+        cq, pq, cc, pc = _sum(rows, "qty", "premium")
         src = "open"
     if cq < 1 or pq < 1:
         return None
@@ -3405,24 +3439,40 @@ def _dual_targets(underlying, mode, holdings, opens):
     if total <= 0:
         return None
 
+    # v50.96: 组合价位(标的价)要两边的行权价 —— 从合约代码里取, 取不到那一列就显示「—」
+    c_strike = p_strike = None
+    for r in rows:
+        cp = (r.get("call_put") or "").strip().upper()
+        if (r.get("qty") or 0) <= 0:
+            continue
+        if cp == "C" and c_strike is None:
+            c_strike = strike_from_contract(r.get("contract"))
+        elif cp == "P" and p_strike is None:
+            p_strike = strike_from_contract(r.get("contract"))
+
     targets = []
     for n in (2, 3, 4, 5):
         tv = total * n
         targets.append({
             "n": n,
             "value": round(tv, 2),
+            "profit": round(tv - total, 2),                # v50.96: 该档浮盈
             "call_price": round(tv / cq, 2),               # 每手权利金目标
             "put_price": round(tv / pq, 2),
             "call_price_unit": round(tv / cq / mult, 4),   # 期权价格目标(与行情报价同口径)
             "put_price_unit": round(tv / pq / mult, 4),
             "call_mult": round(tv / cc, 2) if cc else None,
             "put_mult": round(tv / pc, 2) if pc else None,
+            # 组合价位(标的价): 到期一边内在价值撑起全部市值、另一腿归零
+            "under_up": round(c_strike + tv / cq / mult, 6) if c_strike else None,
+            "under_dn": round(p_strike - tv / pq / mult, 6) if p_strike else None,
         })
     return {
         "total_premium": round(total, 2),
         "call_qty": cq, "put_qty": pq,
         "call_premium": round(cc, 2), "put_premium": round(pc, 2),
         "opt_mult": mult, "unit": unit, "source": src,
+        "call_strike": c_strike, "put_strike": p_strike,   # v50.96: 组合价位要用
         "targets": targets,
     }
 
@@ -5068,6 +5118,15 @@ select{cursor:pointer;appearance:none;
 .dual-target-tbl.opt-tbl th,.dual-target-tbl.opt-tbl td{padding:10px 7px;white-space:nowrap}
 .dual-target-tbl.opt-tbl th{font-size:var(--fz-micro)}
 .dual-target-tbl.opt-tbl .dt-n b{min-width:0;padding:2px 7px}
+/* v50.96: 组合价位止盈表(标的价) —— 涨到用红 / 跌到用绿(与全局红涨绿跌一致), 列头带淡底 */
+.dual-target-tbl.combo-tbl{margin-top:4px}
+.dual-target-tbl.combo-tbl th,.dual-target-tbl.combo-tbl td{padding:10px 9px;white-space:nowrap}
+.dual-target-tbl.combo-tbl th.combo-up{color:var(--bad);background:rgba(255,107,107,.08);font-weight:700}
+.dual-target-tbl.combo-tbl th.combo-dn{color:var(--good);background:rgba(46,204,143,.09);font-weight:700}
+.dual-target-tbl.combo-tbl td.combo-up{color:var(--bad);font-weight:800;font-size:var(--fz-dt-px);letter-spacing:.2px}
+.dual-target-tbl.combo-tbl td.combo-dn{color:var(--good);font-weight:800;font-size:var(--fz-dt-px);letter-spacing:.2px}
+[data-theme="light"] .dual-target-tbl.combo-tbl th.combo-up{background:rgba(224,82,82,.09)}
+[data-theme="light"] .dual-target-tbl.combo-tbl th.combo-dn{background:rgba(22,160,107,.1)}
 .dual-target-tbl td.gold{color:var(--gold);font-weight:700}
 /* v50.91: 浮盈列统一「红涨绿跌」—— 跟主表 pos/neg 同一套(bad=红 / good=绿),
    ⚠ 别用 good/bad 这两个语义色, 那是「好消息=绿」的西方习惯, 在这个软件里会反色 */
@@ -6117,6 +6176,8 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <!-- v50.81: 配比优先 —— 预算没用完时说明白为什么(否则会以为算错了) -->
         <div id="rQtyHintD" class="tip" style="margin-top:8px"></div>
         <div id="rTargetsD" style="margin-top:16px"></div>
+        <!-- v50.96: 组合价位止盈(标的价) —— 两腿合计到 N 倍权利金时标的需要走到的位置 -->
+        <div id="rComboD" class="anim" style="margin-top:14px"></div>
         <div class="details grid2 anim" id="rDetailD" style="margin-top:16px">
           <div class="dcell"><span class="k">开仓标的 / 合约</span><span class="v" id="rContractD">—</span></div>
           <div class="dcell"><span class="k" title="两腿 delta 相加, 越接近 0 越中性">两腿净 delta（越接近 0 越中性）</span><span class="v" id="rDeltaD">—</span></div>
@@ -6131,7 +6192,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <div style="display:flex;align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap">
           <button class="btn xs cyan" id="btnAddDual" title="把这次测算的 call / put 两条腿一键写入「交易记录：期权双买」">📥 加入记录</button>
         </div>
-        <div class="tip">双买 = 同时买入 call 与 put。上涨时 put 归零、全靠 call 腿撑；下跌时反过来。目标价位是<b>单腿期权价格</b>要涨到的位置（与左侧「期权价格」同一口径），不是标的价。</div>
+        <div class="tip">双买 = 同时买入 call 与 put。上涨时 put 归零、全靠 call 腿撑；下跌时反过来。上面「止盈目标价位」给的是<b>单腿期权价格</b>（与左侧「期权价格」同一口径）；「<b>组合价位止盈</b>」才是<b>标的价</b>（按到期内在价值折算，两腿合计到 N 倍权利金时标的需要走到的位置）。</div>
       </div>
 
       <!-- 最近保存的方案 (期货/期权买方/期权双买 各自独立, 各最多10组, 一键调出) -->
@@ -7530,6 +7591,14 @@ function renderD(d){
     + '<div class="tip">目标价与左侧「期权价格」同一口径' + _uTxt + '，可直接照着盘面报价挂单。'
     + '价格上行到 Call 目标价就平 call 腿（此时 put 已基本归零），下行到 Put 目标价就平 put 腿。</div>'
   ) : '';
+  /* v50.96: 组合价位止盈(标的价) —— 与上面那张单腿表并列, 两腿合计到 N 倍权利金时标的要走到的位置 */
+  if ($('rComboD')){
+    $('rComboD').innerHTML = d.enough_lots ? comboTPHTML({
+      targets: d.targets, unit: d.unit,
+      callStrike: (d.call && d.call.strike != null) ? d.call.strike : null,
+      putStrike: (d.put && d.put.strike != null) ? d.put.strike : null,
+    }) : '';
+  }
   /* v50.66: 这两格是「Call / Put」两个值并排, 用腿色区分, 免得看串 */
   if ($('rPriceD')) $('rPriceD').innerHTML =
     '<span class="cp-call">' + (d.call.price_per_unit != null ? '¥' + fmt(d.call.price_per_unit) : '—') + '</span>'
@@ -7675,6 +7744,45 @@ function feeStripHTML(f, o){
   return '<div class="fee-strip" title="' + (o.tip
     || '手续费按当前手数与价格估算：交易所标准 + 0.01 元/手（宏源口径）；平仓按同一价格算，比例费率的品种会略有出入') + '">'
     + head + items.join('<span class="fs-dot">·</span>') + net + '</div>';
+}
+
+/* v50.96: 组合价位止盈表(标的价) —— 计算器「期权双买」与交易记录详情**共用一套** markup
+   ⚠ 口径 = 到期内在价值: 假设到期时一边的内在价值撑起全部市值、另一腿归零
+     → 涨到 = call 行权价 + 该腿目标价 ; 跌到 = put 行权价 − 该腿目标价
+   数据来自后端(calc_dual().targets / dual_targets.targets 的 under_up / under_dn), 前端不重算 */
+function comboTPHTML(o){
+  o = o || {};
+  const ts = o.targets || [];
+  if (!ts.length) return '';
+  const hasUp = ts.some(t => t.under_up != null);
+  const hasDn = ts.some(t => t.under_dn != null);
+  if (!hasUp && !hasDn) return '';        // 两腿行权价都解析不出来 → 不显示这块
+  const u = String(o.unit || '').split('/')[0];
+  const uTxt = u ? ('（元/' + u + '）') : '';
+  const money = v => '¥ ' + Number(v || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
+  const kTxt = (o.callStrike != null && o.putStrike != null)
+    ? ('C ' + fmt(o.callStrike) + ' · P ' + fmt(o.putStrike)) : '';
+  const rows = ts.map(t => {
+    const pn = (t.profit != null) ? t.profit : null;
+    return '<tr><td class="dt-n"><b>' + t.n + '×</b>'
+      + '<span class="dt-val">合计 ' + money(t.value) + '</span></td>'
+      + '<td class="combo-up">' + (t.under_up == null ? '—' : '¥' + fmt(t.under_up)) + '</td>'
+      + '<td class="combo-dn">' + (t.under_dn == null ? '—' : '¥' + fmt(t.under_dn)) + '</td>'
+      + '<td class="' + (pn == null ? '' : (pn >= 0 ? 'pos' : 'neg')) + '">'
+      + (pn == null ? '—' : (pn >= 0 ? '+' : '−') + money(Math.abs(pn))) + '</td></tr>';
+  }).join('');
+  return '<div class="dt-head">'
+    + '<span class="dt-ico">🧭</span>'
+    + '<span class="dt-title">组合价位止盈（标的价）<small>两腿合计到 N 倍权利金时，标的需要走到的位置</small></span>'
+    + (kTxt ? '<span class="dt-sum">行权价 ' + kTxt + '</span>' : '')
+    + '</div>'
+    + '<table class="dual-target-tbl combo-tbl"><thead><tr>'
+    + '<th>目标</th><th class="combo-up">标的涨到' + uTxt + '</th>'
+    + '<th class="combo-dn">标的跌到' + uTxt + '</th><th>浮盈</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>'
+    + '<div class="tip">到期内在价值口径：假设到期时一边的内在价值撑起全部市值、另一腿归零 → '
+    + '<b>标的涨到</b> = call 行权价 + 该腿目标价，<b>标的跌到</b> = put 行权价 − 该腿目标价。'
+    + '实际提前止盈（还有时间价值、IV 也在变）时，标的往往不用走这么远 —— 这里是「到期至少要走到的位置」。</div>';
 }
 
 let lastCalcF = null;   // 最近一次期货测算结果, 供「📥 加入记录」用
@@ -9525,6 +9633,11 @@ const TradeUI = {
           ? '持仓已全部平掉，这里按<b>原始开仓记录</b>回算，仅供复盘参考。'
           : '按<b>当前剩余持仓</b>计算（' + t.call_qty + ' 手 call + ' + t.put_qty + ' 手 put，权利金 ' + money(t.total_premium) + '）。')
       + '涨到 Call 目标价就平 call 腿（此时 put 基本归零），跌到 Put 目标价就平 put 腿。</div>';
+    // v50.96: 再补一块「组合价位止盈（标的价）」—— 两腿合计到 N 倍权利金时标的需要走到的位置
+    box.innerHTML += '<div style="margin-top:14px">' + comboTPHTML({
+      targets: t.targets, unit: t.unit,
+      callStrike: t.call_strike, putStrike: t.put_strike,
+    }) + '</div>';
   },
 
   /* 期权买方(单腿) v50.85: 止盈目标价位 = 当前期权价格 × 2/3/4/6

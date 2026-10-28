@@ -2411,6 +2411,58 @@ check("手续费(v50.95): 双买手续费 = 两腿之和(开仓 / 往返)",
 check("手续费(v50.95): 双买含费实际付出 = 两腿权利金 + 往返费",
       _dual95["total_premium_net"] == round(_dual95["total_premium"] + _dual95["fees"]["fee_round"], 2),
       "%s vs %s" % (_dual95["total_premium_net"], _dual95["total_premium"]))
+# ---- v50.96: 双买「组合价位」止盈(标的价) —— 两腿合计到 N 倍权利金时标的需要走到的位置 ----
+from main import strike_from_contract  # noqa: E402
+
+check("组合价位(v50.96): 从合约代码取行权价(紧凑 / 分隔 / 品种自带 c、p)",
+      strike_from_contract("m2701C3050") == 3050.0
+      and strike_from_contract("m2701-C-3050") == 3050.0
+      and strike_from_contract("cu2612P80000") == 80000.0
+      and strike_from_contract("hc2610P6000") == 6000.0,          # hc 里的 c 不能被当成 C/P
+      str([strike_from_contract(x) for x in ("m2701C3050", "m2701-C-3050", "cu2612P80000", "hc2610P6000")]))
+check("组合价位(v50.96): 没有 C/P 的合约(如 m2701 / rb2610) → None",
+      strike_from_contract("m2701") is None and strike_from_contract("") is None)
+
+_d96 = calc_dual({"equity": 1200000, "code": "m", "month": "2701",
+                  "call_strike": 3050, "call_delta": 0.52, "call_premium": 166 * 10,
+                  "put_strike": 3150, "put_delta": -0.42, "put_premium": 35.5 * 10,
+                  "risk_percent": 3})
+_t96 = _d96["targets"][0]
+check("组合价位(v50.96): 标的涨到 = call 行权价 + 该腿目标价(3050 + 目标价)",
+      abs(_t96["under_up"] - (3050 + _t96["call_price_unit"])) < 1e-3,   # 单腿只保留 4 位
+      "%s vs %s" % (_t96["under_up"], 3050 + _t96["call_price_unit"]))
+check("组合价位(v50.96): 标的跌到 = put 行权价 − 该腿目标价(3150 − 目标价)",
+      abs(_t96["under_dn"] - (3150 - _t96["put_price_unit"])) < 1e-3,
+      "%s vs %s" % (_t96["under_dn"], 3150 - _t96["put_price_unit"]))
+check("组合价位(v50.96): 走到该价位时 call 腿市值正好 = N 倍总权利金",
+      abs(_d96["call"]["qty"] * (_t96["under_up"] - 3050) * _d96["opt_mult"] - _t96["value"]) < 0.02,
+      "%s vs %s" % (_d96["call"]["qty"] * (_t96["under_up"] - 3050) * _d96["opt_mult"], _t96["value"]))
+check("组合价位(v50.96): 每档都有 under_up / under_dn / profit, 且逐档上移/下移",
+      all(t["under_up"] is not None and t["under_dn"] is not None and t["profit"] is not None
+          for t in _d96["targets"])
+      and all(_d96["targets"][i]["under_up"] < _d96["targets"][i + 1]["under_up"]
+              and _d96["targets"][i]["under_dn"] > _d96["targets"][i + 1]["under_dn"]
+              for i in range(len(_d96["targets"]) - 1)),
+      str([(t["under_up"], t["under_dn"]) for t in _d96["targets"]]))
+
+# 详情页: 标的是「带年月」的写法(m2701) —— 乘数要能从品种代码兜底解析出来, 否则目标价整体放大 10 倍
+for _cp, _ctr, _px, _q, _pm in (("C", "m2701-C-3050", 166, 5, 8300),
+                                ("P", "m2701-P-3150", 35.5, 13, 4615)):
+    trade_upsert({"mode": "dual", "underlying": "m2701", "contract": _ctr, "call_put": _cp,
+                  "op_type": "open", "direction": "buy", "open_date": "2026-10-28",
+                  "open_price": _px, "qty": _q, "premium": _pm, "batch": "B96t"})
+_dt96 = trade_detail("m2701", mode="dual", batch="B96t")["dual_targets"]
+check("组合价位(v50.96): 详情页标的写 m2701 时乘数仍取到 10(不是退化成 1)",
+      _dt96["opt_mult"] == 10 and abs(_dt96["targets"][0]["call_price_unit"] - 516.6) < 0.01,
+      str([_dt96["opt_mult"], _dt96["targets"][0]["call_price_unit"]]))
+check("组合价位(v50.96): 详情页也给出 under_up / under_dn(3566.6 / 2951.31)",
+      _dt96["call_strike"] == 3050 and _dt96["put_strike"] == 3150
+      and abs(_dt96["targets"][0]["under_up"] - 3566.6) < 0.01
+      and abs(_dt96["targets"][0]["under_dn"] - 2951.31) < 0.01,
+      str([_dt96["targets"][0]["under_up"], _dt96["targets"][0]["under_dn"]]))
+for _o in trade_detail("m2701", mode="dual", batch="B96t")["operations"]:
+    trade_delete(_o["id"])
+
 check("手续费(v50.95): 双买两腿 qty 合计与费率表已知",
       _dual95["fees"]["known"] is True
       and _dual95["fees"]["qty"] == _dual95["call"]["qty"] + _dual95["put"]["qty"],
