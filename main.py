@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5099            # 与 README 版本号 v50.99 对齐(数值比较用于单实例接管)
+APP_VERSION = 5100            # 与 README 版本号 v51.00 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -4694,11 +4694,9 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.last_request_time = time.time()
 
-    # 启动即备份一次(即使本次不修改任何数据, 也留下一份"上次打开时"的状态)
+    # v51.00: 启动不再自动备份 —— 只有真正改动数据时才留快照(各写库入口的 fund_auto_backup),
+    # 否则每开一次软件就多一份「启动」快照, 白占轮转位、把真正改过什么的那几份挤出去
     try:
-        _bk = fund_auto_backup("启动", force=True)
-        if _bk:
-            print("已自动备份: %s" % _bk)
         if data_dir_risky():
             print("⚠ 数据目录在软件目录内(%s) — 更新软件会删除数据, 建议在「⚙ 数据位置」里迁到软件目录之外"
                   % os.path.dirname(FUND_DB_PATH))
@@ -6517,7 +6515,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         当前记录：<b id="setCurCnt" style="color:var(--accent)">—</b> 条
       </div>
       <div style="color:var(--sub);font-size:12.5px;line-height:1.8;margin-bottom:12px;border-top:1px dashed var(--line);padding-top:10px">
-        💾 <b>自动备份</b>：每次交易记录 / 资金曲线发生变动都会自动存一份快照，<b>最多保留最近 10 份</b>。<br>
+        💾 <b>自动备份</b>：每次交易记录 / 资金曲线发生变动都会自动存一份快照，<b>最多保留最近 10 份</b>；只打开软件不改数据时不会备份。<br>
         备份位置：<b id="setBkDir" style="color:var(--text);word-break:break-all">—</b><br>
         已有备份：<b id="setBkCnt" style="color:var(--accent)">—</b> 份
         <span id="setBkLast" style="opacity:.75"></span>
