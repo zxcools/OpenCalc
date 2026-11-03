@@ -203,8 +203,8 @@ print("\n== 交易日历 v50.77 ==")
 from main import (is_trading_day, next_trading_day, MARKET_HOLIDAYS,  # noqa: E402
                   MARKET_HOLIDAY_YEARS, _import_fail)
 
-check("交易日历(v50.77): 节假日表覆盖 2025/2026(每年要更新一次)",
-      {2025, 2026} <= MARKET_HOLIDAY_YEARS, str(sorted(MARKET_HOLIDAY_YEARS)))
+check("交易日历(v50.77/51.01): 节假日表覆盖 2025/2026/2027(每年要更新一次)",
+      {2025, 2026, 2027} <= MARKET_HOLIDAY_YEARS, str(sorted(MARKET_HOLIDAY_YEARS)))
 
 # 周末判定
 check("交易日历(v50.77): 周六/周日不是交易日",
@@ -221,6 +221,22 @@ check("交易日历(v50.77): 2025 春节(含除夕)/国庆+中秋 也休市",
       all(is_trading_day(d) is False for d in ("2025-01-28", "2025-10-08")), '')
 check("交易日历(v50.77): 节假日表里周末之外的调休工作日仍**不开市**(期货只看工作日)",
       is_trading_day("2026-02-14") is False and is_trading_day("2026-10-10") is False, '')
+# v51.01: 2027 年(元旦/春节 2/5~2/13/清明/劳动节/端午/中秋/国庆)
+check("交易日历(v51.01): 2027 七个假期的工作日都休市",
+      all(is_trading_day(d) is False for d in
+          ("2027-01-01", "2027-02-05", "2027-02-08", "2027-02-12", "2027-04-05",
+           "2027-04-30", "2027-05-03", "2027-05-04", "2027-06-09",
+           "2027-09-15", "2027-10-01", "2027-10-07")), '')
+check("交易日历(v51.01): 2027 春节首尾都算休市(2/5 除夕 ~ 2/13)",
+      is_trading_day("2027-02-05") is False and is_trading_day("2027-02-13") is False, '')
+check("交易日历(v51.01): 2027 假期前后的普通工作日仍是交易日",
+      all(is_trading_day(d) is True for d in
+          ("2027-01-04", "2027-02-15", "2027-04-06", "2027-05-05",
+           "2027-06-10", "2027-09-16", "2027-10-08")), '')
+check("交易日历(v51.01): 2027 春节后第一天 = 2/15(跳过 2/5~2/13 与周末)",
+      next_trading_day("2027-02-04") == "2027-02-15", next_trading_day("2027-02-04"))
+check("交易日历(v51.01): 2027 国庆前最后一个交易日 9/30 → 下一交易日 10/8",
+      next_trading_day("2027-09-30") == "2027-10-08", next_trading_day("2027-09-30"))
 # 非法输入不炸
 check("交易日历(v50.77): 空串/乱码输入不抛异常",
       is_trading_day("") is False and is_trading_day("bad") is False
@@ -461,15 +477,18 @@ class _FakeNow(object):
 
 _m_real_dt = _main_mod.datetime
 try:
-    _main_mod.datetime = _FakeNow(2027, 1)       # 当年(2027)表里没有 → 必须提醒
+    _main_mod.datetime = _FakeNow(2028, 1)       # 当年(2028)表里没有 → 必须提醒
     check("日历提醒(v50.80): 当年不在表里 → 提醒该年份",
-          calendar_missing_years() == [2027], str(calendar_missing_years()))
-    _main_mod.datetime = _FakeNow(2026, 10)      # 当年有、10 月 → 不提次年
+          calendar_missing_years() == [2028], str(calendar_missing_years()))
+    _main_mod.datetime = _FakeNow(2027, 10)      # 当年有、10 月 → 不提次年
     check("日历提醒(v50.80): 10 月不提前催次年安排",
           calendar_missing_years() == [], str(calendar_missing_years()))
-    _main_mod.datetime = _FakeNow(2026, 11)      # 11 月起 → 提醒次年(2027 未录)
+    _main_mod.datetime = _FakeNow(2027, 11)      # 11 月起 → 提醒次年(2028 未录)
     check("日历提醒(v50.80): 11 月起提醒次年安排",
-          calendar_missing_years() == [2027], str(calendar_missing_years()))
+          calendar_missing_years() == [2028], str(calendar_missing_years()))
+    _main_mod.datetime = _FakeNow(2026, 11)      # v51.01: 录了 2027 → 不再提醒
+    check("日历提醒(v51.01): 次年(2027)已录 → 11 月也不提醒",
+          calendar_missing_years() == [], str(calendar_missing_years()))
 finally:
     _main_mod.datetime = _m_real_dt
 check("日历提醒(v50.80): 恢复真实 datetime(不能污染后面的用例)",

@@ -4337,6 +4337,9 @@ async function main() {
   check('日历提醒(v50.80): data-info 带 holiday_years / holiday_missing',
         Array.isArray(v80.calReal.missing) && (v80.calReal.years || []).indexOf(2026) >= 0
         && v80.calReal.missing.length === 0, JSON.stringify(v80.calReal));
+  check('交易日历(v51.01): 2027 已录入 → 11 月起不再提示补录',
+        (v80.calReal.years || []).indexOf(2027) >= 0 && v80.calReal.missing.length === 0,
+        JSON.stringify(v80.calReal.years));
   check('日历提醒(v50.80): 缺年份时显示横幅并写明年份与后果',
         v80.cal.shown === true && /2027 年/.test(v80.cal.text) && /2028 年/.test(v80.cal.text)
         && /平今/.test(v80.cal.text), v80.cal.text);
