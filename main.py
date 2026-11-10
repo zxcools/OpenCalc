@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5101            # 与 README 版本号 v51.01 对齐(数值比较用于单实例接管)
+APP_VERSION = 5102            # 与 README 版本号 v51.02 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -432,6 +432,110 @@ def next_trading_day(date_str):
 
 
 _DATE_FIELD_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+
+
+# ---------------------------------------------------------------------------
+# v51.02: 期权到期日推算(按交易所规则, 交割月 = 合约代码里的 YYMM)
+#   上期所(除 FU) / 能源中心(除 SC): 交割月前一个月的**倒数第 5 个交易日**
+#   FU 燃料油: 倒数第 10 个交易日;  SC 原油: 倒数第 13 个交易日
+#   大商所: 交割月前一个月的**第 12 个交易日**
+#   广期所: 交割月前一个月的**第 5 个交易日**
+#   郑商所: 交割月前一个月**第 15 个日历日(含)之前**的倒数第 3 个交易日
+#           (AP/CJ/PX 例外: 交割月**前两个月**最后一个日历日(含)之前的倒数第 3 个交易日)
+#   中金所股指期权(IO/HO/MO): 到期月第 3 个星期五
+#   ⚠ 系列期权(m-2701-MS / SR-607-MS 这类)到期日不同, 这里按**常规期权**算 —— 不适用
+#   ⚠ 交易日 = 工作日且不在 MARKET_HOLIDAYS; 表没收录的年份会退化成只跳周末
+# ---------------------------------------------------------------------------
+def _shift_month(y, m, delta):
+    """月份平移: (2027, 1, -1) → (2026, 12)"""
+    idx = y * 12 + (m - 1) + delta
+    return idx // 12, idx % 12 + 1
+
+
+def _month_days(y, m):
+    """该月天数(不引 calendar 模块)"""
+    if m == 12:
+        nxt = datetime(y + 1, 1, 1)
+    else:
+        nxt = datetime(y, m + 1, 1)
+    return (nxt - datetime(y, m, 1)).days
+
+
+def _trading_days_of_month(y, m):
+    return ["%04d-%02d-%02d" % (y, m, d)
+            for d in range(1, _month_days(y, m) + 1)
+            if is_trading_day("%04d-%02d-%02d" % (y, m, d))]
+
+
+def _third_friday(y, m):
+    """到期月第 3 个星期五(中金所股指期权); 星期五=weekday 4"""
+    offset = (4 - datetime(y, m, 1).weekday()) % 7
+    return "%04d-%02d-%02d" % (y, m, 1 + offset + 14)
+
+
+# ("基准月偏移", "取法", 序号)
+#   取法 end=倒数第 n 个交易日 / start=正数第 n 个交易日
+#   czce=前 15 个日历日(含)内的倒数第 n 个 / end=全月倒数第 n 个
+OPT_EXPIRY_BY_EXCHANGE = {
+    "上期所": (-1, "end", 5),
+    "能源中心": (-1, "end", 5),
+    "大商所": (-1, "start", 12),
+    "广期所": (-1, "start", 5),
+    "郑商所": (-1, "czce", 3),
+}
+OPT_EXPIRY_OVERRIDES = {
+    "fu": (-1, "end", 10),      # 燃料油
+    "sc": (-1, "end", 13),      # 原油
+    "ap": (-2, "end", 3),       # 苹果(前两个月最后一个日历日之前)
+    "cj": (-2, "end", 3),       # 红枣
+    "px": (-2, "end", 3),       # 对二甲苯
+}
+
+
+def option_expiry(contract):
+    """按合约代码推算期权到期日 'YYYY-MM-DD'; 解析不了 / 品种不在表里 → None"""
+    m = re.match(r"^([A-Za-z]+)\s*[-\s]?(\d{3,4})", str(contract or "").strip())
+    if not m:
+        return None
+    prod, ym = m.group(1).lower(), m.group(2)
+    c = get_contract(prod)
+    if not c:
+        return None
+    if len(ym) == 4:
+        yy, mm = int(ym[:2]), int(ym[2:])
+    else:                                    # 3 位写法(SR701) → 20YY
+        yy, mm = int(ym[:1]), int(ym[1:])
+    if not 1 <= mm <= 12:
+        return None
+    y = 2000 + yy
+    if c["exchange"] == "中金所":
+        return _third_friday(y, mm) if prod in ("io", "ho", "mo") else None
+    rule = OPT_EXPIRY_OVERRIDES.get(prod) or OPT_EXPIRY_BY_EXCHANGE.get(c["exchange"])
+    if not rule:
+        return None
+    off, mode, n = rule
+    by, bm = _shift_month(y, mm, off)
+    days = _trading_days_of_month(by, bm)
+    if mode == "czce":
+        first_half = [d for d in days if int(d[-2:]) <= 15]
+        return first_half[-n] if len(first_half) >= n else None
+    if mode == "start":
+        return days[n - 1] if len(days) >= n else None
+    return days[-n] if len(days) >= n else None
+
+
+def option_expiry_info(contract, today=None):
+    """到期日 + 剩余自然日; 到期日算不出来时返回 {'expiry': None, 'dte': None}"""
+    exp = option_expiry(contract)
+    if not exp:
+        return {"contract": contract, "expiry": None, "dte": None, "expired": False}
+    try:
+        t = today or datetime.now().date()
+        dte = (datetime.strptime(exp, "%Y-%m-%d").date() - t).days
+    except ValueError:
+        return {"contract": contract, "expiry": exp, "dte": None, "expired": False}
+    return {"contract": contract, "expiry": exp, "dte": dte, "expired": dte < 0}
+
 
 
 def norm_date_field(v):
@@ -1500,8 +1604,18 @@ def fund_auto_backup(reason="", force=False, min_interval=2.0, detail=""):
                 seen.add(txt)
                 parts.append(txt)
         _write_backup_meta(out_path, " / ".join(p for p in parts if p), "")
-        # 轮转: 只保留最近 N 份(文件名内嵌时间戳, 按名排序即按时间排序)
-        files = sorted(f for f in os.listdir(bdir) if f.startswith("funds_") and f.endswith(".db"))
+        # 轮转: 只保留最近 N 份
+        # ⚠ v51.02: 按 mtime 排, 不再按文件名 —— 文件名内嵌的是「创建时的系统时间」,
+        #   一旦系统时钟被改过(或测试里造了未来时间戳的样本文件), 文件名排序就不再等于真实先后,
+        #   会把刚生成的那份当"最旧"删掉。mtime 是落盘那一刻的, 更贴近真实顺序。
+        files = [f for f in os.listdir(bdir) if f.startswith("funds_") and f.endswith(".db")]
+
+        def _mt(f):
+            try:
+                return os.path.getmtime(os.path.join(bdir, f))
+            except OSError:
+                return 0
+        files.sort(key=_mt)
         for f in files[:-AUTO_BACKUP_KEEP]:
             try:
                 os.remove(os.path.join(bdir, f))
@@ -2373,6 +2487,7 @@ def _db_ensure_schema(conn):
         ("open_time", "TEXT"),                          # v50.70 开仓时间 HH:MM (判平今/平昨)
         ("close_time", "TEXT"),                         # v50.70 平仓时间 HH:MM
         ("close_today", "TEXT"),                        # v50.74 平今/平昨 手选: ''自动 / '1'平今 / '0'平昨
+        ("close_reason", "TEXT"),                       # v51.02 平仓原因(止损触发/阶段止盈/跟踪止损/换月/到期…)
     ])
     _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
     _ensure_cols("trade_reviews", [
@@ -2818,6 +2933,10 @@ TRADE_STRATEGY_DEFAULT = STRATEGY_OPTIONS_BUY
 ALLOWED_CALL_PUT = ("C", "P")
 ALLOWED_DIRECTION = ("buy", "sell")
 ALLOWED_OP_TYPE = ("open", "close")
+# v51.02: 平仓原因候选(前端下拉与统计共用; 空串 = 没填/老数据, 与「其他」区分开)
+CLOSE_REASONS = (
+    "止损触发", "跟踪止损", "阶段止盈", "到期平仓", "换月", "主动减仓", "其他",
+)
 
 
 _CP_SEP = "-_/ "   # C/P 前后允许的分隔符(国内期权代码写法多样)
@@ -3005,6 +3124,8 @@ def _trade_record_to_dict(r):
         "close_time": ((r["close_time"] if "close_time" in r.keys() else "") or ""),
         # v50.74: 平今/平昨 手选标记('' 自动 / '1' 平今 / '0' 平昨)
         "close_today": ((r["close_today"] if "close_today" in r.keys() else "") or ""),
+        # v51.02: 平仓原因(老库没有该列 → 空串)
+        "close_reason": ((r["close_reason"] if "close_reason" in r.keys() else "") or ""),
         "created_at": r["created_at"] or "",
         "updated_at": r["updated_at"] or "",
     }
@@ -3138,6 +3259,8 @@ def trade_upsert(payload):
         "open_time", "close_time",
         # v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨) —— 有些品种这两档费率差很多
         "close_today",
+        # v51.02: 平仓原因(只对 close 行有意义; open 行为空)
+        "close_reason",
     )
     payload["open_time"] = (payload.get("open_time") or "").strip()[:5]
     payload["close_time"] = (payload.get("close_time") or "").strip()[:5]
@@ -3183,6 +3306,10 @@ def trade_upsert(payload):
             payload["close_today"] = _old_ct["close_today"]
     # 归一成 '' / '1' / '0'(非字符串也在这一步收口, 免得存进 1.0 这种脏值)
     payload["close_today"] = close_today_str(payload.get("close_today"))
+    # v51.02: 平仓原因 —— 只对 close 行有意义; 开仓行强制清空, 长度截断防脏数据
+    _cr = payload.get("close_reason")
+    _cr = (str(_cr).strip() if _cr is not None else "")[:20]
+    payload["close_reason"] = _cr if payload.get("op_type") == "close" else ""
     vals = [payload.get(f) for f in fields]
     if rec_id:
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
@@ -3942,6 +4069,8 @@ _TRADE_IMPORT_COLS = (
     "open_time", "close_time",
     # v50.74: 平今/平昨 的手选标记(不带上 → 恢复后手选的档位丢失, 手续费会按自动判定重算)
     "close_today",
+    # v51.02: 平仓原因(不带上 → 备份恢复后原因全丢)
+    "close_reason",
 )
 
 
@@ -4085,6 +4214,9 @@ def trade_import_record(r):
         "close_time": (r.get("close_time") or "").strip()[:5],
         # v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
         "close_today": close_today_str(r.get("close_today")),
+        # v51.02: 平仓原因(与 trade_upsert 同口径: 只留 close 行, 截 20 字)
+        "close_reason": ((str(r.get("close_reason") or "").strip())[:20]
+                         if r.get("op_type") == "close" else ""),
     }
     db = _fund_db()
     if row["id"] is None:
@@ -4241,6 +4373,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, HTML.encode("utf-8"), "text/html; charset=utf-8")
         elif path == "/api/contracts":
             self._send(200, _json({"ok": True, "contracts": contract_list()}))
+        elif path == "/api/market/holidays":
+            # v51.02: 把休市日下发给前端, 供「非交易时段暂停行情轮询」判断
+            self._send(200, _json({"ok": True, "holidays": sorted(MARKET_HOLIDAYS)}))
+        elif path == "/api/options/expiry":
+            # v51.02: 批量推算期权到期日 / 剩余自然日(交易记录列表与详情页共用)
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            raw = (qs.get("codes") or [""])[0]
+            codes = [c.strip() for c in raw.split(",") if c.strip()][:200]
+            items = {}
+            today = datetime.now().date()
+            for c in codes:
+                items[c] = option_expiry_info(c, today)
+            self._send(200, _json({"ok": True, "today": today.isoformat(), "items": items}))
         elif path == "/api/health":
             self._send(200, _json({"ok": True, "app": APP_NAME}))
         elif path == "/api/version":
@@ -4432,10 +4577,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/funds/records":
                 action = params.get("action", "upsert")
                 if action == "delete":
-                    fund_delete(params["strategy"], int(params["year"]), int(params["month"]))
-                    fund_auto_backup("资金曲线-删除", detail="%s %s年%s月" % (
+                    # v51.02: 备份必须在删除**之前** —— 删完再拍快照, 恢复它只会把这条记录再删一次
+                    fund_auto_backup("资金曲线-删除前", detail="%s %s年%s月" % (
                         norm_strategy(params.get("strategy"), params.get("strategy") or ""),
                         params.get("year", ""), params.get("month", "")))
+                    fund_delete(params["strategy"], int(params["year"]), int(params["month"]))
                     self._send(200, _json({"ok": True, "msg": "已删除"}))
                 else:
                     fund_upsert(
@@ -4515,8 +4661,9 @@ class Handler(BaseHTTPRequestHandler):
                     old = trade_get(int(params["id"]))
                 except Exception:  # noqa: BLE001
                     old = None
+                # v51.02: 删除前备份(删完再备份 = 恢复它只是再删一次)
+                fund_auto_backup("交易记录-删除前", detail=_trade_change_detail(old, "删除"))
                 trade_delete(int(params["id"]))
-                fund_auto_backup("交易记录-删除", detail=_trade_change_detail(old, "删除"))
                 self._send(200, _json({"ok": True, "msg": "已删除"}))
                 return
             elif path == "/api/trades/pool/upsert":
@@ -4530,8 +4677,9 @@ class Handler(BaseHTTPRequestHandler):
                     old = trade_pool_get(int(params["id"]))
                 except Exception:  # noqa: BLE001
                     old = None
+                # v51.02: 同上, 删除前先留一份
+                fund_auto_backup("监控池-删除前", detail=_pool_change_detail(old))
                 trade_pool_delete(int(params["id"]))
-                fund_auto_backup("监控池-删除", detail=_pool_change_detail(old))
                 self._send(200, _json({"ok": True, "msg": "已删除"}))
                 return
 
@@ -5452,6 +5600,18 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* 方向色(中国习惯): 买入红 / 卖出青; 看涨红 / 看跌青 */
 .tag.buy{background:rgba(255,107,107,.18);color:#ff8484}
 .tag.sell{background:rgba(70,214,234,.18);color:#46d6ea}
+/* v51.02: 平仓原因标签(中性灰蓝, 不与方向/看涨看跌抢色) */
+.tag.rsn{background:rgba(140,160,200,.18);color:#9fb4d8;font-weight:500}
+[data-theme="light"] .tag.rsn{background:rgba(80,110,160,.12);color:#4a6b96}
+/* v51.02: 期权剩余到期天数徽标 —— 正常灰蓝 / ≤20 天红(警示色, 不是涨跌色) / 已到期灰删除线 */
+.dte{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:6px;font-size:var(--fz-tag);
+  font-weight:600;white-space:nowrap;background:rgba(140,160,200,.16);color:#9fb4d8}
+.dte:empty{display:none}
+.dte.dte-warn{background:rgba(229,72,77,.20);color:#ff8484}
+.dte.dte-dead{background:rgba(150,160,155,.16);color:#8d9a92;text-decoration:line-through}
+[data-theme="light"] .dte{background:rgba(80,110,160,.12);color:#4a6b96}
+[data-theme="light"] .dte.dte-warn{background:rgba(214,69,69,.14);color:#c0392b}
+[data-theme="light"] .dte.dte-dead{background:rgba(110,120,115,.13);color:#5d6b63}
 .iconbtn{background:transparent;border:none;color:var(--sub);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:6px}
 .iconbtn:hover{background:var(--panel2);color:var(--accent)}
 .row-actions{display:flex;gap:4px;justify-content:flex-end}
@@ -6414,6 +6574,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
                 <thead><tr>
                   <th>标的</th><th>合约代码</th><th class="opt-only">看涨看跌</th><th>方向</th>
                   <th><span class="help-tip" data-tip="仅算未平仓部分(扣减已平仓后剩余的开仓手数)的加权均价, 不会受已平仓的开仓成本影响">开仓均价 ?</span></th><th>数量</th><th class="th-prem">权利金</th>
+                  <th class="opt-only" title="按交易所规则推算的期权到期日; ≤20 天标红(自然日)">剩余天数</th>
                 </tr></thead>
                 <tbody id="tdHoldings"></tbody>
               </table>
@@ -6432,7 +6593,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
                   <th>合约</th><th>日期</th><th>操作</th>
                   <th class="opt-only">delta</th><th class="opt-only">看涨看跌</th>
                 <th>方向</th><th>数量</th><th>价格</th><th class="th-prem">权利金</th>
-                <th>平仓盈亏</th><th>手续费</th><th>状态</th><th>备注</th><th>操作</th>
+                <th>平仓盈亏</th><th>平仓原因</th><th>手续费</th><th>状态</th><th>备注</th><th>操作</th>
                 </tr></thead>
                 <tbody id="tdOps"></tbody>
               </table>
@@ -6530,7 +6691,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         已有备份：<b id="setBkCnt" style="color:var(--accent)">—</b> 份
         <span id="setBkLast" style="opacity:.75"></span>
         <button class="btn xs" id="setBkNow" style="margin-left:6px">立即备份</button>
-        <div class="tip" style="margin-top:6px">每份备份都标着<b>它是在哪次变更之后</b>存的（如「交易记录-保存 · 期权买方 · 铁矿石 i2701 · 开仓买 6 手」），恢复前先看一眼就知道会退回到哪一步。点右侧「恢复」即可退回（恢复前会自动把当前状态再存一份，可以再退回来）。</div>
+        <div class="tip" style="margin-top:6px">每份备份都标着<b>它的时机</b>：「交易记录-保存 …」是保存<b>之后</b>的状态；「交易记录-删除前 …」是删除<b>之前</b>的状态（删掉的东西能从这里找回来）。恢复前先看一眼就知道会退回到哪一步。点右侧「恢复」即可退回（恢复前会自动把当前状态再存一份，可以再退回来）。</div>
         <div id="setBkList" style="margin-top:8px;max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:8px"></div>
       </div>
       <label>新的数据目录（建议填<u>网盘同步文件夹</u>，如 百度网盘/OneDrive/坚果云 的某个目录）</label>
@@ -6599,6 +6760,19 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </label>
         <label>平仓时间
           <input id="tmCloseTime" type="time" step="60" title="与开仓时间同一交易日 → 按「平今」费率算手续费">
+        </label>
+        <!-- v51.02: 平仓原因(仅平仓) —— 复盘时按原因统计「止损触发 / 阶段止盈」各占多少 -->
+        <label id="tmCloseReasonWrap">平仓原因
+          <select id="tmCloseReason" title="复盘用：这条平仓是什么触发的（可留空）">
+            <option value="">— 未填 —</option>
+            <option value="止损触发">止损触发</option>
+            <option value="跟踪止损">跟踪止损</option>
+            <option value="阶段止盈">阶段止盈</option>
+            <option value="到期平仓">到期平仓</option>
+            <option value="换月">换月</option>
+            <option value="主动减仓">主动减仓</option>
+            <option value="其他">其他</option>
+          </select>
         </label>
         <!-- v50.74: 平今 / 平昨 手选(仅平仓) —— 有些品种这两档费率差很多钱, 自动判不准时能强制 -->
         <label id="tmCloseTodayWrap" title="只影响手续费按「平今」还是「平昨」档算；不影响盈亏">平今 / 平昨
@@ -7179,6 +7353,58 @@ const QUOTE_IDS = {
   D: ['quoteD', 'qNameD', 'qPriceD', 'qChgD'],     // v50.59 期权双买
 };
 const quoteTimers = {F:null, O:null, D:null};
+
+/* ===== v51.02: 交易时段判断 —— 收盘 / 非交易日不再空轮询行情 =====
+   日盘 09:00-11:30、13:30-15:00; 夜盘 21:00 起, 按品种分别 23:00 / 01:00 / 02:30 收
+   ⚠ 节假日表拿不到时一律「算开」(宁可多拉几次, 也不要该刷新时不刷新) */
+const NIGHT_CROSS_END = {                       // 跨零点收盘(分钟数): 01:00=60, 02:30=150
+  au: 150, ag: 150, sc: 150,
+  cu: 60, al: 60, zn: 60, pb: 60, ni: 60, sn: 60, nr: 60, bc: 60,
+};
+// 明确没有夜盘的品种(中金所全部 + 郑商所这几个)。⚠ 宁可漏列, 不要错列 —— 错列会导致该刷新时不刷新
+const NO_NIGHT = ['IF','IH','IC','IM','T','TF','TL','ap','cj','pk','sf','sm'];
+const MARKET = { holidays: null, at: 0 };
+
+function _ymd(d){
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-'
+    + String(d.getDate()).padStart(2, '0');
+}
+function _addDay(d, n){ const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+function isHolidayJs(d){ return !!(MARKET.holidays && MARKET.holidays.has(_ymd(d))); }
+function isTradingDayJs(d){
+  const w = d.getDay();
+  if (w === 0 || w === 6) return false;         // 调休上班的周末期货也不开市
+  return !isHolidayJs(d);
+}
+function loadHolidays(){
+  return fetchT('/api/market/holidays').then(r => r.json()).then(d => {
+    if (d && d.ok){ MARKET.holidays = new Set(d.holidays || []); MARKET.at = Date.now(); }
+  }).catch(() => { /* 拿不到就退化成「一直轮询」 */ });
+}
+function marketOpenNow(code){
+  if (!MARKET.holidays) return true;
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const key = String(code || '').toLowerCase();
+  if (isTradingDayJs(now)){
+    if (mins >= 540 && mins < 690) return true;   // 09:00-11:30
+    if (mins >= 810 && mins < 900) return true;   // 13:30-15:00
+  }
+  if (NO_NIGHT.indexOf(key) >= 0 || NO_NIGHT.indexOf(String(code || '').toUpperCase()) >= 0) return false;
+  const crossEnd = NIGHT_CROSS_END[key] || 0;
+  const eveningEnd = crossEnd > 0 ? 1440 : 1380; // 跨零点品种开到 24:00, 其余 23:00
+  if (mins >= 1260 && mins < eveningEnd){
+    if (!isTradingDayJs(now)) return false;
+    if (isHolidayJs(_addDay(now, 1))) return false;      // 节前那一晚没有夜盘
+    return true;
+  }
+  if (crossEnd > 0 && mins < crossEnd){                  // 00:00 ~ 01:00 / 02:30
+    if (!isTradingDayJs(_addDay(now, -1))) return false; // 周日凌晨 = 周六晚, 无夜盘
+    if (isHolidayJs(now)) return false;
+    return true;
+  }
+  return false;
+}
 function loadQuote(code, which, silent){
   const ids = QUOTE_IDS[which] || QUOTE_IDS.O;
   const box = $(ids[0]);
@@ -7207,9 +7433,11 @@ function loadQuote(code, which, silent){
     const up = d.change >= 0;
     chgEl.textContent = (up?'+':'')+d.change.toFixed(2)+'  '+(up?'+':'')+d.change_pct.toFixed(2)+'%';
     chgEl.className = 'qchg ' + (Math.abs(d.change_pct) < 0.005 ? 'flat' : (up ? 'up' : 'down'));
-    /* 选中状态保持时每10秒自动刷新 */
+    /* 选中状态保持时每10秒自动刷新(v51.02: 收盘/非交易日跳过, 开市后自动恢复) */
     quoteTimers[which] = setInterval(()=>{
-      if(selCode[which]===code) loadQuote(code, which, true);
+      if(selCode[which]!==code) return;
+      if(!marketOpenNow(code)) return;
+      loadQuote(code, which, true);
     }, 10000);
   }).catch(()=>{
     /* 网络失败同样隐藏, 不显示误导价格 */
@@ -7302,6 +7530,10 @@ function togglePin(){
 $('pinBtn').addEventListener('click', togglePin);
 applyPinUI();
 if (pinned) requestPin(true);   // 上次置顶 → 本次打开自动恢复置顶
+
+/* v51.02: 交易日历下发一次(供行情轮询判断); 每小时刷新, 跨零点的夜盘/跨日也能及时跟上 */
+loadHolidays();
+setInterval(loadHolidays, 3600 * 1000);
 
 /* 退出 */
 $('exitBtn').addEventListener('click',()=>{
@@ -8504,6 +8736,8 @@ const TradeUI = {
   rangeBasis: 'open',
   RANGES: ['1m', '3m', '1y', 'ytd', 'all'],
   _closeModal: false,   // v50.72 当前弹窗是不是「平仓」(决定要不要自动算平仓盈亏)
+  // v51.02: 合约 → 到期日/剩余天数 缓存(按合约号缓, 一次刷新只请求一次)
+  _dte: {},
   _closeToday: '',      // v50.74 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
   // v50.81 主表排序: sortKey='' 表示默认顺序(后端给的「开仓时间倒序」);
   //   sortState: 0=默认 / 1=升序 / 2=降序 —— 点表头循环这三态
@@ -9469,8 +9703,11 @@ const TradeUI = {
         ? ('⚠ 标的里写着「' + nameTail + '」，但合约是 ' + ((cpTxt === '多') ? '看涨 call' : '看跌 put')
            + '（' + (con[0] || '—') + '）—— 请核对这条记录的方向')
         : '';
+      // v51.02: 期权买方标的后面带「剩余到期天数」(≤20 天标红; 多合约取最近到期的那条)
+      const dteChip = (this.mode === 'options' && con.length)
+        ? '<span class="dte" data-codes="' + escHtml(con.join(',')) + '"></span>' : '';
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
-        <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${conTxt}</td>
+        <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${dteChip}${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
         <td>${this.fmtDateTime(g.open_date, g.open_time)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>
@@ -9483,6 +9720,7 @@ const TradeUI = {
         </td>
       </tr>`;
     }).join('');
+    this.paintDte();
     // 展开态: 把高度锁成折叠态(表头 + MAX 行)的高度, 多出的行在容器内滚动 —— 页面高度与上方布局都不动
     if (tw && this.showAll && total > this.MAX) {
       const th = $('tradesTable').querySelector('thead');
@@ -9841,7 +10079,7 @@ const TradeUI = {
     // 持仓汇总
     const hb = $('tdHoldings');
     if (!d.holdings.length){
-      hb.innerHTML = '<tr><td colspan="' + (this.isFut() ? 6 : 7) + '" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
+      hb.innerHTML = '<tr><td colspan="' + (this.isFut() ? 6 : 8) + '" style="text-align:center;padding:14px;color:var(--sub)">当前无持仓(全部已平仓)</td></tr>';
     } else {
       hb.innerHTML = d.holdings.map(h => `<tr>
         <td>${escHtml(this.underlyingText(h.underlying || d.underlying))}</td>
@@ -9851,7 +10089,9 @@ const TradeUI = {
         <td>${h.open_price.toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${h.qty}</td>
         <td>${h.premium.toLocaleString('en-US',{maximumFractionDigits:2})}</td>
+        <td class="opt-only"><span class="dte" data-codes="${escHtml(h.contract)}"></span></td>
       </tr>`).join('');
+      this.paintDte();
     }
     // 合约筛选下拉: 选项 = 该标的下全部合约(按归一化后去重, 避免 br2610C15800 / br2610c15800 出现两行)
     const _seen = {};
@@ -9872,6 +10112,42 @@ const TradeUI = {
     this.renderDualTargets(d);     // v50.63: 双买: 持仓汇总上方的止盈价测算
     this.renderOptTargets(d);      // v50.85: 期权买方: 持仓汇总上方的止盈目标价位
     this.loadReviews();            // 底部复盘笔记(两个模式都有)
+  },
+
+  /* v51.02: 期权「剩余到期天数」—— 列表/详情里所有 .dte[data-codes] 占位一次性补齐
+     到期日由后端按交易所规则推算(option_expiry); 前端只负责取数、挑最近的一条、配色 */
+  async paintDte(){
+    const els = Array.from(document.querySelectorAll('.dte[data-codes]'));
+    if (!els.length) return;
+    const need = [];
+    els.forEach(el => String(el.dataset.codes || '').split(',').forEach(c => {
+      const k = c.trim().toUpperCase();
+      if (k && !(k in this._dte) && need.indexOf(k) < 0) need.push(k);
+    }));
+    if (need.length){
+      try{
+        const r = await fetchT('/api/options/expiry?codes=' + encodeURIComponent(need.join(',')));
+        const d = await r.json();
+        if (d && d.ok){
+          Object.keys(d.items || {}).forEach(k => { this._dte[String(k).toUpperCase()] = d.items[k]; });
+          need.forEach(k => { if (!(k in this._dte)) this._dte[k] = { expiry: null, dte: null }; });
+        }
+      }catch(e){ /* 取不到就留空, 不影响其它渲染 */ }
+    }
+    document.querySelectorAll('.dte[data-codes]').forEach(el => {
+      const codes = String(el.dataset.codes || '').split(',')
+        .map(s => s.trim().toUpperCase()).filter(Boolean);
+      let best = null;
+      codes.forEach(c => {
+        const it = this._dte[c];
+        if (it && it.expiry && it.dte != null && (!best || it.dte < best.dte)) best = it;
+      });
+      if (!best){ el.textContent = ''; el.className = 'dte'; el.removeAttribute('title'); return; }
+      const dd = best.dte;
+      el.textContent = dd < 0 ? '已到期' : ('剩 ' + dd + ' 天');
+      el.title = '到期日 ' + best.expiry + (dd < 0 ? '（已过 ' + (-dd) + ' 天）' : '（还有 ' + dd + ' 个自然日）');
+      el.className = 'dte' + (dd < 0 ? ' dte-dead' : (dd <= 20 ? ' dte-warn' : ''));
+    });
   },
 
   /* v50.79: 把一段文字写进剪贴板 —— 优先异步 Clipboard API(127.0.0.1 属安全上下文),
@@ -9914,7 +10190,7 @@ const TradeUI = {
       ? d.operations.filter(o => this.normalizeContract(o.contract).toUpperCase() === _f)
       : d.operations;
     if (!ops.length){
-      ob.innerHTML = '<tr><td colspan="' + (this.isFut() ? 11 : 14) + '" style="text-align:center;padding:14px;color:var(--sub)">' +
+      ob.innerHTML = '<tr><td colspan="' + (this.isFut() ? 12 : 15) + '" style="text-align:center;padding:14px;color:var(--sub)">' +
         (d.operations.length ? '该合约无操作记录' : '暂无操作记录') + '</td></tr>';
       return;
     }
@@ -9946,6 +10222,7 @@ const TradeUI = {
         <td>${(price||0).toLocaleString('en-US',{maximumFractionDigits:4})}</td>
         <td>${premiumTxt}</td>
         <td class="${pnlCls}">${o.pnl!=null ? (o.pnl>0?'+CN¥':(o.pnl<0?'-CN¥':'CN¥'))+Math.abs(o.pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
+        <td class="op-reason">${(!isOpen && o.close_reason) ? '<span class="tag rsn">' + escHtml(o.close_reason) + '</span>' : '—'}</td>
         <td class="op-fee"${o.fee > 0 ? ' title="' + (isOpen ? '开仓' : ((o.fee_is_today ? '平今' : '平昨') + (o.fee_today_manual ? ' · 手选' : ''))) + '手续费"' : ''}${feeUnknown ? ' title="手续费费率表里没有收录这个品种的期权费率，需要的话补进 FEE_TABLE"' : ''}>${feeTxt}</td>
         <td><span class="tag ${st.cls}">${st.txt}</span></td>
         <td class="op-note"><span class="op-note-txt"${o.note ? ' title="' + escHtml(o.note) + '"' : ''}>${o.note ? escHtml(o.note) : '—'}</span></td>
@@ -10307,6 +10584,9 @@ const TradeUI = {
     document.getElementById('tmCloseQtyWrap').style.display = isOpen ? 'none' : '';
     document.getElementById('tmClosePriceWrap').style.display = isOpen ? 'none' : '';
     document.getElementById('tmPnlWrap').style.display = isOpen ? 'none' : '';
+    // v51.02: 平仓原因只在平仓时出现
+    if (document.getElementById('tmCloseReasonWrap'))
+      document.getElementById('tmCloseReasonWrap').style.display = isOpen ? 'none' : '';
 
     // 预设值(编辑模式)
     if (preset.id){
@@ -10328,6 +10608,7 @@ const TradeUI = {
       $('tmCallPut').value = preset.call_put || '';
       $('tmDirection').value = preset.direction || 'buy';
       $('tmNote').value = preset.note || '';
+      if ($('tmCloseReason')) $('tmCloseReason').value = preset.close_reason || '';
       if ($('tmInitStop')) $('tmInitStop').value = preset.init_stop != null ? preset.init_stop : '';
       if ($('tmInitTarget')) $('tmInitTarget').value = preset.init_target != null ? preset.init_target : '';
     } else {
@@ -10698,6 +10979,8 @@ const TradeUI = {
       close_date: $('tmCloseDate').value,
       // v50.74: 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨) —— 只影响手续费按哪档算
       close_today: this._closeToday || '',
+      // v51.02: 平仓原因(开仓行强制空)
+      close_reason: isOpen ? '' : (($('tmCloseReason') || {}).value || ''),
       note: $('tmNote').value,
       mode: this.mode,
       batch: ($('tradeModalBg').dataset.batch || ''),   // v50.47: 跟随批次, 平仓/加仓落进同一条主页记录

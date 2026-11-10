@@ -2495,6 +2495,78 @@ check("监控池拆分(v50.94): 落库时元素里带反斜杠也会拆开(si/lc
       str(_p94 and _p94[0]["contracts"]))
 trade_pool_delete(_pid94)
 
+# ===== v51.02: 期权到期日(按交易所规则) =====
+print("\n== 期权到期日 v51.02 ==")
+from main import option_expiry, option_expiry_info  # noqa: E402
+
+# 对照 2026-11 各期货公司《期权到期提示》公告里的真实日期
+_EXP_CASES = [
+    ("si2612", "2026-11-06", "广期所 前一月第 5 个交易日"),
+    ("lc2612", "2026-11-06", "广期所 同上"),
+    ("FG2612", "2026-11-11", "郑商所 前 15 个日历日内的倒数第 3 个交易日"),
+    ("m2612",  "2026-11-17", "大商所 前一月第 12 个交易日"),
+    ("cu2612", "2026-11-24", "上期所 前一月倒数第 5 个交易日"),
+    ("sc2612", "2026-11-12", "能源中心 倒数第 13 个交易日"),
+    ("fu2612", "2026-11-17", "上期所燃料油 倒数第 10 个交易日"),
+    ("AP2701", "2026-11-26", "郑商所苹果 前两月最后一个日历日之前倒数第 3"),
+]
+for _c, _exp, _why in _EXP_CASES:
+    _got = option_expiry(_c)
+    check("到期日(v51.02): %s → %s（%s）" % (_c, _exp, _why), _got == _exp, str(_got))
+check("到期日(v51.02): 代码里带分隔符也能解析(cu2612-C-70000)",
+      option_expiry("cu2612-C-70000") == "2026-11-24", str(option_expiry("cu2612-C-70000")))
+check("到期日(v51.02): 不认识的品种 → None(不猜)",
+      option_expiry("zz2612") is None and option_expiry("cu") is None, '')
+check("到期日(v51.02): 剩余天数 = 到期日 − 今天(自然日)",
+      option_expiry_info("cu2612", __import__("datetime").date(2026, 10, 25))["dte"] == 30,
+      str(option_expiry_info("cu2612", __import__("datetime").date(2026, 10, 25))))
+check("到期日(v51.02): 已过期标记 expired",
+      option_expiry_info("cu2612", __import__("datetime").date(2026, 12, 1))["expired"] is True, '')
+
+# ===== v51.02: 平仓原因 =====
+print("\n== 平仓原因 v51.02 ==")
+_id_r1 = trade_upsert({"underlying": "rbt", "contract": "rbt2701", "op_type": "open",
+                       "direction": "buy", "open_date": "2026-10-09", "open_price": 3200,
+                       "qty": 4, "premium": 0, "mode": "futures"})
+trade_upsert({"underlying": "rbt", "contract": "rbt2701", "op_type": "close",
+              "direction": "buy", "close_date": "2026-10-12", "close_price": 3300,
+              "close_qty": 2, "pnl": 800, "mode": "futures",
+              "close_reason": "阶段止盈"})
+_crs = [x for x in trade_list_records(mode="futures") if x["underlying"] == "rbt"]
+_close_row = [x for x in _crs if x["op_type"] == "close"][0]
+check("平仓原因(v51.02): 平仓行存得住", _close_row["close_reason"] == "阶段止盈", str(_close_row["close_reason"]))
+check("平仓原因(v51.02): 开仓行强制为空(传了也清掉)",
+      [x for x in _crs if x["op_type"] == "open"][0]["close_reason"] == "", '')
+trade_upsert({"id": _close_row["id"], "underlying": "rbt", "contract": "rbt2701", "op_type": "close",
+              "direction": "buy", "close_date": "2026-10-12", "close_price": 3300,
+              "close_qty": 2, "pnl": 800, "mode": "futures", "close_reason": "跟踪止损"})
+check("平仓原因(v51.02): 编辑能改",
+      [x for x in trade_list_records(mode="futures") if x["id"] == _close_row["id"]][0]["close_reason"] == "跟踪止损", '')
+check("平仓原因(v51.02): 备份导入带得过去",
+      trade_import_record({"id": 90210, "underlying": "rbt", "contract": "rbt2701", "op_type": "close",
+                           "direction": "buy", "close_date": "2026-10-12", "close_price": 3300,
+                           "close_qty": 2, "pnl": 800, "mode": "futures",
+                           "close_reason": "止损触发"}) == 90210
+      and [x for x in trade_list_records(mode="futures") if x["id"] == 90210][0]["close_reason"] == "止损触发", '')
+trade_import_record({"id": 90211, "underlying": "rbt", "contract": "rbt2701", "op_type": "close",
+                     "direction": "buy", "close_qty": 1, "mode": "futures",
+                     "close_reason": "很长的原因" * 10})
+_cr_long = [x for x in trade_list_records(mode="futures") if x["id"] == 90211][0]["close_reason"]
+check("平仓原因(v51.02): 超长值截断到 20 字(防脏数据)",
+      len(_cr_long) == 20, "len=%d" % len(_cr_long))
+
+# ===== v51.02: 删除前备份 =====
+print("\n== 删除前备份 v51.02 ==")
+_id_del = trade_upsert({"underlying": "delt", "contract": "delt2701", "op_type": "open",
+                        "direction": "buy", "open_date": "2026-10-09", "open_price": 100,
+                        "qty": 1, "premium": 0, "mode": "futures"})
+_bk_del = fund_auto_backup("交易记录-删除前", force=True, detail="删除前测试")
+trade_delete(_id_del)
+_dd = fund_backup_diff(os.path.basename(_bk_del))
+_tr_dd = [t for t in _dd["tables"] if t["key"] == "trade_records"][0]
+check("删除前备份(v51.02): 快照里还有那条被删的记录(delta=+1)",
+      _tr_dd["delta"] == 1, str(_tr_dd["delta"]))
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

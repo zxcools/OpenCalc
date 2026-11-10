@@ -60,7 +60,12 @@ const pending = new Map();
 function send(ws, method, params = {}) {
   return new Promise((resolve, reject) => {
     const id = ++msgId;
-    pending.set(id, { resolve, reject });
+    // v51.02: 加超时 —— 页面被原生 alert/confirm 卡住时 CDP 永不回包, 以前是整个套件无声挂死
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('CDP 超时(' + method + ') —— 页面可能被 alert/confirm 阻塞'));
+    }, 25000);
+    pending.set(id, { resolve: m => { clearTimeout(timer); resolve(m); }, reject });
     ws.send(JSON.stringify({ id, method, params }));
   });
 }
@@ -2481,8 +2486,14 @@ async function main() {
       const opsTbl = [...document.querySelectorAll('#tradeDetailPanel table.tbl')][1];
       opNames = [...opsTbl.tHead.rows[0].children].filter(c => c.offsetParent !== null)
         .map(c => c.textContent.trim());
-      const row = opsTbl.tBodies[0].rows[0];
       // ⚠ 操作表还没渲染完时第一行可能是「暂无操作记录」的空态行(只有 1 个 td) → 不能直接 .trim()
+      // v51.02: 固定等 2400ms 偶发不够 → 这里轮询到真的出现数据行(最多再等 3s)
+      let row = opsTbl.tBodies[0].rows[0];
+      for (let i = 0; i < 12; i++) {
+        if (row && row.children.length > 3) break;
+        await new Promise(r => setTimeout(r, 250));
+        row = opsTbl.tBodies[0].rows[0];
+      }
       deltaCell = (row && row.children[3] && row.children[3].textContent || '').trim();
       for (const op of (dd.operations || [])) {
         await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
@@ -5689,6 +5700,115 @@ async function main() {
         JSON.stringify({tables: v98.detail.tables, px: v98.detail.rowsPx.map(r => r[3]),
                         combo: v98.detail.apiCombo}));
   check('组合价并入同表(v50.98): 用例清理干净', v98.cleaned === true, String(v98.cleaned));
+
+  // ===== v51.02: 平仓原因 / 期权剩余到期天数 / 非交易时段暂停轮询 =====
+  const v102 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const U = 'e2edte2611';
+    const C = 'cu2612C72000';
+    const post = (p, b) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b)}).then(r=>r.json());
+    const out = {alerts: []};
+    // ⚠ 打桩 alert/confirm: 原生对话框会阻塞渲染线程 → CDP 全部超时(整个套件无声挂死)
+    const _al = window.alert, _cf = window.confirm;
+    window.alert = m => { out.alerts.push(String(m)); };
+    window.confirm = () => true;
+    try {
+      // ① 建一条期权买方记录(标的带年月), 供 DTE 用
+      await post('/api/trades/upsert', {underlying: U, contract: C, op_type:'open', direction:'buy',
+        open_date:'2026-10-20', open_price: 900, qty: 2, premium: 900*10*2, call_put:'C', open_delta: 0.31,
+        close_date:'', mode:'options', batch:''});
+      // ② 到期日接口: 剩余天数与 DOM 徽标必须一致(不写死日期, 免得跨天跑失败)
+      const ex = await (await fetch('/api/options/expiry?codes=' + encodeURIComponent(C))).json();
+      out.expiry = ex.items && ex.items[C];
+      // ③ 主表徽标(先切到期权买方页, 否则主表还是上一个用例留下的期货模式)
+      document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+      await w(900);
+      await TradeUI.refresh(); await w(600);
+      const row = [...document.querySelectorAll('#tradesTable tbody tr')].find(tr => tr.textContent.indexOf(U) >= 0);
+      const chip = row ? row.querySelector('.dte') : null;
+      out.chip = chip ? {txt: chip.textContent, cls: chip.className, tip: chip.title} : null;
+      if (!row) { out.err = 'no-row'; return JSON.stringify(out); }
+      // ④ 详情页: 持仓表有「剩余天数」列 + 徽标
+      row.click();
+      await w(900);
+      const holdHead = [...document.querySelectorAll('.card table thead th')].map(t => t.textContent.trim());
+      out.holdHasDteTh = holdHead.some(t => t.indexOf('剩余天数') >= 0);
+      const hdt = document.querySelector('#tdHoldings .dte');
+      out.holdChip = hdt ? hdt.textContent : null;
+      // ⑤ 平仓弹窗: 平仓原因可见 + 有 8 个选项
+      TradeUI.openEditModal('close', {fromDetail: true});
+      await w(450);
+      const wrap = q('tmCloseReasonWrap');
+      out.closeWrapShown = !!wrap && wrap.offsetParent !== null;
+      out.closeOpts = q('tmCloseReason') ? q('tmCloseReason').options.length : 0;
+      q('tmCloseDate').value = '2026-10-26';
+      q('tmCloseQty').value = '2';
+      q('tmClosePrice').value = '1200';
+      q('tmPnl').value = '6000';
+      q('tmCloseReason').value = '阶段止盈';
+      out.saved = await TradeUI.submitModal();
+      await w(800);
+      // ⑥ 详情操作表: 平仓行显示原因标签; 接口也带 close_reason
+      const d = await (await fetch('/api/trades/detail?mode=options&underlying=' + U + '&batch=')).json();
+      const cl = (d.operations || []).filter(x => x.op_type === 'close')[0] || {};
+      out.apiReason = cl.close_reason;
+      out.domReasons = [...document.querySelectorAll('#tdOps tr')].map(tr => {
+        const c = tr.querySelector('.op-reason');
+        return c ? c.textContent.trim() : '';
+      }).filter(Boolean);
+      // ⑦ 编辑已有平仓 → 原因回填
+      TradeUI.openEditModal('close', {fromDetail: true});
+      await w(400);
+      q('tmCloseQty').value = '1'; q('tmClosePrice').value = '1200'; q('tmPnl').value = '3000';
+      out.reasonPrefill = q('tmCloseReason').value;
+      q('tmCancel').click();
+      // ⑧ 开仓弹窗里「平仓原因」必须不出现
+      TradeUI.openEditModal('open', {underlying: U});
+      await w(400);
+      const ow = q('tmCloseReasonWrap');
+      out.openWrapShown = !!ow && ow.offsetParent !== null;
+      q('tmCancel').click();
+      // ⑨ 非交易日判定(节假日/周末/工作日) —— 与运行时刻无关
+      out.holiday = {nat: isTradingDayJs(new Date(2026, 9, 1)), sat: isTradingDayJs(new Date(2026, 9, 10)),
+                     work: isTradingDayJs(new Date(2026, 9, 12))};
+      const hd = await (await fetch('/api/market/holidays')).json();
+      out.hol = {n: (hd.holidays || []).length, has1001: (hd.holidays || []).indexOf('2026-10-01') >= 0};
+      // 清理
+      for (const op of (d.operations || [])) await fetch('/api/trades/delete', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+      const g2 = await (await fetch('/api/trades/groups?mode=options')).json();
+      out.cleaned = !(g2.groups || []).some(x => x.underlying === U);
+      return JSON.stringify(out);
+    } finally {
+      window.alert = _al; window.confirm = _cf;
+    }
+  })()`));
+  check('到期日(v51.02): /api/options/expiry 返回到期日与剩余天数',
+        !!(v102.expiry && /^2026-\d{2}-\d{2}$/.test(v102.expiry.expiry) && v102.expiry.dte !== null),
+        JSON.stringify(v102.expiry));
+  check('到期日(v51.02): 主表标的旁有「剩 N 天」徽标, 数值 = 接口 dte',
+        !!v102.chip && v102.chip.txt === ('剩 ' + v102.expiry.dte + ' 天'),
+        JSON.stringify(v102.chip));
+  check('到期日(v51.02): ≤20 天标红(dte-warn), >20 天用中性色',
+        !!v102.chip && ((v102.expiry.dte <= 20) === /dte-warn/.test(v102.chip.cls))
+        && /到期日 \d{4}-\d{2}-\d{2}/.test(v102.chip.tip || ''),
+        'dte=' + (v102.expiry && v102.expiry.dte) + ' cls=' + (v102.chip && v102.chip.cls));
+  check('到期日(v51.02): 详情「当前持仓」表新增「剩余天数」列并有徽标',
+        v102.holdHasDteTh === true && !!v102.holdChip, JSON.stringify({th: v102.holdHasDteTh, chip: v102.holdChip}));
+  check('平仓原因(v51.02): 平仓弹窗出现该字段且有 8 个选项(含未填)',
+        v102.closeWrapShown === true && v102.closeOpts === 8,
+        JSON.stringify({shown: v102.closeWrapShown, opts: v102.closeOpts}));
+  check('平仓原因(v51.02): 保存后接口回读到「阶段止盈」', v102.apiReason === '阶段止盈', String(v102.apiReason));
+  check('平仓原因(v51.02): 详情操作记录表显示原因标签',
+        v102.domReasons.indexOf('阶段止盈') >= 0, JSON.stringify(v102.domReasons));
+  check('平仓原因(v51.02): 编辑已有平仓时原因回填', v102.reasonPrefill === '阶段止盈', String(v102.reasonPrefill));
+  check('平仓原因(v51.02): 开仓弹窗不显示该字段', v102.openWrapShown === false, String(v102.openWrapShown));
+  check('行情轮询(v51.02): 节假日/周末不算交易日, 普通工作日算',
+        v102.holiday.nat === false && v102.holiday.sat === false && v102.holiday.work === true,
+        JSON.stringify(v102.holiday));
+  check('行情轮询(v51.02): /api/market/holidays 下发完整休市日表',
+        v102.hol.n > 40 && v102.hol.has1001 === true, JSON.stringify(v102.hol));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
