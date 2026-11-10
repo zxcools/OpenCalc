@@ -2523,8 +2523,28 @@ check("到期日(v51.02): 剩余天数 = 到期日 − 今天(自然日)",
 check("到期日(v51.02): 已过期标记 expired",
       option_expiry_info("cu2612", __import__("datetime").date(2026, 12, 1))["expired"] is True, '')
 
-# ===== v51.02: 平仓原因 =====
-print("\n== 平仓原因 v51.02 ==")
+# ===== v51.03: 主表「剩 N 天」只按当前持仓的合约 =====
+print("\n== 持仓合约(v51.03) ==")
+_hu = "holdt"
+trade_upsert({"underlying": _hu, "contract": "cu2612C70000", "op_type": "open", "direction": "buy",
+              "open_date": "2026-10-09", "open_price": 500, "qty": 2, "premium": 10000,
+              "call_put": "C", "mode": "options", "batch": ""})
+trade_upsert({"underlying": _hu, "contract": "cu2702C70000", "op_type": "open", "direction": "buy",
+              "open_date": "2026-10-10", "open_price": 800, "qty": 1, "premium": 8000,
+              "call_put": "C", "mode": "options", "batch": ""})
+_g103 = [x for x in trade_groups(mode="options") if x["underlying"] == _hu][0]
+check("持仓合约(v51.03): 两个合约都在持仓 → hold_contracts 两个都在",
+      _g103["hold_contracts"] == ["cu2612C70000", "cu2702C70000"], str(_g103["hold_contracts"]))
+trade_upsert({"underlying": _hu, "contract": "cu2612C70000", "op_type": "close", "direction": "buy",
+              "close_date": "2026-10-15", "close_price": 600, "close_qty": 2, "pnl": 200,
+              "mode": "options", "batch": ""})
+_g103b = [x for x in trade_groups(mode="options") if x["underlying"] == _hu][0]
+check("持仓合约(v51.03): 2612 全平后只剩 2702(已平的合约不再参与到期显示)",
+      _g103b["hold_contracts"] == ["cu2702C70000"], str(_g103b["hold_contracts"]))
+check("持仓合约(v51.03): contracts 仍保留全部合约(主表搜索要用)",
+      "cu2612C70000" in _g103b["contracts"], str(_g103b["contracts"]))
+
+# ===== v51.02: 平仓原因 =====print("\n== 平仓原因 v51.02 ==")
 _id_r1 = trade_upsert({"underlying": "rbt", "contract": "rbt2701", "op_type": "open",
                        "direction": "buy", "open_date": "2026-10-09", "open_price": 3200,
                        "qty": 4, "premium": 0, "mode": "futures"})

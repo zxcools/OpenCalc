@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5102            # 与 README 版本号 v51.02 对齐(数值比较用于单实例接管)
+APP_VERSION = 5103            # 与 README 版本号 v51.03 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -3449,6 +3449,11 @@ def trade_groups(strategy=None, mode="options", fee_mode=FEE_MODE_DEFAULT):
             "last_close_time": last_close_time,
             # 该标的用到的合约(主表搜索要能按合约号命中)
             "contracts": sorted({(x.get("contract") or "").strip() for x in items if x.get("contract")}),
+            # v51.03: 当前**还持仓**的合约 —— 主表「剩 N 天」只看这些(已平完的合约别拿来显示到期)
+            "hold_contracts": sorted({
+                (x.get("contract") or "").strip() for x in opens
+                if x.get("contract") and (by_c[_k(x["contract"])]["opened"] - by_c[_k(x["contract"])]["closed"]) > 0
+            }),
         })
     # 按开仓日期倒序: 最近开仓在最上
     groups.sort(key=lambda g: (g["open_date"] or ""), reverse=True)
@@ -9703,9 +9708,11 @@ const TradeUI = {
         ? ('⚠ 标的里写着「' + nameTail + '」，但合约是 ' + ((cpTxt === '多') ? '看涨 call' : '看跌 put')
            + '（' + (con[0] || '—') + '）—— 请核对这条记录的方向')
         : '';
-      // v51.02: 期权买方标的后面带「剩余到期天数」(≤20 天标红; 多合约取最近到期的那条)
-      const dteChip = (this.mode === 'options' && con.length)
-        ? '<span class="dte" data-codes="' + escHtml(con.join(',')) + '"></span>' : '';
+      // v51.02/v51.03: 期权买方标的后面带「剩余到期天数」
+      //   只看**当前还持仓**的合约, 多个合约时取最近到期的那条; 全部平完 → 不显示
+      const hold = (g.hold_contracts && g.hold_contracts.length) ? g.hold_contracts : [];
+      const dteChip = (this.mode === 'options' && hold.length)
+        ? '<span class="dte" data-codes="' + escHtml(hold.join(',')) + '"></span>' : '';
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
         <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${dteChip}${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
@@ -10145,7 +10152,8 @@ const TradeUI = {
       if (!best){ el.textContent = ''; el.className = 'dte'; el.removeAttribute('title'); return; }
       const dd = best.dte;
       el.textContent = dd < 0 ? '已到期' : ('剩 ' + dd + ' 天');
-      el.title = '到期日 ' + best.expiry + (dd < 0 ? '（已过 ' + (-dd) + ' 天）' : '（还有 ' + dd + ' 个自然日）');
+      el.title = '持仓里最近到期的合约 ' + (best.contract || '') + ' · 到期日 ' + best.expiry
+        + (dd < 0 ? '（已过 ' + (-dd) + ' 天）' : '（还有 ' + dd + ' 个自然日）');
       el.className = 'dte' + (dd < 0 ? ' dte-dead' : (dd <= 20 ? ' dte-warn' : ''));
     });
   },

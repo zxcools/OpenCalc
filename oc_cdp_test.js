@@ -5757,9 +5757,12 @@ async function main() {
         const c = tr.querySelector('.op-reason');
         return c ? c.textContent.trim() : '';
       }).filter(Boolean);
+      // ⑥b v51.03: 全部平完后, 主表不该再显示「剩 N 天」(只看当前持仓)
+      await TradeUI.refresh(); await w(800);
+      const row2 = [...document.querySelectorAll('#tradesTable tbody tr')].find(tr => tr.textContent.indexOf(U) >= 0);
+      out.chipAfterClose = !!(row2 && row2.querySelector('.dte'));
       // ⑦ 编辑已有平仓 → 原因回填
-      TradeUI.openEditModal('close', {fromDetail: true});
-      await w(400);
+      TradeUI.openEditModal('close', {fromDetail: true});      await w(400);
       q('tmCloseQty').value = '1'; q('tmClosePrice').value = '1200'; q('tmPnl').value = '3000';
       out.reasonPrefill = q('tmCloseReason').value;
       q('tmCancel').click();
@@ -5802,6 +5805,8 @@ async function main() {
   check('平仓原因(v51.02): 保存后接口回读到「阶段止盈」', v102.apiReason === '阶段止盈', String(v102.apiReason));
   check('平仓原因(v51.02): 详情操作记录表显示原因标签',
         v102.domReasons.indexOf('阶段止盈') >= 0, JSON.stringify(v102.domReasons));
+  check('到期日(v51.03): 全部平完后主表不再显示剩余天数(只看当前持仓)',
+        v102.chipAfterClose === false, String(v102.chipAfterClose));
   check('平仓原因(v51.02): 编辑已有平仓时原因回填', v102.reasonPrefill === '阶段止盈', String(v102.reasonPrefill));
   check('平仓原因(v51.02): 开仓弹窗不显示该字段', v102.openWrapShown === false, String(v102.openWrapShown));
   check('行情轮询(v51.02): 节假日/周末不算交易日, 普通工作日算',
