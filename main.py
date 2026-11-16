@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5104            # 与 README 版本号 v51.04 对齐(数值比较用于单实例接管)
+APP_VERSION = 5105            # 与 README 版本号 v51.05 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -6566,7 +6566,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <aside class="trades-side hidden" id="tradeDetailPanel">
           <div class="card results">
             <div class="td-head">
-              <h2><span class="dot"></span><span id="tdTitle">—</span></h2>
+              <h2><span class="dot"></span><span id="tdTitle">—</span><span id="tdAge" class="age hidden"></span></h2>
               <div class="td-head-actions">
                 <button class="btn xs rose" id="tdNewOpen">➕ 新建开仓</button>
                 <button class="btn xs cyan" id="tdNewClose">➖ 新建平仓</button>
@@ -9722,14 +9722,10 @@ const TradeUI = {
       // v51.04: 期权双买 —— 标的右侧显示「已开 N 天」, 超过 30 天转红(提醒这个组合持有一段时间了)
       //   ⚠ 只给还有持仓的记录算: 全平的记录「开仓距今」只会越来越大, 没有参考价值
       let ageChip = '';
-      if (this.mode === 'dual' && g.open_date && g.close_status !== '已平仓'){
-        const _t0 = new Date(String(g.open_date) + 'T00:00:00');
-        const _now = new Date(); _now.setHours(0, 0, 0, 0);
-        const _days = Math.round((_now.getTime() - _t0.getTime()) / 86400000);
-        if (isFinite(_days) && _days >= 0){
-          ageChip = '<span class="age' + (_days > 30 ? ' age-old' : '') + '" title="开仓 '
-            + escHtml(g.open_date) + ' · 已持有 ' + _days + ' 天">已开 ' + _days + ' 天</span>';
-        }
+      if (this.mode === 'dual' && g.close_status !== '已平仓'){
+        const ai = this.dualAgeInfo(g.open_date);
+        if (ai) ageChip = '<span class="age' + (ai.old ? ' age-old' : '') + '" title="'
+          + escHtml(ai.tip) + '">已开 ' + ai.days + ' 天</span>';
       }
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
         <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${dteChip}${ageChip}${conTxt}</td>
@@ -10085,6 +10081,22 @@ const TradeUI = {
     $('tradeDetailPanel').classList.remove('hidden');
     const _dM = (this.mode === 'dual') ? this.monthFromContracts(d.holdings) : '';
     $('tdTitle').textContent = this.underlyingText(d.underlying) + (_dM ? ' ' + _dM : '') + ' 详情';
+    // v51.05: 双买详情页标题旁也挂「已开 N 天」(与主表同一口径; 全平则不显示)
+    {
+      const _ageEl = $('tdAge');
+      if (_ageEl){
+        const _ai = (this.mode === 'dual' && d.close_status !== '已平仓') ? this.dualAgeInfo(d.open_date) : null;
+        if (_ai){
+          _ageEl.textContent = '已开 ' + _ai.days + ' 天';
+          _ageEl.title = _ai.tip;
+          _ageEl.className = 'age' + (_ai.old ? ' age-old' : '');
+        } else {
+          _ageEl.textContent = '';
+          _ageEl.className = 'age hidden';
+          _ageEl.removeAttribute('title');
+        }
+      }
+    }
     // 顶部 meta: 方向/开仓时间/是否平仓/平仓盈亏/平仓时间
     // ⚠ v50.51: 全部用本批次自己的数据(d.*), 不再去主表 groups 里按 underlying 找 ——
     //   同品种有多条记录(不同批次)时会捞到别条的平仓盈亏/状态, 看起来像「没平过却有收益」
@@ -10137,6 +10149,19 @@ const TradeUI = {
     this.renderDualTargets(d);     // v50.63: 双买: 持仓汇总上方的止盈价测算
     this.renderOptTargets(d);      // v50.85: 期权买方: 持仓汇总上方的止盈目标价位
     this.loadReviews();            // 底部复盘笔记(两个模式都有)
+  },
+
+  /* v51.04/v51.05: 双买「已开 N 天」的天数口径 —— 开仓日到今天(自然日), 主表与详情页共用
+     返回 {days, old(>30 天), tip}; 日期空/解析不了 → null */
+  dualAgeInfo(openDate){
+    const s = String(openDate || '').slice(0, 10);
+    if (!s) return null;
+    const t0 = new Date(s + 'T00:00:00');
+    if (isNaN(t0.getTime())) return null;
+    const now = new Date(); now.setHours(0, 0, 0, 0);
+    const days = Math.round((now.getTime() - t0.getTime()) / 86400000);
+    if (!isFinite(days) || days < 0) return null;
+    return {days: days, old: days > 30, tip: '开仓 ' + s + ' · 已持有 ' + days + ' 天'};
   },
 
   /* v51.02: 期权「剩余到期天数」—— 列表/详情里所有 .dte[data-codes] 占位一次性补齐

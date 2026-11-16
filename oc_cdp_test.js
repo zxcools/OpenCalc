@@ -5840,12 +5840,26 @@ async function main() {
       out.fresh = aNew ? {txt: aNew.textContent, cls: aNew.className} : null;
       out.days = {old: Math.round((new Date().setHours(0,0,0,0) - new Date(dOld + 'T00:00:00').getTime())/86400000),
                   fresh: Math.round((new Date().setHours(0,0,0,0) - new Date(dNew + 'T00:00:00').getTime())/86400000)};
+      // v51.05: 详情页标题旁也要有
+      const rowOld = rows.find(x => x.textContent.indexOf('e2eageold') >= 0);
+      const rowNew = rows.find(x => x.textContent.indexOf('e2eagenew') >= 0);
+      if (rowOld){ rowOld.click(); await w(900); }
+      const elOld = document.getElementById('tdAge');
+      out.detailOld = elOld ? {txt: elOld.textContent, cls: elOld.className, title: elOld.title,
+                               titleHas: (document.getElementById('tdTitle')||{}).textContent || ''} : null;
+      if (rowNew){ rowNew.click(); await w(900); }
+      const elNew = document.getElementById('tdAge');
+      out.detailNew = elNew ? {txt: elNew.textContent, cls: elNew.className} : null;
       // 全平后不该再有徽标
       await post('/api/trades/upsert', {underlying:'e2eagenew', contract:'si2612C9000', op_type:'close',
         direction:'buy', close_date: iso(today), close_price: 950, close_qty: 2, pnl: 100, mode:'dual', batch:''});
       await TradeUI.refresh(); await w(800);
       const row2 = [...document.querySelectorAll('#tradesTable tbody tr')].find(x => x.textContent.indexOf('e2eagenew') >= 0);
       out.closedChip = !!(row2 && row2.querySelector('.age'));
+      // v51.05: 全平后详情页标题旁也不该显示
+      if (row2){ row2.click(); await w(900); }
+      const el3 = document.getElementById('tdAge');
+      out.detailClosed = el3 ? el3.className : null;
       // 选项模式下不显示(只在双买出现)
       document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
       await w(800);
@@ -5874,6 +5888,17 @@ async function main() {
   check('开仓天数(v51.04): 全部平完后不再显示; 期权买方模式也不显示',
         v104.closedChip === false && v104.inOptions === false,
         JSON.stringify({closed: v104.closedChip, options: v104.inOptions}));
+  check('开仓天数(v51.05): 详情页标题旁同样显示「已开 N 天」且 >30 天转红',
+        !!v104.detailOld && v104.detailOld.txt === ('已开 ' + v104.days.old + ' 天')
+        && /age-old/.test(v104.detailOld.cls) && /详情/.test(v104.detailOld.titleHas),
+        JSON.stringify(v104.detailOld));
+  check('开仓天数(v51.05): 未超 30 天的详情页徽标保持中性色',
+        !!v104.detailNew && v104.detailNew.txt === ('已开 ' + v104.days.fresh + ' 天')
+        && !/age-old/.test(v104.detailNew.cls),
+        JSON.stringify(v104.detailNew));
+  check('开仓天数(v51.05): 已平仓记录的详情页徽标隐藏',
+        typeof v104.detailClosed === 'string' && /hidden/.test(v104.detailClosed),
+        String(v104.detailClosed));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
