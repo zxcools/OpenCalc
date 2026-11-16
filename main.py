@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5103            # 与 README 版本号 v51.03 对齐(数值比较用于单实例接管)
+APP_VERSION = 5104            # 与 README 版本号 v51.04 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -5617,6 +5617,12 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 [data-theme="light"] .dte{background:rgba(80,110,160,.12);color:#4a6b96}
 [data-theme="light"] .dte.dte-warn{background:rgba(214,69,69,.14);color:#c0392b}
 [data-theme="light"] .dte.dte-dead{background:rgba(110,120,115,.13);color:#5d6b63}
+/* v51.04: 双买「已开 N 天」徽标 —— 超过 30 天转红(警示色, 与涨跌红绿无关) */
+.age{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:6px;font-size:var(--fz-tag);
+  font-weight:600;white-space:nowrap;background:rgba(140,160,200,.16);color:#9fb4d8}
+.age.age-old{background:rgba(229,72,77,.20);color:#ff8484}
+[data-theme="light"] .age{background:rgba(80,110,160,.12);color:#4a6b96}
+[data-theme="light"] .age.age-old{background:rgba(214,69,69,.14);color:#c0392b}
 .iconbtn{background:transparent;border:none;color:var(--sub);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:6px}
 .iconbtn:hover{background:var(--panel2);color:var(--accent)}
 .row-actions{display:flex;gap:4px;justify-content:flex-end}
@@ -9713,8 +9719,20 @@ const TradeUI = {
       const hold = (g.hold_contracts && g.hold_contracts.length) ? g.hold_contracts : [];
       const dteChip = (this.mode === 'options' && hold.length)
         ? '<span class="dte" data-codes="' + escHtml(hold.join(',')) + '"></span>' : '';
+      // v51.04: 期权双买 —— 标的右侧显示「已开 N 天」, 超过 30 天转红(提醒这个组合持有一段时间了)
+      //   ⚠ 只给还有持仓的记录算: 全平的记录「开仓距今」只会越来越大, 没有参考价值
+      let ageChip = '';
+      if (this.mode === 'dual' && g.open_date && g.close_status !== '已平仓'){
+        const _t0 = new Date(String(g.open_date) + 'T00:00:00');
+        const _now = new Date(); _now.setHours(0, 0, 0, 0);
+        const _days = Math.round((_now.getTime() - _t0.getTime()) / 86400000);
+        if (isFinite(_days) && _days >= 0){
+          ageChip = '<span class="age' + (_days > 30 ? ' age-old' : '') + '" title="开仓 '
+            + escHtml(g.open_date) + ' · 已持有 ' + _days + ' 天">已开 ' + _days + ' 天</span>';
+        }
+      }
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
-        <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${dteChip}${conTxt}</td>
+        <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${dteChip}${ageChip}${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
         <td>${this.fmtDateTime(g.open_date, g.open_time)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>

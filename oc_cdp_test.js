@@ -5815,6 +5815,66 @@ async function main() {
   check('行情轮询(v51.02): /api/market/holidays 下发完整休市日表',
         v102.hol.n > 40 && v102.hol.has1001 === true, JSON.stringify(v102.hol));
 
+  // ===== v51.04: 双买「已开 N 天」徽标 =====
+  const v104 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const post = (p, b) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b)}).then(r=>r.json());
+    const out = {alerts: []};
+    const _al = window.alert; window.alert = m => out.alerts.push(String(m));
+    try {
+      const iso = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+      const today = new Date(); today.setHours(0,0,0,0);
+      const dOld = iso(new Date(today.getTime() - 40*86400000));
+      const dNew = iso(new Date(today.getTime() - 5*86400000));
+      await post('/api/trades/upsert', {underlying:'e2eageold', contract:'si2612C9000', op_type:'open',
+        direction:'buy', open_date: dOld, open_price: 900, qty: 2, premium: 9000, call_put:'C', mode:'dual', batch:''});
+      await post('/api/trades/upsert', {underlying:'e2eagenew', contract:'si2612C9000', op_type:'open',
+        direction:'buy', open_date: dNew, open_price: 900, qty: 2, premium: 9000, call_put:'C', mode:'dual', batch:''});
+      document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]').click();
+      await w(900);
+      await TradeUI.refresh(); await w(700);
+      const rows = [...document.querySelectorAll('#tradesTable tbody tr')];
+      const pick = u => { const r = rows.find(x => x.textContent.indexOf(u) >= 0); return r ? r.querySelector('.age') : null; };
+      const aOld = pick('e2eageold'), aNew = pick('e2eagenew');
+      out.old = aOld ? {txt: aOld.textContent, cls: aOld.className, tip: aOld.title} : null;
+      out.fresh = aNew ? {txt: aNew.textContent, cls: aNew.className} : null;
+      out.days = {old: Math.round((new Date().setHours(0,0,0,0) - new Date(dOld + 'T00:00:00').getTime())/86400000),
+                  fresh: Math.round((new Date().setHours(0,0,0,0) - new Date(dNew + 'T00:00:00').getTime())/86400000)};
+      // 全平后不该再有徽标
+      await post('/api/trades/upsert', {underlying:'e2eagenew', contract:'si2612C9000', op_type:'close',
+        direction:'buy', close_date: iso(today), close_price: 950, close_qty: 2, pnl: 100, mode:'dual', batch:''});
+      await TradeUI.refresh(); await w(800);
+      const row2 = [...document.querySelectorAll('#tradesTable tbody tr')].find(x => x.textContent.indexOf('e2eagenew') >= 0);
+      out.closedChip = !!(row2 && row2.querySelector('.age'));
+      // 选项模式下不显示(只在双买出现)
+      document.querySelector('#mainTabs .maintab[data-tab="trades"]').click();
+      await w(800);
+      out.inOptions = !!document.querySelector('#tradesTable .age');
+      // 清理
+      const gd = await (await fetch('/api/trades/groups?mode=dual')).json();
+      for (const it of (gd.groups || [])) {
+        if (String(it.underlying).indexOf('e2eage') !== 0) continue;
+        const d = await (await fetch('/api/trades/detail?mode=dual&underlying=' + it.underlying + '&batch=')).json();
+        for (const op of (d.operations || [])) await fetch('/api/trades/delete', {method:'POST',
+          headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+      }
+      const g2 = await (await fetch('/api/trades/groups?mode=dual')).json();
+      out.cleaned = !(g2.groups || []).some(x => String(x.underlying).indexOf('e2eage') === 0);
+      return JSON.stringify(out);
+    } finally { window.alert = _al; }
+  })()`));
+  check('开仓天数(v51.04): 双买标的右侧显示「已开 N 天」, 天数 = 开仓日距今',
+        !!v104.old && v104.old.txt === ('已开 ' + v104.days.old + ' 天') && v104.days.old === 40,
+        JSON.stringify({txt: v104.old && v104.old.txt, days: v104.days}));
+  check('开仓天数(v51.04): 超过 30 天转红(age-old), 未超 30 天保持中性色',
+        !!v104.old && /age-old/.test(v104.old.cls) && !!v104.fresh && !/age-old/.test(v104.fresh.cls),
+        JSON.stringify({old: v104.old && v104.old.cls, fresh: v104.fresh && v104.fresh.cls}));
+  check('开仓天数(v51.04): 悬停写明开仓日与持有天数',
+        !!v104.old && /开仓 \d{4}-\d{2}-\d{2}/.test(v104.old.tip || ''), String(v104.old && v104.old.tip));
+  check('开仓天数(v51.04): 全部平完后不再显示; 期权买方模式也不显示',
+        v104.closedChip === false && v104.inOptions === false,
+        JSON.stringify({closed: v104.closedChip, options: v104.inOptions}));
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();
