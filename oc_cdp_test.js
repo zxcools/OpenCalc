@@ -57,21 +57,22 @@ async function getWsUrl() {
 
 let msgId = 0;
 const pending = new Map();
-function send(ws, method, params = {}) {
+function send(ws, method, params = {}, timeoutMs) {
   return new Promise((resolve, reject) => {
     const id = ++msgId;
     // v51.02: 加超时 —— 页面被原生 alert/confirm 卡住时 CDP 永不回包, 以前是整个套件无声挂死
+    //   ⚠ 默认 25s 对「要联网」的接口(更新检查)太短, 那种用例显式传更长的值
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error('CDP 超时(' + method + ') —— 页面可能被 alert/confirm 阻塞'));
-    }, 25000);
+    }, timeoutMs || 25000);
     pending.set(id, { resolve: m => { clearTimeout(timer); resolve(m); }, reject });
     ws.send(JSON.stringify({ id, method, params }));
   });
 }
 
-async function evalJs(ws, expr) {
-  const m = await send(ws, 'Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+async function evalJs(ws, expr, timeoutMs) {
+  const m = await send(ws, 'Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, timeoutMs);
   if (m.error) throw new Error('CDP:' + JSON.stringify(m.error));
   const rr = m.result || {};
   if (rr.exceptionDetails) throw new Error('JS: ' + JSON.stringify(rr.exceptionDetails.exception || rr.exceptionDetails.text));
@@ -2201,8 +2202,8 @@ async function main() {
                            futGroups, optGroups, layTm, mainTitle, futColHidden});
   })()`);
   const v59 = JSON.parse(v59Run);
-  check('三模式(v50.59): 计算器模式按钮为 期货/期权买方/期权双买',
-        JSON.stringify(v59.modeBtns) === JSON.stringify(['futures', 'options', 'dual']), v59Run);
+  check('三模式(v50.59): 计算器模式按钮为 期货/期权买方/期权双买/加仓(v51.06)',
+        JSON.stringify(v59.modeBtns) === JSON.stringify(['futures', 'options', 'dual', 'addon']), v59Run);
   check('三模式(v50.59): 切到双买后只显示双买字段', v59.dualShown && v59.optHidden && v59.futHidden, v59Run);
   check('双买测算(v50.59): 结果卡显示两腿手数与权利金合计',
         v59.shown && v59.qC === '1' && v59.qP === '1' && /18,300/.test(v59.premTxt),
@@ -2247,7 +2248,7 @@ async function main() {
     const modes = [...document.querySelectorAll('.modes > .mode')];
     const modeCols = getComputedStyle(document.querySelector('.modes')).gridTemplateColumns.split(' ').length;
     const modeTops = modes.map(m => Math.round(m.getBoundingClientRect().top));
-    const modeOneRow = (new Set(modeTops).size === 1) && modeCols === 3;
+    const modeOneRow = (new Set(modeTops).size === 1) && modeCols === 4;   // v51.06: 四个模式一行
     const modeH = Math.round(modes[0].getBoundingClientRect().height);
 
     // ---- B) 期权价格 ⇄ 每手权利金 双向联动 ----
@@ -5444,7 +5445,7 @@ async function main() {
             curName: d.current_name, keys: ['ok','current','current_name','latest','latest_name','has_update','notes','frozen']
                   .filter(k => (k in d)).length,
             err: d.error || ''};
-  })()`);
+  })()`, 90000);
   check('接口: /api/update/check 返回 200 且键位齐全',
         updApi.status === 200 && updApi.keys === 8, JSON.stringify(updApi).slice(0, 160));
   check('接口: /api/update/check 带回当前版本号(与 /api/version 一致)',
@@ -5899,6 +5900,66 @@ async function main() {
   check('开仓天数(v51.05): 已平仓记录的详情页徽标隐藏',
         typeof v104.detailClosed === 'string' && /hidden/.test(v104.detailClosed),
         String(v104.detailClosed));
+
+  // ===== v51.06: 加仓计算模式 =====
+  const v106 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const out = {};
+    document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();
+    await w(600);
+    document.querySelector('.mode[data-mode="addon"]').click();
+    await w(600);
+    out.modes = [...document.querySelectorAll('.mode')].map(b => b.dataset.mode);
+    out.pane = {addon: !q('addonFields').classList.contains('hidden'),
+                fut: q('futuresFields').classList.contains('hidden'),
+                opt: q('optionsFields').classList.contains('hidden'),
+                dual: q('dualFields').classList.contains('hidden'),
+                plans: q('recentPlans').classList.contains('hidden')};
+    q('equity').value = ''; q('equity').dispatchEvent(new Event('input'));
+    await w(500);
+    out.emptyTip = q('empty').textContent.trim();
+    out.emptyShown = !q('empty').classList.contains('hidden');
+    q('equity').value = '100'; q('equity').dispatchEvent(new Event('input'));
+    await w(1000);
+    const rd = () => ({
+      shown: !q('resultA').classList.contains('hidden'),
+      big: (q('resultA').querySelector('.ab-v') || {}).textContent || '',
+      badge: (q('resultA').querySelector('.badge') || {}).textContent || '',
+      cards: [...q('resultA').querySelectorAll('.addon-opt')].map(x => ({
+        name: (x.querySelector('.ao-name') || {}).textContent || '',
+        amt: (x.querySelector('.ao-amt') || {}).textContent || '',
+        on: x.classList.contains('on')}))});
+    out.soft = rd();
+    out.emptyHiddenAfter = q('empty').classList.contains('hidden');
+    document.querySelector('#addonPos .pick-opt[data-pos="exec"]').click();
+    await w(900);
+    out.exec = rd();
+    out.execActive = document.querySelector('#addonPos .pick-opt[data-pos="exec"]').classList.contains('active');
+    document.querySelector('.mode[data-mode="futures"]').click();
+    await w(700);
+    out.backFut = {addonHidden: q('addonFields').classList.contains('hidden'),
+                   resultAHidden: q('resultA').classList.contains('hidden'),
+                   plansShown: !q('recentPlans').classList.contains('hidden')};
+    return JSON.stringify(out);
+  })()`));
+  check('加仓计算(v51.06): 模式栏第四项「加仓计算」, 且只显示加仓面板',
+        v106.modes.indexOf('addon') === 3 && v106.pane.addon === true && v106.pane.fut
+        && v106.pane.opt && v106.pane.dual && v106.pane.plans,
+        JSON.stringify({modes: v106.modes, pane: v106.pane}));
+  check('加仓计算(v51.06): 没填权益 → 提示先填当前权益',
+        v106.emptyShown === true && /权益/.test(v106.emptyTip || ''), v106.emptyTip);
+  check('加仓计算(v51.06): 权益 100 万 + 软止损 → 最多加 ¥5,000 (0.5%)',
+        v106.soft.shown === true && /5,000/.test(v106.soft.big) && /0\.5%/.test(v106.soft.badge),
+        JSON.stringify(v106.soft));
+  check('加仓计算(v51.06): 切到执行线 → ¥10,000 (1%), 两档对比卡同步高亮',
+        /10,000/.test(v106.exec.big) && /1%/.test(v106.exec.badge) && v106.execActive === true
+        && v106.exec.cards.length === 2 && v106.exec.cards[1].on === true
+        && v106.soft.cards[0].on === true,
+        JSON.stringify({exec: v106.exec, softCards: v106.soft.cards}));
+  check('加仓计算(v51.06): 切回期货模式 → 加仓面板收起、结果不残留、方案区回来',
+        v106.backFut.addonHidden === true && v106.backFut.resultAHidden === true
+        && v106.backFut.plansShown === true, JSON.stringify(v106.backFut));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

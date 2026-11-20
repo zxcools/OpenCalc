@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5105            # 与 README 版本号 v51.05 对齐(数值比较用于单实例接管)
+APP_VERSION = 5106            # 与 README 版本号 v51.06 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -744,6 +744,41 @@ def _num_any(value, name):
         return float(str(value).replace(",", "").replace("，", "").strip())
     except (TypeError, ValueError):
         raise ValueError("%s 必须是数字" % name)
+
+
+# ---------------------------------------------------------------------------
+# v51.06: 加仓计算 —— 只回答一个问题: 这笔加仓最多能占多少权益
+#   软止损加仓 ≤ 0.5% 权益 / 执行线加仓 ≤ 1% 权益
+#   口径与开仓计算器的「风险额度」一致(这笔加仓最多能亏多少), 不是保证金占用
+# ---------------------------------------------------------------------------
+ADDON_RISK_PCT = (("soft", "软止损加仓", 0.5), ("exec", "执行线加仓", 1.0))
+
+
+def calc_addon(params):
+    """加仓额度: 最多能加多少钱的仓 = 当前权益 × 档位比例
+
+    params: equity(当前权益, 元) / position(soft=软止损 0.5% | exec=执行线 1%)
+    返回: {position, position_name, risk_percent, equity, max_amount, options[]}
+    """
+    equity = _num(params.get("equity"), "当前权益")
+    if equity <= 0:
+        raise ValueError("当前权益必须大于 0")
+    pos = str(params.get("position") or "soft").strip().lower()
+    hit = [x for x in ADDON_RISK_PCT if x[0] == pos]
+    if not hit:
+        raise ValueError("加仓位置只能是 软止损(soft) / 执行线(exec)")
+    _, name, pct = hit[0]
+    return {
+        "ok": True,
+        "position": pos,
+        "position_name": name,
+        "risk_percent": pct,
+        "equity": round(equity, 2),
+        "max_amount": round(equity * pct / 100.0, 2),
+        # 两档并排对比, 省得来回切
+        "options": [{"position": k, "name": n, "risk_percent": p,
+                     "max_amount": round(equity * p / 100.0, 2)} for k, n, p in ADDON_RISK_PCT],
+    }
 
 
 def calc_futures(params):
@@ -4575,6 +4610,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/calc/futures":
                 result = calc_futures(params)
+            elif path == "/api/calc/addon":
+                result = calc_addon(params)
             elif path == "/api/calc/options":
                 result = calc_options(params)
             elif path == "/api/calc/dual":
@@ -5027,8 +5064,19 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
   box-shadow:0 6px 16px rgba(217,138,31,.4)}
 
 /* 模式切换 (v50.61: 三个模式排一行; v50.62: 文字放大但仍保持一行) */
-.modes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;background:var(--panel);
+.modes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;background:var(--panel);
   border:1px solid var(--border);border-radius:14px;padding:5px;margin-bottom:22px}
+/* v51.06: 加仓计算面板 */
+.addon-big{display:flex;align-items:baseline;gap:8px;margin:16px 0 8px;flex-wrap:wrap}
+.addon-big .ab-l,.addon-big .ab-u{font-size:13px;color:var(--sub)}
+.addon-big .ab-v{font-size:32px;font-weight:800;color:var(--accent);letter-spacing:.5px;line-height:1.1}
+.addon-opts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:16px}
+.addon-opt{border:1px solid var(--border);border-radius:12px;padding:10px 12px;background:var(--panel2)}
+.addon-opt.on{border-color:var(--accent);box-shadow:0 0 0 2px rgba(76,212,147,.16)}
+.addon-opt .ao-name{font-size:12.5px;color:var(--text);font-weight:600}
+.addon-opt .ao-pct{font-size:11px;color:var(--sub);margin-top:2px}
+.addon-opt .ao-amt{font-size:19px;font-weight:700;margin-top:6px;color:var(--text)}
+.addon-opt.on .ao-amt{color:var(--accent)}
 .mode{padding:11px 8px;text-align:center;border-radius:10px;cursor:pointer;font-weight:600;
   color:var(--sub);transition:all .28s;user-select:none;font-size:15.5px;position:relative;
   line-height:1.3;min-width:0}
@@ -5966,6 +6014,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="mode active" data-mode="futures">期货模式<small>盈亏比决策 · 保证金测算</small></div>
       <div class="mode" data-mode="options">期权买方<small>权利金占用 · 单一方向</small></div>
       <div class="mode" data-mode="dual">期权双买<small>delta 中性 · 翻倍止盈</small></div>
+      <div class="mode" data-mode="addon">加仓计算<small>软止损 0.5% · 执行线 1%</small></div>
     </div>
 
   <div class="grid">
@@ -6209,6 +6258,18 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </div>
         <div class="tip">两腿手数按 <b>delta 中性</b> 配比（call手数 × |call delta| = put手数 × |put delta|），合计权利金不超过预算。<b>止盈目标价位</b>按<b>期权价格</b>口径给出：持仓总价值涨到 2 / 3 / 4 / 5 倍权利金时，<b>组合价</b>（两腿按手数合成的价格）与<b>单腿</b>期权价格各要涨到哪。</div>
       </div>
+      <!-- v51.06: 加仓计算 —— 只算「这笔加仓最多能占多少权益」 -->
+      <div id="addonFields" class="hidden">
+        <label>加仓位置</label>
+        <span class="seg pick" id="addonPos" role="group" aria-label="加仓位置">
+          <button type="button" class="pick-opt active" data-pos="soft" aria-pressed="true">软止损加仓 · 0.5%</button>
+          <button type="button" class="pick-opt" data-pos="exec" aria-pressed="false">执行线加仓 · 1%</button>
+        </span>
+        <div class="tip" style="margin-top:12px">
+          加仓额度 = <b>当前权益 × 档位比例</b>（软止损 0.5% / 执行线 1%），与开仓计算器同一「风险额度」口径 ——
+          算出来的是这笔加仓<b>最多能亏多少</b>，不动原有持仓的预算。
+        </div>
+      </div>
     </div>
 
     <!-- 结果区 -->
@@ -6353,6 +6414,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </div>
         <div class="tip">双买 = 同时买入 call 与 put。上涨时 put 归零、全靠 call 腿撑；下跌时反过来。「止盈目标价位」那张表里：<b>组合价</b>是把两腿报价按手数合成的一个价格（如 3 手 call + 5 手 put 就是 3×call + 5×put），看它涨到 N 倍是多少；<b>Call / Put 目标价</b>是单腿期权价格（与左侧「期权价格」同一口径，假设一腿归零、另一腿独撑）。</div>
       </div>
+
+      <!-- v51.06: 加仓计算的结果(内容由 renderAddon 整块生成) -->
+      <div id="resultA" class="hidden"></div>
 
       <!-- 最近保存的方案 (期货/期权买方/期权双买 各自独立, 各最多10组, 一键调出) -->
       <div id="recentPlans" class="hidden" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:2px">
@@ -7102,7 +7166,9 @@ let equityByMode = {futures:null, options:null, dual:null};
 /* 取某模式的默认权益(元) */
 function defaultEquityOf(mode){
   // 期权双买与期权买方共用「期权默认权益」, 期货用期货的(v50.59)
-  return mode === 'futures' ? settingsCache.futures_default_equity : settingsCache.options_default_equity;
+  // v51.06: 加仓计算也用期货默认权益(它算的是「这笔加仓能占多少」, 与开仓同口径)
+  return (mode === 'options' || mode === 'dual')
+    ? settingsCache.options_default_equity : settingsCache.futures_default_equity;
 }
 /* 把当前 equity 输入框的值切到指定模式: 有记忆值用记忆值, 否则用该模式默认值, 都没有则清空 */
 function applyEquityForMode(mode){
@@ -7118,7 +7184,8 @@ function applyEquityForMode(mode){
   if (hint){
     const isDefault = (remembered == null || remembered === '') && def != null;
     if (isDefault){
-      const _ml = mode === 'futures' ? '期货' : (mode === 'dual' ? '期权双买' : '期权买方');
+      const _ml = mode === 'futures' ? '期货'
+        : (mode === 'dual' ? '期权双买' : (mode === 'addon' ? '加仓计算（期货口径）' : '期权买方'));
       hint.classList.remove('hidden');
       hint.innerHTML = '✓ 已自动填入' + _ml + '默认权益：<b>'
         + (def/10000).toLocaleString('en-US',{maximumFractionDigits:2})
@@ -7468,7 +7535,11 @@ function setMode(m){
   $('futuresFields').classList.toggle('hidden', curMode!=='futures');
   $('optionsFields').classList.toggle('hidden', curMode!=='options');
   $('dualFields').classList.toggle('hidden', curMode!=='dual');
-  if (typeof renderPlans === 'function') renderPlans();   // 最近方案区(三种模式各一套)
+  // v51.06: 加仓模式(第四种) —— 只换一块参数面板, 没有「最近方案」
+  const _adF = $('addonFields');
+  if (_adF) _adF.classList.toggle('hidden', curMode!=='addon');
+  if (curMode === 'addon' && $('recentPlans')) $('recentPlans').classList.add('hidden');
+  if (typeof renderPlans === 'function' && curMode !== 'addon') renderPlans();   // 最近方案区(三种模式各一套)
   if (typeof applyEquityForMode === 'function') applyEquityForMode(curMode);   // 切到该模式自己的权益
   if (typeof updateDualLegUI === 'function') updateDualLegUI();               // 双买价格/权利金联动提示
   // ⚠ v50.60: 换模式先把结果区清空; 换回「上次算过的模式」才恢复它自己的结果
@@ -7638,7 +7709,72 @@ document.querySelectorAll('#dirSeg button').forEach(b=>{
 });
 
 /* 计算 */
+/* ===================== 加仓计算(v51.06) =====================
+   输入: 当前权益(共用顶部「当前总权益」) + 加仓位置(软止损 0.5% / 执行线 1%)
+   输出: 这笔加仓最多能加多少钱的仓 = 权益 × 比例(风险额度口径) */
+let addonPos = 'soft';
+const ADDON_POS_TXT = {soft: '软止损加仓', exec: '执行线加仓'};
+
+function addonCalc(){
+  const eq = (parseFloat($('equity').value) || 0) * 10000;   // 万元 → 元
+  if (!eq){
+    hideAllResults();
+    $('empty').classList.remove('hidden');
+    $('empty').textContent = '请先填写左侧「当前总权益」，再选加仓位置';
+    return;
+  }
+  fetchT('/api/calc/addon', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({equity: eq, position: addonPos})})
+    .then(r=>r.json()).then(d=>{
+      if (!d.ok){ showError(d.error || '计算失败'); return; }
+      renderAddon(d);
+    })
+    .catch(()=>showError('应用服务连接已断开：请关闭窗口后重新双击桌面「期货开仓计算器」图标启动。测算在本机完成，无需联网。'));
+}
+
+function renderAddon(d){
+  hideAllResults();
+  $('empty').classList.add('hidden');
+  const box = $('resultA');
+  if (!box) return;
+  const money = v => 'CN¥' + Number(v || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
+  const wan = v => (Number(v || 0) / 10000).toLocaleString('en-US', {maximumFractionDigits: 2});
+  const opts = (d.options || []).map(o =>
+    '<div class="addon-opt' + (o.position === d.position ? ' on' : '') + '">'
+    + '<div class="ao-name">' + escHtml(o.name) + '</div>'
+    + '<div class="ao-pct">权益 × ' + o.risk_percent + '%</div>'
+    + '<div class="ao-amt">' + money(o.max_amount) + '</div></div>').join('');
+  box.innerHTML = `
+    <div class="ratio-strip anim">
+      <span class="l">最多可加仓 · ${escHtml(d.position_name)}</span>
+      <span class="badge good"><span class="ico">◈</span>权益 × ${d.risk_percent}%</span>
+    </div>
+    <div class="addon-big">
+      <span class="ab-l">最多加</span>
+      <b class="ab-v">${money(d.max_amount)}</b>
+      <span class="ab-u">的仓</span>
+    </div>
+    <div class="tip">当前权益 <b>${wan(d.equity)} 万元</b> × ${d.risk_percent}% = <b>${money(d.max_amount)}</b>
+      —— 风险额度口径：这笔加仓最多亏这么多，原有持仓的预算不动。</div>
+    <div class="addon-opts">${opts}</div>`;
+  box.classList.remove('hidden');
+}
+
+document.querySelectorAll('#addonPos .pick-opt').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    addonPos = b.dataset.pos || 'soft';
+    document.querySelectorAll('#addonPos .pick-opt').forEach(x=>{
+      const on = x.dataset.pos === addonPos;
+      x.classList.toggle('active', on);
+      x.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    if (curMode === 'addon') addonCalc();
+  });
+});
+
 function onInput(){
+  // v51.06: 加仓模式只认「当前权益 + 加仓位置」, 不能让三个开仓模式的算法跑起来(参数块是隐藏的)
+  if(curMode==='addon'){ addonCalc(); return; }
   if(curMode==='futures'){ updateTickHint(); calcFutures(); }
   else if(curMode==='dual'){ calcDual(); }      // v50.59 期权双买
   else calcOptions();
@@ -7650,7 +7786,7 @@ let lastCalcO = null;          // 最近一次期权买方结果 (v50.60: 切模
 
 /* ---- 结果区显隐(v50.60): 三个模式各自一块, 必须一起隐藏, 否则上个模式的结果会残留 ---- */
 function hideAllResults(){
-  ['resultF','resultO','resultD'].forEach(id=>{
+  ['resultF','resultO','resultD','resultA'].forEach(id=>{
     const el = $(id);
     if (el) el.classList.add('hidden');
   });
@@ -7758,6 +7894,7 @@ function updateDualLegUI(){
    ⚠ 不重新请求接口 —— 缓存就是该模式最近一次的测算结果, 参数在表单里原样保留 */
 function restoreResultForMode(m){
   hideAllResults();
+  if (m === 'addon'){ addonCalc(); return; }   // v51.06: 加仓模式自己一套(不复用三模式缓存)
   if (m === 'futures' && lastCalcF){ renderF(lastCalcF); return; }
   if (m === 'dual' && lastCalcD){ renderD(lastCalcD); return; }
   if (m === 'options' && lastCalcO){ renderO(lastCalcO); return; }

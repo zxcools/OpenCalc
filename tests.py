@@ -2587,6 +2587,32 @@ _tr_dd = [t for t in _dd["tables"] if t["key"] == "trade_records"][0]
 check("删除前备份(v51.02): 快照里还有那条被删的记录(delta=+1)",
       _tr_dd["delta"] == 1, str(_tr_dd["delta"]))
 
+# ===== v51.06: 加仓计算 =====
+print("\n== 加仓计算 v51.06 ==")
+from main import calc_addon  # noqa: E402
+_a106 = calc_addon({"equity": 1000000, "position": "soft"})
+check("加仓计算(v51.06): 软止损加仓 = 权益 × 0.5%",
+      _a106["max_amount"] == 5000.0 and _a106["risk_percent"] == 0.5, str(_a106["max_amount"]))
+_b106 = calc_addon({"equity": 1000000, "position": "exec"})
+check("加仓计算(v51.06): 执行线加仓 = 权益 × 1%",
+      _b106["max_amount"] == 10000.0 and _b106["position_name"] == "执行线加仓", str(_b106["max_amount"]))
+check("加仓计算(v51.06): 两档对比一并返回(省得来回切)",
+      len(_a106["options"]) == 2 and _a106["options"][1]["max_amount"] == 10000.0,
+      str(_a106["options"]))
+check("加仓计算(v51.06): 位置大小写/空格容错",
+      calc_addon({"equity": "1200000", "position": " EXEC "})["max_amount"] == 12000.0, '')
+check("加仓计算(v51.06): 不传 position 默认软止损",
+      calc_addon({"equity": 800000})["position"] == "soft", '')
+for _bad106, _why106 in (({"equity": 0, "position": "soft"}, "权益为 0"),
+                         ({"equity": -5000}, "权益为负"),
+                         ({"equity": 1000000, "position": "xx"}, "非法位置")):
+    try:
+        calc_addon(_bad106)
+        _ok106 = False
+    except ValueError:
+        _ok106 = True
+    check("加仓计算(v51.06): 拒绝%s" % _why106, _ok106, '')
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
