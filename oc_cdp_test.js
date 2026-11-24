@@ -5981,12 +5981,16 @@ async function main() {
       const ns = () => [...document.querySelectorAll('#rTargetsO tbody tr')]
         .map(tr => (tr.querySelector('.dt-n b') || {}).textContent || '').filter(Boolean);
       out.normal = {n: ns().join(','), risk: q('riskAmountO').value,
-                    badge: (q('rIvBadge') || {}).textContent || ''};
+                    badge: (q('rIvBadge') || {}).textContent || '',
+                    bg: getComputedStyle(document.querySelector('#openStateSegO button[data-state="normal"]')).backgroundImage};
       document.querySelector('#openStateSegO button[data-state="trail"]').click();
       await w(1100);
       out.trail = {n: ns().join(','), risk: q('riskAmountO').value,
                    badge: (q('rIvBadge') || {}).textContent || '',
-                   hint: (q('openStateHintO') || {}).textContent || ''};
+                   hint: (q('openStateHintO') || {}).textContent || '',
+                   bg: getComputedStyle(document.querySelector('#openStateSegO button[data-state="trail"]')).backgroundImage,
+                   fg: getComputedStyle(document.querySelector('#openStateSegO button[data-state="trail"]')).color,
+                   normalBgNow: getComputedStyle(document.querySelector('#openStateSegO button[data-state="normal"]')).backgroundImage};
       document.querySelector('#openStateSegO button[data-state="normal"]').click();
       await w(900);
       out.backRisk = q('riskAmountO').value;
@@ -6043,6 +6047,11 @@ async function main() {
         && v107.trail.n === '4×,8×,12×,16×' && /0\.75%/.test(v107.trail.hint),
         JSON.stringify(v107.trail));
   check('开仓状态(v51.07): 切回正常开仓, 风险额度跟着回到 3%', v107.backRisk === '3', v107.backRisk);
+  check('开仓状态(v51.08): 选中的按钮有紫底白字, 没选的是透明',
+        /167, 139, 250/.test(v107.normal.bg || '') && /167, 139, 250/.test(v107.trail.bg || '')
+        && /255, 255, 255/.test(v107.trail.fg || '')
+        && (v107.trail.normalBgNow === 'none' || v107.trail.normalBgNow === ''),
+        JSON.stringify({normal: v107.normal.bg, trail: v107.trail.bg, fg: v107.trail.fg, other: v107.trail.normalBgNow}));
   check('开仓状态(v51.07): 开仓弹窗只在期权买方出现该选项(双买不出现)',
         v107.dlgOpt === true && v107.dlgDual === false,
         JSON.stringify({opt: v107.dlgOpt, dual: v107.dlgDual}));

@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5107            # 与 README 版本号 v51.07 对齐(数值比较用于单实例接管)
+APP_VERSION = 5108            # 与 README 版本号 v51.08 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -5202,6 +5202,15 @@ select{cursor:pointer;appearance:none;
 .dseg button[data-dir="short"].active{background:rgba(70,214,234,.15);color:#46d6ea}
 [data-theme="light"] .dseg button[data-dir="long"].active{background:rgba(224,82,82,.14);color:#e05252}
 [data-theme="light"] .dseg button[data-dir="short"].active{background:rgba(14,159,200,.13);color:#0e9fc8}
+
+/* v51.08: 开仓状态分段 —— 选中给紫色底
+   ⚠ 之前只定义了 [data-dir] 两个方向色的 .active, 这个分段压根没有选中样式, 选没选看不出来 */
+#openStateSegO button.active{background:linear-gradient(135deg,#a78bfa,#7c3aed);color:#fff;
+  box-shadow:0 4px 12px rgba(124,58,237,.32)}
+#openStateSegO button.active:hover{color:#fff}
+/* 弹窗里的同一个选项也用紫色, 两处保持一个视觉(原本是 .seg.pick 的绿色) */
+#tmOpenState .pick-opt.active,
+#tmOpenState .pick-opt.active:hover{background:linear-gradient(135deg,#a78bfa,#7c3aed);color:#fff}
 
 /* 结果区 */
 .results{display:flex;flex-direction:column;gap:16px}
