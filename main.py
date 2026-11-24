@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5108            # 与 README 版本号 v51.08 对齐(数值比较用于单实例接管)
+APP_VERSION = 5109            # 与 README 版本号 v51.09 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -2264,6 +2264,8 @@ def get_settings():
         "options_risk_pct": s.get("options_risk_pct"),
         "frequent_futures": s.get("frequent_futures") or [],
         "frequent_options": s.get("frequent_options") or [],
+        # v51.09: 期权双买的自选单独一份(以前与期权买方共用 frequent_options)
+        "frequent_dual": s.get("frequent_dual") or [],
     }
 
 
@@ -2295,7 +2297,7 @@ def save_settings(patch):
         if fv not in _opts:
             raise ValueError("风险额度只支持 %s" % " / ".join("%g" % x for x in _opts))
         s[_k] = fv
-    for k in ("frequent_futures", "frequent_options"):
+    for k in ("frequent_futures", "frequent_options", "frequent_dual"):
         if k in patch:
             v = patch[k]
             s[k] = list(v) if v else []
@@ -5519,6 +5521,30 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .maintab.tab-off.active{display:flex}
 .main{flex:1;min-width:0}
 
+/* v51.09: 自选列表列(左导航右侧) —— 只在「开仓计算」页显示 */
+.fav-col{width:158px;flex:none;position:sticky;top:0;height:100vh;overflow-y:auto;
+  background:var(--panel);border-right:1px solid var(--border);padding:18px 10px 20px;z-index:40}
+.fav-col.hidden{display:none}
+.fav-hd{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--sub);
+  letter-spacing:.4px;margin-bottom:10px}
+.fav-hd small{font-weight:500;font-size:10.5px;padding:1px 6px;border-radius:6px;
+  background:rgba(167,139,250,.18);color:#b39dff}
+[data-theme="light"] .fav-hd small{background:rgba(124,58,237,.12);color:#6d3fd4}
+.fav-list{display:flex;flex-direction:column;gap:3px}
+.fav-item{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:9px;cursor:pointer;
+  font-size:12.5px;color:var(--text);transition:background .15s}
+.fav-item:hover{background:var(--panel2)}
+.fav-item.active{background:linear-gradient(135deg,#a78bfa,#7c3aed);color:#fff}
+.fav-item .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fav-item .cd{flex:none;font-size:10.5px;opacity:.66;font-family:ui-monospace,Consolas,monospace}
+.fav-item.active .cd{opacity:.85}
+.fav-item .x{flex:none;width:14px;text-align:center;font-size:13px;line-height:1;opacity:0}
+.fav-item:hover .x{opacity:.7}
+.fav-item .x:hover{opacity:1;color:#e5484d}
+.fav-item.active .x:hover{color:#ffe08a}
+.fav-empty{font-size:11px;color:var(--sub);opacity:.72;line-height:1.75;margin-top:8px}
+.fav-empty.hidden{display:none}
+
 /* v50.99 侧边栏显示设置弹窗 */
 .tp-list{display:flex;flex-direction:column;gap:8px;margin:12px 0 0}
 .tp-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);
@@ -6069,6 +6095,13 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <button class="side-btn" id="btnContact" title="联系作者 / 赞赏">💬</button>
     </div>
   </aside>
+
+  <!-- v51.09: 自选列表(只在「开仓计算」页显示) —— 三个模式各自一份, 点一下就直接选中标的 -->
+  <aside class="fav-col hidden" id="favCol">
+    <div class="fav-hd">自选 <small id="favModeTxt">期货</small></div>
+    <div class="fav-list" id="favList"></div>
+    <div class="fav-empty" id="favEmpty">还没有自选<br>选好标的后点「＋ 加入自选」</div>
+  </aside>
   <div class="main">
   <div class="wrap">
 
@@ -6135,10 +6168,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <label>开仓标的（代码 / 中文搜索）</label>
         <div class="searchbox" style="display:flex;gap:6px;align-items:stretch">
           <input id="cSearch" placeholder="搜索代码/名称，如 rb / 螺纹钢" autocomplete="off" style="flex:1">
-          <button class="btn xs ghost" id="favF" title="把当前选中的标的加入常用">★ 设为常用</button>
+          <button class="btn xs ghost" id="favF" title="把当前选中的标的加入自选（三个模式各自独立）">＋ 加入自选</button>
           <div class="slist hidden" id="cList" style="left:0;right:0"></div>
         </div>
-        <div class="freq" id="freqF"><div class="tip" style="margin:2px 0 6px">常用：暂未设置，先在搜索框选好标的后点「★ 设为常用」</div></div>
         <div class="quote hidden" id="quoteF" title="行情来自新浪财经，约20秒延迟，与交易软件可能存在细微差异；价格自动每10秒刷新">
           <span class="qname" id="qNameF">—</span>
           <span class="qprice" id="qPriceF">—</span>
@@ -6202,10 +6234,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <label>开仓标的（搜索 / 选常用）</label>
         <div class="searchbox" style="display:flex;gap:6px;align-items:stretch">
           <input id="cSearchO" placeholder="搜索代码/名称，如 si / 工业硅" autocomplete="off" style="flex:1">
-          <button class="btn xs ghost" id="favO" title="把当前选中的标的加入常用">★ 设为常用</button>
+          <button class="btn xs ghost" id="favO" title="把当前选中的标的加入自选（三个模式各自独立）">＋ 加入自选</button>
           <div class="slist hidden" id="cListO" style="left:0;right:0"></div>
         </div>
-        <div class="freq" id="freqO"><div class="tip" style="margin:2px 0 6px">常用：暂未设置，先在搜索框选好标的后点「★ 设为常用」</div></div>
         <div class="quote hidden" id="quoteO" title="行情来自新浪财经，约20秒延迟，与交易软件可能存在细微差异；价格自动每10秒刷新">
           <span class="qname" id="qNameO">—</span>
           <span class="qprice" id="qPriceO">—</span>
@@ -6285,10 +6316,9 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <label>开仓标的（搜索 / 选常用）</label>
         <div class="searchbox" style="display:flex;gap:6px;align-items:stretch">
           <input id="cSearchD" placeholder="搜索代码/名称，如 lc / 碳酸锂" autocomplete="off" style="flex:1">
-          <button class="btn xs ghost" id="favD" title="把当前选中的标的加入常用">★ 设为常用</button>
+          <button class="btn xs ghost" id="favD" title="把当前选中的标的加入自选（三个模式各自独立）">＋ 加入自选</button>
           <div class="slist hidden" id="cListD" style="left:0;right:0"></div>
         </div>
-        <div class="freq" id="freqD"><div class="tip" style="margin:2px 0 6px">常用：暂未设置，先在搜索框选好标的后点「★ 设为常用」</div></div>
         <div class="quote hidden" id="quoteD" title="行情来自新浪财经，约20秒延迟，与交易软件可能存在细微差异">
           <span class="qname" id="qNameD">—</span>
           <span class="qprice" id="qPriceD">—</span>
@@ -7214,9 +7244,10 @@ function init(){
   fetchT('/api/contracts').then(r=>r.json()).then(d=>{
     if(!d.ok) return;
     CONTRACTS = d.contracts;
-    initContractSearch('cSearch','cList','freqF','favF','futures', c => pickContract(c,'F'));
-    initContractSearch('cSearchO','cListO','freqO','favO','options', c => pickContract(c,'O'));
-    initContractSearch('cSearchD','cListD','freqD','favD','dual', c => pickContract(c,'D'));
+    initContractSearch('cSearch','cList','favF','futures', c => pickContract(c,'F'));
+    initContractSearch('cSearchO','cListO','favO','options', c => pickContract(c,'O'));
+    initContractSearch('cSearchD','cListD','favD','dual', c => pickContract(c,'D'));
+    if (typeof FAV !== 'undefined') FAV.render();   // v51.09: 合约表就绪后再渲染一次自选(要查品种名)
   });
   loadTheme();
   loadSettings();
@@ -7265,7 +7296,7 @@ function updateRiskHint(mode){
   const budget = eq * p / 100;
   hint.innerHTML = '预算 = 权益 × ' + p + '% = <b style="color:var(--accent)">¥' + budget.toLocaleString('en-US', {maximumFractionDigits:2}) + '</b>';
 }
-let settingsCache = {futures_default_equity:null, options_default_equity:null, futures_risk_pct:null, options_risk_pct:null, frequent_futures:[], frequent_options:[]};
+let settingsCache = {futures_default_equity:null, options_default_equity:null, futures_risk_pct:null, options_risk_pct:null, frequent_futures:[], frequent_options:[], frequent_dual:[]};
 /* 期货/期权各自的当前权益输入值(万元, null=未填过) — 两模式互不影响 */
 let equityByMode = {futures:null, options:null, dual:null};
 /* 取某模式的默认权益(元) */
@@ -7321,7 +7352,7 @@ function loadSettings(){
     }
     // 刷新提示(风险额度提示由 applyEquityForMode 内 updateRiskHint 处理; 不派发 change 以免误清"已自动填入"提示)
     // 渲染常用区
-    if (typeof initContractSearch._renderFreqAll === 'function') initContractSearch._renderFreqAll();
+    if (typeof FAV !== 'undefined') FAV.render();
     onInput();
   });
 }
@@ -7383,59 +7414,83 @@ function bindWanEquity(){
   update();
 }
 
-/* 搜索 + 常用组合控件: 输入搜索 + 选标的; ★ 设为常用加入常用区; 常用 chip 悬停右上角 X 删除 */
-const _freqRenderers = [];   // 注册所有 freq 渲染器, settings 变化时统一刷新
-function initContractSearch(inputId, listId, freqId, favBtnId, mode, onPick){
-  const input = $(inputId), list = $(listId), favBtn = $(favBtnId), freqBox = $(freqId);
-  const mKey = mode==='futures' ? 'F' : (mode==='dual' ? 'D' : 'O');   // v50.59: D = 期权双买
-  const freqKey = mode==='futures' ? 'frequent_futures' : 'frequent_options';
-  let items = [];
+/* 搜索 + 自选(v51.09): 输入搜索 + 选标的; 「＋ 加入自选」写进左侧那一列, 三个模式各自一份 */
+const FAV_KEYS = {F: 'frequent_futures', O: 'frequent_options', D: 'frequent_dual'};
+const FAV_MODE_TXT = {F: '期货', O: '期权买方', D: '期权双买'};
+const FAV = {
+  mode: 'F',
+  pickers: {},          // mKey -> pick(c), 由 initContractSearch 注册
 
-  function renderFreq(){
-    const codes = settingsCache[freqKey] || [];
-    if (!codes.length){
-      freqBox.innerHTML = '<div class="tip" style="margin:2px 0 6px">常用：暂未设置，先在搜索框选好标的后点「★ 设为常用」</div>';
-      return;
-    }
-    let html = '<span class="lbl">常用：</span>';
-    codes.forEach(code=>{
-      const c = CONTRACTS.find(x=>x.code.toLowerCase() === code.toLowerCase());
-      if (!c) return;
-      const active = selCode[mKey] === c.code;
-      html += '<span class="fchip' + (active ? ' active' : '') + '" data-code="' + c.code + '">' + c.name + ' <small style="opacity:.7">' + c.code + '</small><span class="x" title="从常用移除">×</span></span>';
-    });
-    freqBox.innerHTML = html;
-    freqBox.querySelectorAll('.fchip').forEach(chip=>{
-      chip.addEventListener('click', e=>{
-        if (e.target.classList.contains('x')){
-          removeFreq(chip.dataset.code);
-          e.stopPropagation();
-          return;
-        }
-        const c = CONTRACTS.find(x=>x.code === chip.dataset.code);
-        if (c) pick(c);
-      });
-    });
-  }
-  _freqRenderers.push(renderFreq);
-
-  function saveFreq(){
+  key(){ return FAV_KEYS[this.mode] || FAV_KEYS.F; },
+  setMode(mKey){
+    if (!FAV_KEYS[mKey]) return;
+    this.mode = mKey;
+    this.render();
+  },
+  add(code){
+    if (!code){ alert('请先在搜索框里选好标的'); return; }
+    const k = this.key(), cur = settingsCache[k] || [];
+    if (cur.indexOf(code) >= 0){ alert('该标的已在自选中'); return; }
+    settingsCache[k] = [...cur, code];
+    this.save(k);
+  },
+  remove(code){
+    const k = this.key();
+    settingsCache[k] = (settingsCache[k] || []).filter(x => x !== code);
+    this.save(k);
+  },
+  save(k){
     return fetchT('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({[freqKey]: settingsCache[freqKey] || []})}).then(r=>r.json()).then(d=>{
+      body:JSON.stringify({[k]: settingsCache[k] || []})}).then(r=>r.json()).then(d=>{
       if (d.ok && d.settings) settingsCache = d.settings;
-      _freqRenderers.forEach(fn=>fn());
+      this.render();
     });
-  }
-  function addFreq(code){
-    const cur = settingsCache[freqKey] || [];
-    if (cur.indexOf(code) >= 0) { alert('该标的已在常用中'); return; }
-    settingsCache[freqKey] = [...cur, code];
-    saveFreq();
-  }
-  function removeFreq(code){
-    settingsCache[freqKey] = (settingsCache[freqKey] || []).filter(x=>x !== code);
-    saveFreq();
-  }
+  },
+  render(){
+    const box = $('favList');
+    if (!box) return;
+    const hd = $('favModeTxt');
+    if (hd) hd.textContent = FAV_MODE_TXT[this.mode] || '';
+    const codes = settingsCache[this.key()] || [];
+    const items = codes
+      .map(code => CONTRACTS.find(x => String(x.code).toLowerCase() === String(code).toLowerCase()))
+      .filter(Boolean);
+    const empty = $('favEmpty');
+    if (empty) empty.classList.toggle('hidden', items.length > 0);
+    box.innerHTML = items.map(c => {
+      const on = String(selCode[this.mode] || '').toLowerCase() === String(c.code).toLowerCase();
+      return '<div class="fav-item' + (on ? ' active' : '') + '" data-code="' + escHtml(c.code)
+        + '" title="点击选中 ' + escHtml(c.name) + '">'
+        + '<span class="nm">' + escHtml(c.name) + '</span>'
+        + '<span class="cd">' + escHtml(c.code) + '</span>'
+        + '<span class="x" title="从自选移除">×</span></div>';
+    }).join('');
+  },
+};
+
+/* 自选列只属于「开仓计算」页; 加仓模式没有标的 → 一起收起 */
+function syncFavCol(tab){
+  const col = $('favCol');
+  if (!col) return;
+  const on = (tab === 'calc') && curMode !== 'addon';
+  col.classList.toggle('hidden', !on);
+  if (on) FAV.setMode(curMode === 'futures' ? 'F' : (curMode === 'dual' ? 'D' : 'O'));
+}
+
+/* 点自选条目 = 选中该标的(走与搜索点击同一条 pick 路径); 点 × 移除 */
+document.addEventListener('click', e => {
+  const it = e.target.closest ? e.target.closest('#favList .fav-item') : null;
+  if (!it) return;
+  if (e.target.classList.contains('x')){ FAV.remove(it.dataset.code); return; }
+  const c = CONTRACTS.find(x => String(x.code).toLowerCase() === String(it.dataset.code).toLowerCase());
+  const fn = FAV.pickers[FAV.mode];
+  if (c && fn) fn(c);
+});
+
+function initContractSearch(inputId, listId, favBtnId, mode, onPick){
+  const input = $(inputId), list = $(listId), favBtn = $(favBtnId);
+  const mKey = mode==='futures' ? 'F' : (mode==='dual' ? 'D' : 'O');   // v50.59: D = 期权双买
+  let items = [];
 
   function render(q){
     q = (q||'').trim().toLowerCase();
@@ -7472,17 +7527,13 @@ function initContractSearch(inputId, listId, freqId, favBtnId, mode, onPick){
     input.blur();
     if (isSwitch) clearPrices(mKey);   // 先清空再加载新品种
     onPick(c);
-    _freqRenderers.forEach(fn=>fn());   // 刷新 active 状态
+    FAV.render();   // 刷新自选列表的选中态
   }
 
-  favBtn.addEventListener('click', ()=>{
-    if (!selCode[mKey]) { alert('请先在搜索框里选好标的'); return; }
-    addFreq(selCode[mKey]);
-  });
+  favBtn.addEventListener('click', ()=>{ FAV.add(selCode[mKey]); });
 
-  // 暴露统一刷新入口
-  initContractSearch._renderFreqAll = ()=>_freqRenderers.forEach(fn=>fn());
-  renderFreq();   // 初次渲染
+  // v51.09: 注册给侧栏自选列用 —— 点自选条目 = 走同一条 pick 路径
+  FAV.pickers[mKey] = pick;
 }
 
 function pickContract(c, which){
@@ -7647,6 +7698,9 @@ function setMode(m){
   if (typeof renderPlans === 'function' && curMode !== 'addon') renderPlans();   // 最近方案区(三种模式各一套)
   if (typeof applyEquityForMode === 'function') applyEquityForMode(curMode);   // 切到该模式自己的权益
   if (typeof updateDualLegUI === 'function') updateDualLegUI();               // 双买价格/权利金联动提示
+  // v51.09: 自选列跟着模式换(但只在开仓计算页才显示, 在交易记录页调 setMode 不该冒出来)
+  if (typeof syncFavCol === 'function')
+    syncFavCol(($('calcArea') && !$('calcArea').classList.contains('hidden')) ? 'calc' : 'other');
   // ⚠ v50.60: 换模式先把结果区清空; 换回「上次算过的模式」才恢复它自己的结果
   restoreResultForMode(curMode);
 }
@@ -11596,6 +11650,7 @@ const FundUI = {
         const tab = t.dataset.tab;
         localStorage.setItem('oc-last-tab', tab);
         $('calcArea').classList.toggle('hidden', tab !== 'calc');
+        if (typeof syncFavCol === 'function') syncFavCol(tab);   // v51.09: 自选列只在开仓计算页出现
         $('fundsArea').classList.toggle('hidden', tab !== 'funds');
         const isTradeTab = (tab === 'trades' || tab === 'tradesDual' || tab === 'tradesFut');
         $('tradesArea').classList.toggle('hidden', !isTradeTab);

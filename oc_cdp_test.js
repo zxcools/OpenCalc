@@ -6061,6 +6061,91 @@ async function main() {
         JSON.stringify({api: v107.api, detail: v107.detailN, meta: (v107.meta || '').slice(0, 80)}));
   check('开仓状态(v51.07): 用例清理干净', v107.cleaned === true, String(v107.cleaned));
 
+  // ===== v51.09: 自选列表(侧栏一列, 三模式独立) =====
+  const v109 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r=>setTimeout(r,ms));
+    const q = id => document.getElementById(id);
+    const out = {alerts: []};
+    const _al = window.alert; window.alert = m => out.alerts.push(String(m));
+    const KEYS = ['frequent_futures','frequent_options','frequent_dual'];
+    const clearAll = async () => {
+      for (const k of KEYS) await fetch('/api/settings',{method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({[k]:[]})});
+      const sd = await (await fetch('/api/settings')).json();
+      if (sd.ok) settingsCache = sd.settings;
+    };
+    const items = () => [...document.querySelectorAll('#favList .fav-item')];
+    try {
+      await clearAll();
+      document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(700);
+      setMode('futures'); await w(600);
+      out.colOnCalc = !q('favCol').classList.contains('hidden');
+      out.modeTxtF = q('favModeTxt').textContent;
+      out.emptyHint = !q('favEmpty').classList.contains('hidden');
+
+      const rb = CONTRACTS.find(x => String(x.code).toLowerCase() === 'rb');
+      selCode.F = rb.code; pickContract(rb, 'F'); await w(500);
+      q('favF').click(); await w(1000);
+      out.fut = items().map(x => (x.querySelector('.nm')||{}).textContent + '/' + (x.querySelector('.cd')||{}).textContent);
+
+      setMode('options'); await w(700);
+      out.modeTxtO = q('favModeTxt').textContent;
+      out.optEmpty = items().length === 0;
+      const si = CONTRACTS.find(x => String(x.code).toLowerCase() === 'si');
+      selCode.O = si.code; pickContract(si, 'O'); await w(400);
+      q('favO').click(); await w(1000);
+      out.opt = items().map(x => (x.querySelector('.nm')||{}).textContent + '/' + (x.querySelector('.cd')||{}).textContent);
+
+      setMode('dual'); await w(700);
+      out.dualEmpty = items().length === 0;
+
+      // 回期货点自选条目 → 直接选中
+      setMode('futures'); await w(700);
+      selCode.F = null; q('cSearch').value = '';
+      const it = items()[0];
+      out.itemBefore = it ? it.textContent.replace('×','').trim() : '';
+      it.click(); await w(1000);
+      out.picked = {sel: selCode.F || '', input: q('cSearch').value || '',
+                    active: !!document.querySelector('#favList .fav-item.active')};
+
+      // 显隐: 交易记录页 / 加仓模式都不该出现
+      document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(800);
+      out.colHiddenTrades = q('favCol').classList.contains('hidden');
+      document.querySelector('#mainTabs .maintab[data-tab="calc"]').click(); await w(700);
+      out.colBackCalc = !q('favCol').classList.contains('hidden');
+      document.querySelector('.mode[data-mode="addon"]').click(); await w(700);
+      out.colHiddenAddon = q('favCol').classList.contains('hidden');
+      document.querySelector('.mode[data-mode="futures"]').click(); await w(700);
+      out.colBackFut = !q('favCol').classList.contains('hidden');
+
+      // 参数区不该再有「常用：」那行
+      out.noFreqRow = document.querySelectorAll('.freq').length === 0;
+
+      await clearAll();
+      return JSON.stringify(out);
+    } finally { window.alert = _al; }
+  })()`));
+  check('自选(v51.09): 开仓计算页显示自选列, 空了给提示, 标题跟着模式走',
+        v109.colOnCalc === true && v109.emptyHint === true && v109.modeTxtF === '期货',
+        JSON.stringify({col: v109.colOnCalc, empty: v109.emptyHint, t: v109.modeTxtF}));
+  check('自选(v51.09): 三个模式各自独立 —— 期货加了 rb 不影响期权买方, 双买仍是空',
+        v109.fut.length === 1 && /rb/.test(v109.fut[0]) && v109.optEmpty === true
+        && v109.dualEmpty === true && v109.modeTxtO === '期权买方',
+        JSON.stringify({fut: v109.fut, optEmpty: v109.optEmpty, dualEmpty: v109.dualEmpty}));
+  check('自选(v51.09): 期权买方加的是自己的 si, 不带期货那份',
+        v109.opt.length === 1 && /si/.test(v109.opt[0]), JSON.stringify(v109.opt));
+  check('自选(v51.09): 点自选条目 = 直接选中该标的(输入框与 selCode 同步, 条目高亮)',
+        v109.picked.sel && /rb/i.test(v109.picked.sel) && /rb/i.test(v109.picked.input)
+        && v109.picked.active === true,
+        JSON.stringify({picked: v109.picked, before: v109.itemBefore}));
+  check('自选(v51.09): 只在开仓计算页出现(交易记录页/加仓模式都收起)',
+        v109.colHiddenTrades === true && v109.colBackCalc === true
+        && v109.colHiddenAddon === true && v109.colBackFut === true,
+        JSON.stringify({trades: v109.colHiddenTrades, calc: v109.colBackCalc,
+                        addon: v109.colHiddenAddon, fut: v109.colBackFut}));
+  check('自选(v51.09): 参数区原来的「常用：」那行已移除',
+        v109.noFreqRow === true, String(v109.noFreqRow));
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();

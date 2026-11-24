@@ -2659,6 +2659,19 @@ trade_import_record({"id": 90310, "underlying": _u107, "contract": "cu2612C70000
 check("开仓状态(v51.07): 备份导入带得过去(否则恢复后止盈倍数变回 2/3/4/6)",
       [x for x in trade_list_records(mode="options") if x["id"] == 90310][0]["open_state"] == "trail", '')
 
+# ===== v51.09: 自选列表三模式独立(期权双买单独一份) =====
+print("\n== 自选 v51.09 ==")
+_orig_fd = get_settings().get("frequent_dual")
+_orig_fo = get_settings().get("frequent_options")
+save_settings({"frequent_dual": ["cu", "si"]})
+save_settings({"frequent_options": ["rb"]})
+_gs109 = get_settings()
+check("自选(v51.09): 期权双买单独一份, 与期权买方互不影响",
+      _gs109.get("frequent_dual") == ["cu", "si"] and _gs109.get("frequent_options") == ["rb"],
+      str({k: _gs109.get(k) for k in ("frequent_options", "frequent_dual")}))
+save_settings({"frequent_dual": _orig_fd or []})
+save_settings({"frequent_options": _orig_fo or []})
+
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
