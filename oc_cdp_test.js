@@ -2496,6 +2496,13 @@ async function main() {
         row = opsTbl.tBodies[0].rows[0];
       }
       deltaCell = (row && row.children[3] && row.children[3].textContent || '').trim();
+      // v51.10: 行已经在了但 delta 单元格还可能空一拍(偶发空串导致假失败) → 再轮询到有 4 位小数
+      for (let i = 0; i < 16; i++) {
+        if (/^-?\d+\.\d{4}$/.test(deltaCell)) break;
+        await new Promise(r => setTimeout(r, 250));
+        const r2 = opsTbl.tBodies[0].rows[0];
+        deltaCell = (r2 && r2.children[3] && r2.children[3].textContent || '').trim();
+      }
       for (const op of (dd.operations || [])) {
         await fetch('/api/trades/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
       }
@@ -6145,6 +6152,31 @@ async function main() {
                         addon: v109.colHiddenAddon, fut: v109.colBackFut}));
   check('自选(v51.09): 参数区原来的「常用：」那行已移除',
         v109.noFreqRow === true, String(v109.noFreqRow));
+
+  // ===== v51.10: 首屏(不点任何 tab)自选列就该显示 =====
+  await evalJs(ws, `localStorage.setItem('oc-last-tab','calc'); location.reload(); 'ok'`).catch(() => {});
+  let favFirst = null;
+  for (let i = 0; i < 40; i++){
+    await new Promise(r => setTimeout(r, 250));
+    try {
+      const t = await evalJs(ws, `(() => {
+        const c = document.getElementById('favCol');
+        if (!c) return '';
+        const a = document.querySelector('#mainTabs .maintab.active');
+        return JSON.stringify({hidden: c.classList.contains('hidden'),
+                               tab: a ? a.dataset.tab : '',
+                               items: document.querySelectorAll('#favList .fav-item').length,
+                               ready: document.readyState});
+      })()`);
+      if (!t) continue;
+      favFirst = JSON.parse(t);
+      // 等到 load 完成**且**列已显示; 真的不显示就耗满 10s 后按最后一次判定(会失败, 正是要抓的回归)
+      if (favFirst.ready === 'complete' && favFirst.hidden === false) break;
+    } catch (e) { /* 重载瞬间执行上下文不可用, 继续等 */ }
+  }
+  check('自选(v51.10): 刚打开就停在开仓计算页时, 自选列直接可见(不用切走再切回)',
+        !!favFirst && favFirst.hidden === false && favFirst.tab === 'calc',
+        JSON.stringify(favFirst));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5109            # 与 README 版本号 v51.09 对齐(数值比较用于单实例接管)
+APP_VERSION = 5110            # 与 README 版本号 v51.10 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -11695,6 +11695,13 @@ const FundUI = {
         const first = document.querySelector('#mainTabs .maintab:not(.tab-off)');
         if (first) first.click();
       }
+    }
+    // v51.10: 启动时也要同步一次自选列
+    //   ⚠ 原来只有「点 tab」才会调 syncFavCol —— 首屏默认就停在计算器时没人调, 列一直是 hidden,
+    //     必须切走再切回才出现。这里按最终激活的页面补一次。
+    if (typeof syncFavCol === 'function') {
+      const _actTab = document.querySelector('#mainTabs .maintab.active');
+      syncFavCol(_actTab ? _actTab.dataset.tab : 'calc');
     }
   },
 
