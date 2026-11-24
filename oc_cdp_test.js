@@ -6178,6 +6178,43 @@ async function main() {
         !!favFirst && favFirst.hidden === false && favFirst.tab === 'calc',
         JSON.stringify(favFirst));
 
+  // ===== v51.11: 期权买方详情「当前剩余风险」 =====
+  const v111 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r=>setTimeout(r,ms));
+    const q = id => document.getElementById(id);
+    const post = (p,b) => fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(b)}).then(r=>r.json());
+    const out = {};
+    const U = 'e2erisk2612';
+    await post('/api/trades/upsert', {underlying:U, contract:'cu2612C72000', op_type:'open', direction:'buy',
+      open_date:'2026-11-02', open_price:500, qty:4, premium:10000, call_put:'C', mode:'options', batch:''});
+    await post('/api/trades/upsert', {underlying:U, contract:'cu2612C72000', op_type:'close', direction:'buy',
+      close_date:'2026-11-06', close_price:600, close_qty:2, pnl:1000, mode:'options', batch:''});
+    TradeUI.setMode('options');
+    document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(700);
+    await TradeUI.refresh();
+    TradeUI.loadDetail(U, ''); await w(1400);
+    const box = q('tdRisk');
+    out.txt = box ? box.textContent.replace(/\\s+/g, ' ').trim() : '';
+    out.shown = !!box && box.offsetParent !== null;
+    // 切到双买模式后再渲染一次: 这块必须被清空(双买没有这个口径)
+    TradeUI.setMode('dual');
+    document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]').click(); await w(800);
+    TradeUI.renderRiskStrip({premium:{open:1, closed:2, holding:3, residual:-1}});
+    await w(200);
+    out.dualHtml = (q('tdRisk') || {}).innerHTML || '';
+    const d = await (await fetch('/api/trades/detail?mode=options&underlying=' + U + '&batch=')).json();
+    for (const op of (d.operations || [])) await fetch('/api/trades/delete', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+    return JSON.stringify(out);
+  })()`));
+  check('剩余风险(v51.11): 详情页显示 已平仓权利金 6,000 / 持仓权利金 5,000 / 剩余风险 +1,000',
+        v111.shown === true && /当前剩余风险/.test(v111.txt)
+        && /\+¥ 1,000/.test(v111.txt) && /¥ 6,000/.test(v111.txt) && /¥ 5,000/.test(v111.txt),
+        v111.txt);
+  check('剩余风险(v51.11): 只在期权买方出现(双买模式渲染时整块清空)',
+        (v111.dualHtml || '').indexOf('当前剩余风险') < 0, String(v111.dualHtml).slice(0, 120));
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();
