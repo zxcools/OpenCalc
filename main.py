@@ -33,14 +33,39 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5106            # 与 README 版本号 v51.06 对齐(数值比较用于单实例接管)
+APP_VERSION = 5107            # 与 README 版本号 v51.07 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
-FUTURES_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期货风险额度可选档位(%)
-OPTIONS_RISK_OPTIONS = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期权风险额度可选档位(%)
-OPTIONS_RISK_RATIO = 0.03    # 期权默认开仓金额比例 3% (可选项 0.5/1/1.5/2/3/4/5, 默认 3%)
+# v51.07: 加 0.75% —— 「移动止损触发后开仓」的期权默认档位
+FUTURES_RISK_OPTIONS = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期货风险额度可选档位(%)
+OPTIONS_RISK_OPTIONS = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # 期权风险额度可选档位(%)
+OPTIONS_RISK_RATIO = 0.03    # 期权默认开仓金额比例 3% (正常开仓)
+OPTIONS_RISK_RATIO_TRAIL = 0.0075   # v51.07: 移动止损触发后开仓, 默认 0.75%
 OPTIONS_TP_MULTIPLES = (2, 3, 4, 6)    # 期权买方止盈目标价 = 当前期权价格 × N (v50.90: 2/4/8/16 → 2/3/4/6)
+# v51.07: 开仓状态 —— 正常开仓 / 移动止损触发后开仓(仓位更小、止盈目标更远)
+OPEN_STATE_NORMAL = "normal"
+OPEN_STATE_TRAIL = "trail"
+OPEN_STATES = (OPEN_STATE_NORMAL, OPEN_STATE_TRAIL)
+OPEN_STATE_NAMES = {OPEN_STATE_NORMAL: "正常开仓", OPEN_STATE_TRAIL: "移动止损触发后开仓"}
+OPTIONS_TP_MULTIPLES_TRAIL = (4, 8, 12, 16)
+
+
+def norm_open_state(v):
+    """开仓状态归一: 只认 normal / trail, 其余(含空) → normal(老数据行为不变)"""
+    s = str(v or "").strip().lower()
+    return s if s in OPEN_STATES else OPEN_STATE_NORMAL
+
+
+def tp_multiples_of(state):
+    """该开仓状态对应的止盈目标倍数"""
+    return OPTIONS_TP_MULTIPLES_TRAIL if norm_open_state(state) == OPEN_STATE_TRAIL else OPTIONS_TP_MULTIPLES
+
+
+def risk_default_of(state):
+    """该开仓状态对应的默认风险额度(小数)"""
+    return OPTIONS_RISK_RATIO_TRAIL if norm_open_state(state) == OPEN_STATE_TRAIL else OPTIONS_RISK_RATIO
+
 MIN_PROFIT_LOSS_RATIO = 1.5  # 盈亏比阈值
 
 # 行情相关
@@ -954,7 +979,9 @@ def calc_options(params):
         if abs(delta) > 1:
             raise ValueError("delta 的绝对值不能大于 1")
 
-    # 风险额度(占权益的百分比, 如 3 = 3%): 用户可自定义; 留空则默认 3%
+    # 风险额度(占权益的百分比, 如 3 = 3%): 用户可自定义; 留空按开仓状态给默认
+    #   v51.07: 正常开仓 3% / 移动止损触发后开仓 0.75%
+    state = norm_open_state(params.get("open_state"))
     risk_percent = params.get("risk_percent")
     if risk_percent not in (None, ""):
         rp = _num(risk_percent, "风险额度百分比")
@@ -962,7 +989,7 @@ def calc_options(params):
             raise ValueError("风险额度百分比必须大于 0")
         risk_ratio = rp / 100.0
     else:
-        risk_ratio = OPTIONS_RISK_RATIO
+        risk_ratio = risk_default_of(state)
 
     budget = equity * risk_ratio
     # 每手权利金 = 期权报价 × 合约乘数
@@ -978,7 +1005,7 @@ def calc_options(params):
     # 止盈目标价(v50.84): 期权价格涨到 N 倍 → 每手权利金 ×N, 持仓价值 = 每手 × 手数
     #   ⚠ 单腿买方的持仓价值就是这一腿的权利金市值(没有第二条腿分摊), 所以目标价 = 当前报价 × N
     targets = []
-    for n in OPTIONS_TP_MULTIPLES:
+    for n in tp_multiples_of(state):
         per_lot = round(premium_per_lot * n, 2)
         value = round(per_lot * max_lots, 2)
         targets.append({
@@ -1007,6 +1034,10 @@ def calc_options(params):
         "contract_code": ("%s%s%s%s" % (contract["code"], month, cp, _fmt_num(strike))) if (month and strike) else "",
         "risk_ratio": risk_ratio,
         "risk_percent": risk_ratio * 100,
+        # v51.07: 开仓状态(正常 / 移动止损触发后) —— 决定默认风险额度与止盈倍数
+        "open_state": state,
+        "open_state_name": OPEN_STATE_NAMES[state],
+        "tp_multiples": list(tp_multiples_of(state)),
         "budget": budget,
         "entry_price": entry,                     # 期权报价(不含乘数)
         "premium_per_lot": premium_per_lot,       # 每手权利金 = 报价 × 乘数
@@ -2523,6 +2554,7 @@ def _db_ensure_schema(conn):
         ("close_time", "TEXT"),                         # v50.70 平仓时间 HH:MM
         ("close_today", "TEXT"),                        # v50.74 平今/平昨 手选: ''自动 / '1'平今 / '0'平昨
         ("close_reason", "TEXT"),                       # v51.02 平仓原因(止损触发/阶段止盈/跟踪止损/换月/到期…)
+        ("open_state", "TEXT"),                         # v51.07 开仓状态: normal 正常 / trail 移动止损触发后
     ])
     _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
     _ensure_cols("trade_reviews", [
@@ -3161,6 +3193,8 @@ def _trade_record_to_dict(r):
         "close_today": ((r["close_today"] if "close_today" in r.keys() else "") or ""),
         # v51.02: 平仓原因(老库没有该列 → 空串)
         "close_reason": ((r["close_reason"] if "close_reason" in r.keys() else "") or ""),
+        # v51.07: 开仓状态原样带出('' = 没记/平仓行; 消费方用 norm_open_state 兜底成 normal)
+        "open_state": ((r["open_state"] if "open_state" in r.keys() else "") or ""),
         "created_at": r["created_at"] or "",
         "updated_at": r["updated_at"] or "",
     }
@@ -3296,6 +3330,8 @@ def trade_upsert(payload):
         "close_today",
         # v51.02: 平仓原因(只对 close 行有意义; open 行为空)
         "close_reason",
+        # v51.07: 开仓状态(期权买方) —— 决定默认风险额度与阶段止盈倍数
+        "open_state",
     )
     payload["open_time"] = (payload.get("open_time") or "").strip()[:5]
     payload["close_time"] = (payload.get("close_time") or "").strip()[:5]
@@ -3345,6 +3381,10 @@ def trade_upsert(payload):
     _cr = payload.get("close_reason")
     _cr = (str(_cr).strip() if _cr is not None else "")[:20]
     payload["close_reason"] = _cr if payload.get("op_type") == "close" else ""
+    # v51.07: 开仓状态归一(normal/trail); 只有「期权买方 + 开仓行」才有这个口径, 其余存空
+    payload["open_state"] = (norm_open_state(payload.get("open_state"))
+                             if (payload.get("op_type") == "open" and payload.get("mode") == "options")
+                             else "")
     vals = [payload.get(f) for f in fields]
     if rec_id:
         existing = db.execute("SELECT created_at FROM trade_records WHERE id=?", (rec_id,)).fetchone()
@@ -3506,6 +3546,19 @@ def _options_tp_targets(underlying, mode, holdings, opens):
     """
     if mode != "options":
         return []
+    # v51.07: 止盈倍数按**该批次的开仓状态**取(移动止损触发后 → 4/8/12/16)
+    #   同一批次应当一致; 取最早带状态的持仓记录, 都没有 → normal(老数据行为不变)
+    _state = OPEN_STATE_NORMAL
+    for _h in (holdings or []):
+        if _h.get("open_state"):
+            _state = norm_open_state(_h.get("open_state"))
+            break
+    else:
+        for _o in (opens or []):
+            if _o.get("open_state"):
+                _state = norm_open_state(_o.get("open_state"))
+                break
+    _mults = tp_multiples_of(_state)
     src = list(holdings or [])
     if not src:
         # 全平完 → 退回开仓记录(等价于「这些合约当时若还拿着」的目标价)
@@ -3521,7 +3574,7 @@ def _options_tp_targets(underlying, mode, holdings, opens):
         per_lot = round(price * mult, 6)           # 每手权利金 = 报价 × 乘数
         cost = round(per_lot * qty, 2)
         targets = []
-        for n in OPTIONS_TP_MULTIPLES:
+        for n in _mults:
             pl = round(per_lot * n, 2)
             value = round(pl * qty, 2)
             targets.append({
@@ -3655,10 +3708,13 @@ def _holdings_from_items(underlying, items, with_risk=False):
             "orig_contract": x["contract"], "call_put": x["call_put"], "direction": x["direction"],
             "opens": [], "left": 0, "cost_left": 0.0, "premium_left": 0.0, "last_open_date": "",
             "mult": 1.0, "mr": None, "risk_left": 0.0, "no_stop_lots": 0,
+            "open_state": "",     # v51.07: 该合约的开仓状态(取第一笔带值的)
         })
         qty = x["qty"] or 0
         if qty <= 0:
             continue
+        if not g["open_state"] and x.get("open_state"):
+            g["open_state"] = norm_open_state(x.get("open_state"))
         # 每手均价 + 每手权利金(平均到每手), close 时按手数精确扣减
         g["opens"].append({
             "qty_left": qty,
@@ -3716,6 +3772,7 @@ def _holdings_from_items(underlying, items, with_risk=False):
             "qty": g["left"],
             "premium": round(g["premium_left"], 2),
             "last_open_date": g["last_open_date"],
+            "open_state": g.get("open_state") or "",   # v51.07
         }
         if with_risk:
             # 逐手累加「有止损那部分」的风险; 没设止损的手数单列(不能当成 0 风险)
@@ -3991,6 +4048,13 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             _iv, _iv_pct = x["iv"], x.get("iv_pct")
             break
 
+    # v51.07: 开仓状态(正常 / 移动止损触发后) —— 取该批次最早一条带值的开仓记录
+    _state = OPEN_STATE_NORMAL
+    for x in opens:
+        if x.get("open_state"):
+            _state = norm_open_state(x.get("open_state"))
+            break
+
     return {"underlying": underlying, "batch": batch or "",
             "direction": direction,
             "open_date": min(open_dates) if open_dates else "",
@@ -3998,6 +4062,10 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             "total_pnl": round(total_pnl, 2),
             "last_close_date": max(close_dates) if close_dates else "",
             "iv": _iv, "iv_pct": _iv_pct,
+            # v51.07: 开仓状态与它对应的止盈倍数(详情页标题/止盈表用)
+            "open_state": _state,
+            "open_state_name": OPEN_STATE_NAMES[_state],
+            "tp_multiples": list(tp_multiples_of(_state)),
             # v50.70: 手续费合计 / 净盈亏(毛盈亏 − 手续费) / 当前手续费口径
             "fee_total": fee_total,
             "fee_mode": norm_fee_mode(fee_mode),
@@ -4111,6 +4179,8 @@ _TRADE_IMPORT_COLS = (
     "close_today",
     # v51.02: 平仓原因(不带上 → 备份恢复后原因全丢)
     "close_reason",
+    # v51.07: 开仓状态(不带上 → 恢复后移动止损那批又变回正常开仓, 止盈倍数跟着错)
+    "open_state",
 )
 
 
@@ -4257,6 +4327,11 @@ def trade_import_record(r):
         # v51.02: 平仓原因(与 trade_upsert 同口径: 只留 close 行, 截 20 字)
         "close_reason": ((str(r.get("close_reason") or "").strip())[:20]
                          if r.get("op_type") == "close" else ""),
+        # v51.07: 开仓状态与 trade_upsert 同口径(只有期权买方开仓行才有)
+        "open_state": (norm_open_state(r.get("open_state"))
+                       if (r.get("op_type") == "open"
+                           and (r.get("mode") or TRADE_MODE_DEFAULT) == "options")
+                       else ""),
     }
     db = _fund_db()
     if row["id"] is None:
@@ -6038,6 +6113,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         </label>
         <select id="riskAmount">
           <option value="0.5">0.5%</option>
+          <option value="0.75">0.75%</option>
           <option value="1" selected>1%</option>
           <option value="1.5">1.5%</option>
           <option value="2">2%</option>
@@ -6128,6 +6204,16 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
           <button class="qref" id="qRefO">刷新</button>
         </div>
 
+        <!-- v51.07: 开仓状态 —— 正常开仓(默认 3%) / 移动止损触发后开仓(默认 0.75%, 止盈 4/8/12/16 倍) -->
+        <div class="dirrow">
+          <span class="dirlabel">开仓状态</span>
+          <div class="dseg" id="openStateSegO">
+            <button type="button" class="active" data-state="normal">正常开仓</button>
+            <button type="button" data-state="trail">移动止损触发后开仓</button>
+          </div>
+        </div>
+        <div class="wanhint" id="openStateHintO" style="color:var(--sub)"></div>
+
         <!-- v50.84: 合约年月与风险额度同一行(与双买一致) -->
         <div class="dual-row">
           <div>
@@ -6140,6 +6226,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             </label>
             <select id="riskAmountO">
               <option value="0.5">0.5%</option>
+              <option value="0.75">0.75%</option>
               <option value="1">1%</option>
               <option value="1.5">1.5%</option>
               <option value="2">2%</option>
@@ -6209,6 +6296,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <label>风险额度（占权益）</label>
             <select id="riskAmountD">
               <option value="0.5">0.5%</option>
+              <option value="0.75">0.75%</option>
               <option value="1">1%</option>
               <option value="1.5">1.5%</option>
               <option value="2">2%</option>
@@ -6881,6 +6969,14 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
 
         <label class="opt-only">开仓 delta
           <input id="tmOpenDelta" type="number" step="0.0001" min="0" max="1" placeholder="0.1900">
+        </label>
+        <!-- v51.07: 开仓状态(仅期权买方 + 开仓) —— 决定详情页阶段止盈倍数 -->
+        <label class="opt-only" id="tmOpenStateWrap" style="display:none">开仓状态
+          <span class="seg pick" id="tmOpenState" role="group" aria-label="开仓状态">
+            <button type="button" class="pick-opt active" data-os="normal" aria-pressed="true">正常开仓</button>
+            <button type="button" class="pick-opt" data-os="trail" aria-pressed="false">移动止损触发后</button>
+          </span>
+          <span id="tmOpenStateHint" style="font-size:10.5px;color:var(--sub);margin-top:2px"></span>
         </label>
         <label class="fut-only" id="tmInitStopWrap">初次止损价
           <input id="tmInitStop" type="number" step="0.0001" min="0" placeholder="3450">
@@ -8221,6 +8317,40 @@ function renderF(d){
   }
 }
 
+/* ===== v51.07: 开仓状态(期权买方) =====
+   正常开仓: 默认 3% 权益, 阶段止盈 2/3/4/6 倍
+   移动止损触发后开仓: 默认 0.75% 权益, 阶段性止盈 4/8/12/16 倍(仓位更小、目标更远) */
+let openStateO = 'normal';
+const OPEN_STATE_TP_JS = {normal: [2, 3, 4, 6], trail: [4, 8, 12, 16]};
+
+function openStateRiskPct(st){ return (st === 'trail') ? 0.75 : 3; }
+
+function applyOpenStateO(st, setRisk){
+  openStateO = (st === 'trail') ? 'trail' : 'normal';
+  document.querySelectorAll('#openStateSegO button').forEach(b=>{
+    const on = b.dataset.state === openStateO;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  // 切状态时把风险额度一键切到该状态的默认档(用户仍可再手改)
+  if (setRisk && $('riskAmountO')) $('riskAmountO').value = String(openStateRiskPct(openStateO));
+  const h = $('openStateHintO');
+  if (h){
+    const tp = OPEN_STATE_TP_JS[openStateO].join(' / ') + ' 倍';
+    h.innerHTML = (openStateO === 'trail')
+      ? '移动止损触发后开仓：默认 <b>0.75%</b> 权益，阶段止盈 <b>' + tp + '</b>'
+      : '正常开仓：默认 <b>3%</b> 权益，阶段止盈 <b>' + tp + '</b>';
+  }
+}
+
+document.querySelectorAll('#openStateSegO button').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    applyOpenStateO(b.dataset.state, true);
+    if (curMode === 'options') calcOptions();
+  });
+});
+applyOpenStateO('normal', false);   // 初始化提示文案(不动风险额度默认值)
+
 function calcOptions(){
   const eq = (parseFloat($('equity').value) || 0) * 10000;   // 万元 → 元
   const price = parseFloat($('entryO').value);
@@ -8239,6 +8369,7 @@ function calcOptions(){
       strike: ($('optStrike') ? $('optStrike').value : ''),
       delta: ($('optDelta') ? $('optDelta').value : ''),
       entry: price,
+      open_state: openStateO,   // v51.07: 决定默认风险额度与止盈倍数
       risk_percent: $('riskAmountO').value ? parseFloat($('riskAmountO').value) : 3})})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ showError(d.error||'计算失败'); return; }
@@ -8279,7 +8410,9 @@ function renderO(d){
   }
   const b = $('rIvBadge');
   b.className = 'badge good';
-  const pct = (d.risk_percent != null ? d.risk_percent : 3).toFixed(1).replace(/\.0$/, '');
+  // v51.07: 0.75% 这类档位用 toFixed(1) 会被四舍五入成「0.8%」→ 改成最多 2 位、去掉尾随 0
+  const pct = (d.risk_percent != null ? d.risk_percent : 3)
+    .toLocaleString('en-US', {maximumFractionDigits: 2});
   b.innerHTML = '<span class="ico">◈</span>权益 × ' + pct + '%';
   /* v50.84/90: 止盈目标价位 —— 期权价格涨到 2/3/4/6 倍时, 直接给出下单价位与持仓价值
      ⚠ 单腿买方: 目标价 = 当前期权价格 × N(该腿权利金市值), 与左侧「期权价格」同一口径 */
@@ -8348,6 +8481,7 @@ async function addOptionsToTradeRecord(){
     qty: d.max_lots,
     premium: Math.round(d.premium_per_lot * d.max_lots * 100) / 100,   // 每手 × 手数
     open_delta: d.delta,
+    open_state: (d.open_state || openStateO),   // v51.07: 正常 / 移动止损触发后
     note: '来自开仓计算器 · ' + d.contract + (d.month ? ' ' + d.month : '')
           + (d.call_put === 'P' ? ' 看跌 put' : ' 看涨 call')
           + ' 行权价 ' + (d.strike_fmt || '—') + ' @' + fmtTrim(d.entry_price),
@@ -8393,7 +8527,7 @@ function showError(msg){
    ================================================================= */
 /* v50.83: 风险额度可选档位 —— 必须与后端 FUTURES_RISK_OPTIONS / OPTIONS_RISK_OPTIONS 一致
    (加档位时: 后端常量 + 三处 <select> + 这里, 缺一处就是「下拉里有、调出方案时恢复不了」) */
-const RISK_OPTS = [0.5, 1, 1.5, 2, 3, 4, 5];
+const RISK_OPTS = [0.5, 0.75, 1, 1.5, 2, 3, 4, 5];
 const PLAN_KEY = 'oc_futures_plans';
 const PLAN_MAX = 10;
 const PLAN_KEY_O = 'oc_options_plans';   // 期权方案独立存储, 与期货互不挤占
@@ -8733,6 +8867,7 @@ function saveCurrentPlan(){
       premium: rawVal('optPremium'),
       cp: optCpO(),
       riskPct: String($('riskAmountO').value || '3'),
+      openState: openStateO,                   // v51.07: 正常 / 移动止损触发后
       eqWan: rawVal('equity'),
     });
     persistPlans();
@@ -8782,6 +8917,8 @@ function recallPlan(p){
     $('entryO').value = p.entry;
     if ($('optPremium')) $('optPremium').value = p.premium || optPremFromPrice(p.entry);
     updateEntryOUI();
+    // v51.07: 先恢复开仓状态(会按状态切默认风险额度), 再用方案里存的风险额度覆盖
+    applyOpenStateO(p.openState || 'normal', true);
     const wantO = Number(p.riskPct);
     if (RISK_OPTS.indexOf(wantO) >= 0) $('riskAmountO').value = String(wantO);
     if (p.eqWan){                                          // 恢复该方案当时的总权益
@@ -8887,6 +9024,7 @@ const TradeUI = {
   // v51.02: 合约 → 到期日/剩余天数 缓存(按合约号缓, 一次刷新只请求一次)
   _dte: {},
   _closeToday: '',      // v50.74 平今/平昨 手选('' 自动 / '1' 平今 / '0' 平昨)
+  _openState: 'normal', // v51.07 开仓状态(期权买方): normal 正常 / trail 移动止损触发后
   // v50.81 主表排序: sortKey='' 表示默认顺序(后端给的「开仓时间倒序」);
   //   sortState: 0=默认 / 1=升序 / 2=降序 —— 点表头循环这三态
   sortKey: '',
@@ -9200,6 +9338,12 @@ const TradeUI = {
       this.syncCloseTodaySeg();
       this.syncCloseTodayHint(null);
       this._paintModalFee();      // v50.78: 只换高亮, 不用重新请求
+    });
+    // v51.07: 开仓状态分段(期权买方)
+    $('tradeModalBg').addEventListener('click', e => {
+      const b = e.target.closest ? e.target.closest('#tmOpenState .pick-opt') : null;
+      if (!b) return;
+      this.setOpenStateSeg(b.dataset.os || 'normal');
     });
     // 回车保存: 在 tradeModalBg 内任意 input/select 按 Enter 直接保存(shift+enter/textarea 不触发)
     $('tradeModalBg').addEventListener('keydown', e => {
@@ -9947,6 +10091,15 @@ const TradeUI = {
     return `<br>初次止损价 <b>${s1}</b>&nbsp;&nbsp;初次止盈价 <b>${t1}</b>`;
   },
 
+  /* v51.07: 期权买方「开仓状态」—— 只有移动止损触发后才占位置(正常开仓是默认, 不额外显示) */
+  openStateMetaExtra(d){
+    if (this.mode !== 'options') return '';
+    if ((d.open_state || 'normal') !== 'trail') return '';
+    const mults = (d.tp_multiples || [4, 8, 12, 16]).join(' / ');
+    return `<br><span class="tag" style="background:rgba(255,180,80,.18);color:#ffb450">移动止损触发后开仓</span>`
+      + `<span class="dim" style="font-size:11.5px"> · 阶段止盈 ${mults} 倍</span>`;
+  },
+
   /* v50.61 期权: 在 meta 行追加「当前 IV / IV 百分位」(该批次开仓时记录的值) */
   ivMetaExtra(d){
     if (d.iv == null && d.iv_pct == null) return '';   // 没记录过就不占位置
@@ -10053,7 +10206,9 @@ const TradeUI = {
     box.innerHTML =
       '<div class="dt-head">'
       + '<span class="dt-ico">🎯</span>'
-      + '<span class="dt-title">期权止盈目标价位<small>期权价格涨到 N 倍（＝当前期权价格 × N）时的价位与持仓价值</small></span>'
+      + '<span class="dt-title">期权止盈目标价位<small>期权价格涨到 '
+      + (d.tp_multiples || [2, 3, 4, 6]).join(' / ')
+      + ' 倍（＝当前期权价格 × N）时的价位与持仓价值</small></span>'
       + '<span class="dt-sum">权利金成本 <b>' + money(costAll) + '</b> · ' + qtyAll + ' 手</span></div>'
       + '<table class="dual-target-tbl"><thead><tr>'
       + '<th>目标</th><th class="' + (gs[0].call_put === 'P' ? 'cp-put' : 'cp-call') + '">期权价格目标'
@@ -10248,7 +10403,8 @@ const TradeUI = {
       &nbsp;平仓时间 <b>${this.fmtDate(d.last_close_date)}</b>`
       + this.feeMetaExtra(d)
       + (this.isFut() ? this.futMetaExtra(d) : '')
-      + this.ivMetaExtra(d);
+      + this.ivMetaExtra(d)
+      + this.openStateMetaExtra(d);   // v51.07: 移动止损触发后开仓的标记
 
     // 持仓汇总
     const hb = $('tdHoldings');
@@ -10775,6 +10931,9 @@ const TradeUI = {
     // v51.02: 平仓原因只在平仓时出现
     if (document.getElementById('tmCloseReasonWrap'))
       document.getElementById('tmCloseReasonWrap').style.display = isOpen ? 'none' : '';
+    // v51.07: 开仓状态只在「期权买方 + 开仓」时出现(双买/期货/平仓都没有这个概念)
+    const _osWrap = document.getElementById('tmOpenStateWrap');
+    if (_osWrap) _osWrap.style.display = (isOpen && this.mode === 'options') ? '' : 'none';
 
     // 预设值(编辑模式)
     if (preset.id){
@@ -10797,9 +10956,11 @@ const TradeUI = {
       $('tmDirection').value = preset.direction || 'buy';
       $('tmNote').value = preset.note || '';
       if ($('tmCloseReason')) $('tmCloseReason').value = preset.close_reason || '';
+      this.setOpenStateSeg(preset.open_state || 'normal');   // v51.07
       if ($('tmInitStop')) $('tmInitStop').value = preset.init_stop != null ? preset.init_stop : '';
       if ($('tmInitTarget')) $('tmInitTarget').value = preset.init_target != null ? preset.init_target : '';
     } else {
+      this.setOpenStateSeg('normal');   // v51.07: 新建默认正常开仓
       // 默认日期
       const today = new Date().toISOString().slice(0,10);
       if (isOpen) $('tmOpenDate').value = today;
@@ -10949,6 +11110,22 @@ const TradeUI = {
 
   /* v50.74: 平今 / 平昨 手选 —— 只影响「手续费」按哪一档费率算, 不影响盈亏。
      有些品种平今与平昨差很多(平今 0 / 平昨 4.3 元/手这种), 自动按时间判不准时能强制。 */
+  /* v51.07: 开仓状态分段(期权买方) —— normal 正常 / trail 移动止损触发后 */
+  setOpenStateSeg(st){
+    this._openState = (st === 'trail') ? 'trail' : 'normal';
+    document.querySelectorAll('#tmOpenState .pick-opt').forEach(b=>{
+      const on = (b.dataset.os || 'normal') === this._openState;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const h = $('tmOpenStateHint');
+    if (h){
+      h.textContent = (this._openState === 'trail')
+        ? '移动止损触发后开仓：默认 0.75% 权益，阶段止盈 4× / 8× / 12× / 16×'
+        : '正常开仓：默认 3% 权益，阶段止盈 2× / 3× / 4× / 6×';
+    }
+  },
+
   syncCloseTodaySeg(){
     document.querySelectorAll('#tmCloseToday .pick-opt').forEach(b=>{
       const on = (b.dataset.ct || '') === (this._closeToday || '');
@@ -11169,6 +11346,8 @@ const TradeUI = {
       close_today: this._closeToday || '',
       // v51.02: 平仓原因(开仓行强制空)
       close_reason: isOpen ? '' : (($('tmCloseReason') || {}).value || ''),
+      // v51.07: 开仓状态(只有期权买方有这个口径; 其它模式/平仓行留空)
+      open_state: (this.mode === 'options' && isOpen) ? (this._openState || 'normal') : '',
       note: $('tmNote').value,
       mode: this.mode,
       batch: ($('tradeModalBg').dataset.batch || ''),   // v50.47: 跟随批次, 平仓/加仓落进同一条主页记录

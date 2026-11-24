@@ -1835,8 +1835,8 @@ for _b in ('Bm67a', 'Bm67b', 'Bm67c'):
 # 9c. 风险额度只接受白名单档位 (v50.30): 之前 999 也能存进配置; v50.83 白名单加了 4% / 5%
 print("\n== 风险额度设置校验 ==")
 from main import save_settings, FUTURES_RISK_OPTIONS as _FRO, OPTIONS_RISK_OPTIONS as _ORO
-check("风险额度档位常量含 4% / 5%",
-      4.0 in _FRO and 5.0 in _ORO and _FRO == _ORO == [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0],
+check("风险额度档位常量含 0.75% / 4% / 5%",
+      4.0 in _FRO and 5.0 in _ORO and 0.75 in _FRO and _FRO == _ORO == [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0],
       "%s / %s" % (_FRO, _ORO))
 _orig_f = get_settings().get('futures_risk_pct')
 try:
@@ -2612,6 +2612,52 @@ for _bad106, _why106 in (({"equity": 0, "position": "soft"}, "权益为 0"),
     except ValueError:
         _ok106 = True
     check("加仓计算(v51.06): 拒绝%s" % _why106, _ok106, '')
+
+print("\n== 开仓状态 v51.07 ==")
+from main import calc_options  # noqa: E402
+
+_osn = calc_options({"equity": 1000000, "code": "cu", "direction": "long", "entry": 900})
+_ost = calc_options({"equity": 1000000, "code": "cu", "direction": "long", "entry": 900,
+                     "open_state": "trail"})
+check("开仓状态(v51.07): 正常开仓默认风险额度 3%",
+      abs(_osn["risk_percent"] - 3.0) < 1e-9 and abs(_osn["budget"] - 30000) < 0.01,
+      str(_osn["risk_percent"]) + ' / ' + str(_osn["budget"]))
+check("开仓状态(v51.07): 移动止损触发后默认 0.75%",
+      abs(_ost["risk_percent"] - 0.75) < 1e-9 and abs(_ost["budget"] - 7500) < 0.01,
+      str(_ost["risk_percent"]) + ' / ' + str(_ost["budget"]))
+check("开仓状态(v51.07): 正常开仓止盈 2/3/4/6 倍",
+      [t["n"] for t in _osn["targets"]] == [2, 3, 4, 6], str([t["n"] for t in _osn["targets"]]))
+check("开仓状态(v51.07): 移动止损后止盈 4/8/12/16 倍",
+      [t["n"] for t in _ost["targets"]] == [4, 8, 12, 16], str([t["n"] for t in _ost["targets"]]))
+check("开仓状态(v51.07): 手填风险额度优先于状态默认",
+      abs(calc_options({"equity": 1000000, "code": "cu", "direction": "long", "entry": 900,
+                        "open_state": "trail", "risk_percent": 2})["risk_percent"] - 2.0) < 1e-9, '')
+check("开仓状态(v51.07): 非法状态退化为正常开仓",
+      calc_options({"equity": 1000000, "code": "cu", "direction": "long", "entry": 900,
+                    "open_state": "xx"})["open_state"] == "normal", '')
+
+_u107 = "ostate107"
+trade_upsert({"underlying": _u107, "contract": "cu2612C70000", "op_type": "open", "direction": "buy",
+              "open_date": "2026-11-02", "open_price": 900, "qty": 2, "premium": 18000,
+              "call_put": "C", "mode": "options", "batch": "", "open_state": "trail"})
+_d107 = trade_detail(_u107, mode="options", batch="")
+check("开仓状态(v51.07): 记录存得住并在详情里带出",
+      _d107["open_state"] == "trail" and _d107["open_state_name"] == "移动止损触发后开仓",
+      str(_d107.get("open_state")))
+check("开仓状态(v51.07): 详情阶段止盈目标跟着变成 4/8/12/16 倍",
+      [t["n"] for t in (_d107["tp_targets"][0]["targets"] if _d107["tp_targets"] else [])] == [4, 8, 12, 16],
+      str([t["n"] for t in (_d107["tp_targets"][0]["targets"] if _d107["tp_targets"] else [])]))
+trade_upsert({"underlying": _u107, "contract": "cu2612C70000", "op_type": "close", "direction": "buy",
+              "close_date": "2026-11-05", "close_price": 1000, "close_qty": 2, "pnl": 2000,
+              "mode": "options", "batch": ""})
+_cl107 = [x for x in trade_list_records(mode="options") if x["underlying"] == _u107 and x["op_type"] == "close"]
+check("开仓状态(v51.07): 平仓行不写这个字段(只有开仓行才有)",
+      bool(_cl107) and _cl107[0]["open_state"] == "", str(_cl107 and _cl107[0]["open_state"]))
+trade_import_record({"id": 90310, "underlying": _u107, "contract": "cu2612C70000", "op_type": "open",
+                     "direction": "buy", "open_date": "2026-11-02", "open_price": 900, "qty": 1,
+                     "premium": 9000, "call_put": "C", "mode": "options", "open_state": "trail"})
+check("开仓状态(v51.07): 备份导入带得过去(否则恢复后止盈倍数变回 2/3/4/6)",
+      [x for x in trade_list_records(mode="options") if x["id"] == 90310][0]["open_state"] == "trail", '')
 
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

@@ -4630,7 +4630,7 @@ async function main() {
     return JSON.stringify(out);
   })()`);
   const v83 = JSON.parse(v83Run);
-  const RISK_ALL = '0.5,1,1.5,2,3,4,5';
+  const RISK_ALL = '0.5,0.75,1,1.5,2,3,4,5';   // v51.07: 加 0.75%(移动止损触发后开仓的默认档)
   check('风险额度(v50.83): 期货/期权买方/双买三个下拉都含 4% 与 5%',
         v83.opts.riskAmount.join(',') === RISK_ALL && v83.opts.riskAmountO.join(',') === RISK_ALL
         && v83.opts.riskAmountD.join(',') === RISK_ALL, JSON.stringify(v83.opts));
@@ -5960,6 +5960,97 @@ async function main() {
   check('加仓计算(v51.06): 切回期货模式 → 加仓面板收起、结果不残留、方案区回来',
         v106.backFut.addonHidden === true && v106.backFut.resultAHidden === true
         && v106.backFut.plansShown === true, JSON.stringify(v106.backFut));
+
+  // ===== v51.07: 开仓状态(正常 / 移动止损触发后) =====
+  const v107 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r=>setTimeout(r,ms));
+    const q = id => document.getElementById(id);
+    const out = {alerts: []};
+    const _al = window.alert; window.alert = m => out.alerts.push(String(m));
+    try {
+      document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();
+      await w(600);
+      setMode('options'); await w(500);
+      const c = CONTRACTS.find(x => String(x.code).toLowerCase() === 'lc');
+      selCode.O = c.code; pickContract(c, 'O');
+      q('equity').value = '100'; q('equity').dispatchEvent(new Event('input'));
+      q('optMonth').value = '2701';
+      q('optStrike').value = '100000';
+      q('entryO').value = '2000'; q('entryO').dispatchEvent(new Event('input'));
+      onInput(); await w(1100);
+      const ns = () => [...document.querySelectorAll('#rTargetsO tbody tr')]
+        .map(tr => (tr.querySelector('.dt-n b') || {}).textContent || '').filter(Boolean);
+      out.normal = {n: ns().join(','), risk: q('riskAmountO').value,
+                    badge: (q('rIvBadge') || {}).textContent || ''};
+      document.querySelector('#openStateSegO button[data-state="trail"]').click();
+      await w(1100);
+      out.trail = {n: ns().join(','), risk: q('riskAmountO').value,
+                   badge: (q('rIvBadge') || {}).textContent || '',
+                   hint: (q('openStateHintO') || {}).textContent || ''};
+      document.querySelector('#openStateSegO button[data-state="normal"]').click();
+      await w(900);
+      out.backRisk = q('riskAmountO').value;
+
+      // 弹窗: 只有「期权买方 + 开仓」显示开仓状态
+      TradeUI.setMode('options');
+      document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(700);
+      TradeUI.openEditModal('open', {underlying: 'e2eos2612'});
+      await w(500);
+      out.dlgOpt = q('tmOpenStateWrap').offsetParent !== null;
+      q('tmCancel').click(); await w(300);
+      TradeUI.setMode('dual');
+      document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]').click(); await w(600);
+      TradeUI.openEditModal('open', {underlying: 'e2eos2612'});
+      await w(500);
+      out.dlgDual = q('tmOpenStateWrap').offsetParent !== null;
+      q('tmCancel').click(); await w(300);
+
+      // 保存一条「移动止损触发后」的期权买方记录 → 详情止盈表应是 4/8/12/16
+      TradeUI.setMode('options');
+      document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(700);
+      TradeUI.openEditModal('open', {underlying: 'e2eos2612'});
+      await w(500);
+      q('tmContract').value = 'cu2612C72000';
+      q('tmOpenDate').value = '2026-11-03';
+      q('tmOpenPrice').value = '900';
+      q('tmQty').value = '2';
+      q('tmOpenDelta').value = '0.3';
+      document.querySelector('#tmOpenState .pick-opt[data-os="trail"]').click();
+      await w(250);
+      out.saved = await TradeUI.submitModal();
+      await w(1200);
+      const d = await (await fetch('/api/trades/detail?mode=options&underlying=e2eos2612&batch=')).json();
+      out.api = {state: d.open_state, name: d.open_state_name,
+                 n: ((d.tp_targets || [])[0] || {}).targets ? d.tp_targets[0].targets.map(t => t.n).join(',') : ''};
+      const row = [...document.querySelectorAll('#tradesTable tbody tr')].find(x => x.textContent.indexOf('e2eos2612') >= 0);
+      if (row) row.click();
+      await w(1000);
+      out.meta = (q('tdMeta') || {}).textContent || '';
+      out.detailN = [...document.querySelectorAll('#tdTpTargets .dt-n b')].map(b => b.textContent).join(',');
+      // 清理
+      for (const op of (d.operations || [])) await fetch('/api/trades/delete', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
+      const g2 = await (await fetch('/api/trades/groups?mode=options')).json();
+      out.cleaned = !(g2.groups || []).some(x => x.underlying === 'e2eos2612');
+      return JSON.stringify(out);
+    } finally { window.alert = _al; }
+  })()`));
+  check('开仓状态(v51.07): 计算器默认正常开仓 —— 风险 3% / 止盈 2,3,4,6',
+        v107.normal.risk === '3' && /3%/.test(v107.normal.badge) && v107.normal.n === '2×,3×,4×,6×',
+        JSON.stringify(v107.normal));
+  check('开仓状态(v51.07): 切到移动止损触发后 —— 风险自动 0.75% / 止盈 4,8,12,16',
+        v107.trail.risk === '0.75' && /0\.75%/.test(v107.trail.badge)
+        && v107.trail.n === '4×,8×,12×,16×' && /0\.75%/.test(v107.trail.hint),
+        JSON.stringify(v107.trail));
+  check('开仓状态(v51.07): 切回正常开仓, 风险额度跟着回到 3%', v107.backRisk === '3', v107.backRisk);
+  check('开仓状态(v51.07): 开仓弹窗只在期权买方出现该选项(双买不出现)',
+        v107.dlgOpt === true && v107.dlgDual === false,
+        JSON.stringify({opt: v107.dlgOpt, dual: v107.dlgDual}));
+  check('开仓状态(v51.07): 记录存成 trail, 接口与详情止盈表都是 4/8/12/16',
+        v107.api.state === 'trail' && v107.api.n === '4,8,12,16'
+        && v107.detailN === '4×,8×,12×,16×' && /移动止损触发后开仓/.test(v107.meta),
+        JSON.stringify({api: v107.api, detail: v107.detailN, meta: (v107.meta || '').slice(0, 80)}));
+  check('开仓状态(v51.07): 用例清理干净', v107.cleaned === true, String(v107.cleaned));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
