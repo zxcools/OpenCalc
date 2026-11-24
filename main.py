@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5111            # 与 README 版本号 v51.11 对齐(数值比较用于单实例接管)
+APP_VERSION = 5112            # 与 README 版本号 v51.12 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -4057,11 +4057,11 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             _state = norm_open_state(x.get("open_state"))
             break
 
-    # v51.11: 期权买方「当前剩余风险」
+    # v51.11/v51.12: 期权买方「当前剩余风险」
     #   已平仓权利金 = 平仓时**收回**的权利金(平仓价 × 手数 × 乘数, 只算期权)
     #   持仓权利金   = 剩余持仓还压着的权利金成本(holdings 的 premium 合计)
-    #   当前剩余风险 = 已平仓权利金 − 持仓权利金
-    #     负数 → 还没收回成本, 差额就是裸风险; 0/正数 → 已收回成本, 正数部分是安全垫
+    #   当前剩余风险 = 持仓权利金 − 已平仓权利金
+    #     正数 → 还有这么多裸风险; 0 或负数 → 已经无风险(负数=多收回的部分)
     _open_premium = round(sum((x.get("premium") or 0) for x in opens), 2)
     _hold_premium = round(sum((h.get("premium") or 0) for h in holdings), 2)
     _closed_premium = 0.0
@@ -4088,7 +4088,7 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
                 "open": _open_premium,
                 "closed": _closed_premium,
                 "holding": _hold_premium,
-                "residual": round(_closed_premium - _hold_premium, 2),
+                "residual": round(_hold_premium - _closed_premium, 2),
             } if mode == "options" else None,
             # v50.70: 手续费合计 / 净盈亏(毛盈亏 − 手续费) / 当前手续费口径
             "fee_total": fee_total,
@@ -5809,7 +5809,7 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .risk-strip .k{display:block;font-size:10.5px;color:var(--sub);letter-spacing:.3px;margin-bottom:2px}
 .risk-strip .rs-main .v{font-size:20px;font-weight:800;line-height:1.25}
 .risk-strip .rs-main .v.warn{color:#ffb450}
-.risk-strip .rs-main .v.ok{color:var(--text)}
+.risk-strip .rs-main .v.safe{color:var(--accent);font-size:18px}
 .risk-strip .rs-main .sub{display:block;font-size:10.5px;color:var(--sub);margin-top:2px}
 .risk-strip .rs-cell b{font-size:13.5px;font-weight:700;color:var(--text)}
 @media (max-width:1180px){ .risk-strip{grid-template-columns:1fr 1fr;row-gap:12px} }
@@ -10268,8 +10268,8 @@ const TradeUI = {
   /* 期权买方(单腿) v50.85: 止盈目标价位 = 当前期权价格 × 2/3/4/6
      数据来自后端 trade_detail().tp_targets —— 手动新建 / 计算器加入的记录都按**当前持仓**现算:
      老合约平完、只拿着新合约时, 目标价自然跟着新合约的价格走 */
-  /* v51.11: 期权买方「当前剩余风险」= 已平仓权利金(收回) − 持仓权利金(还压着)
-     负数 → 还没收回成本, 绝对值就是裸风险; 0/正数 → 已收回成本, 正数是安全垫 */
+  /* v51.11/12: 期权买方「当前剩余风险」= 持仓权利金(还压着) − 已平仓权利金(已收回)
+     正数 → 还有这么多裸风险; 0 或负数 → 已经无风险(负数 = 多收回的部分) */
   renderRiskStrip(d){
     const box = $('tdRisk');
     if (!box) return;
@@ -10277,18 +10277,21 @@ const TradeUI = {
     if (this.mode !== 'options' || !p){ box.innerHTML = ''; return; }
     const money = v => '¥ ' + Number(v || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
     const res = Number(p.residual || 0);
-    const neg = res < 0;
-    const sign = res > 0 ? '+' : (res < 0 ? '−' : '');
+    const risky = res > 0;
+    const main = risky ? money(res) : '已无风险';
+    const sub = risky
+      ? '还剩这么多权利金裸风险'
+      : (res < 0 ? '已多收回 ' + money(-res) : '正好收回成本，风险归零');
     box.innerHTML =
       '<div class="risk-strip">'
       + '<div class="rs-main"><span class="k">当前剩余风险</span>'
-      + '<b class="v ' + (neg ? 'warn' : 'ok') + '">' + sign + money(Math.abs(res)) + '</b>'
-      + '<span class="sub">' + (neg ? '还没收回成本，仍有净敞口' : '已收回成本，靠的是安全垫') + '</span></div>'
+      + '<b class="v ' + (risky ? 'warn' : 'safe') + '">' + main + '</b>'
+      + '<span class="sub">' + sub + '</span></div>'
       + '<div class="rs-cell"><span class="k">已平仓权利金（收回）</span><b>' + money(p.closed) + '</b></div>'
       + '<div class="rs-cell"><span class="k">持仓权利金（还压着）</span><b>' + money(p.holding) + '</b></div>'
       + '<div class="rs-cell"><span class="k">开仓权利金（原始成本）</span><b>' + money(p.open) + '</b></div>'
       + '</div>'
-      + '<div class="tip" style="margin-top:6px">口径：当前剩余风险 = 已平仓权利金 − 持仓权利金</div>';
+      + '<div class="tip" style="margin-top:6px">口径：当前剩余风险 = 持仓权利金 − 已平仓权利金（正数=仍有风险，0 或负数=已无风险）</div>';
   },
 
   renderOptTargets(d){

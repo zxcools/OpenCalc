@@ -2672,38 +2672,39 @@ check("自选(v51.09): 期权双买单独一份, 与期权买方互不影响",
 save_settings({"frequent_dual": _orig_fd or []})
 save_settings({"frequent_options": _orig_fo or []})
 
-# ===== v51.11: 当前剩余风险 = 已平仓权利金 − 持仓权利金 =====
-print("\n== 剩余风险 v51.11 ==")
+# ===== v51.11/12: 当前剩余风险 = 持仓权利金 − 已平仓权利金 =====
+print("\n== 剩余风险 v51.11/12 ==")
 _u111 = "prem111"
+# 开 4 手 @500（cu 期权乘数 5 → 每手 2,500，合计 10,000）
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "open", "direction": "buy",
               "open_date": "2026-11-02", "open_price": 500, "qty": 4, "premium": 10000,
               "call_put": "C", "mode": "options", "batch": ""})
+# 平 1 手 @200 → 收回 200 × 1 × 5 = 1,000
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "close", "direction": "buy",
-              "close_date": "2026-11-06", "close_price": 600, "close_qty": 2, "pnl": 1000,
+              "close_date": "2026-11-06", "close_price": 200, "close_qty": 1, "pnl": -300,
               "mode": "options", "batch": ""})
-_d111 = trade_detail(_u111, mode="options", batch="")
-_p111 = _d111["premium"]
-check("剩余风险(v51.11): 已平仓权利金 = 平仓价 × 手数 × 乘数 (600×2×5=6,000)",
-      _p111["closed"] == 6000.0, str(_p111["closed"]))
-check("剩余风险(v51.11): 持仓权利金 = 剩余持仓成本 (2 手 × 2,500 = 5,000)",
-      _p111["holding"] == 5000.0 and _p111["open"] == 10000.0, str(_p111))
-check("剩余风险(v51.11): 当前剩余风险 = 已平仓 − 持仓 (6,000 − 5,000 = +1,000 安全垫)",
-      _p111["residual"] == 1000.0, str(_p111["residual"]))
+_p111 = trade_detail(_u111, mode="options", batch="")["premium"]
+check("剩余风险(v51.12): 已平仓权利金 = 平仓价 × 手数 × 乘数 (200×1×5=1,000)",
+      _p111["closed"] == 1000.0 and _p111["open"] == 10000.0, str(_p111))
+check("剩余风险(v51.12): 持仓权利金 = 剩余 3 手成本 (3×2,500=7,500)",
+      _p111["holding"] == 7500.0, str(_p111["holding"]))
+check("剩余风险(v51.12): 持仓 − 已平仓 = +6,500 → 正数代表仍有这么多裸风险",
+      _p111["residual"] == 6500.0, str(_p111["residual"]))
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "close", "direction": "buy",
-              "close_date": "2026-11-09", "close_price": 300, "close_qty": 1, "pnl": -200,
+              "close_date": "2026-11-09", "close_price": 600, "close_qty": 2, "pnl": 2000,
               "mode": "options", "batch": ""})
 _d111b = trade_detail(_u111, mode="options", batch="")["premium"]
-check("剩余风险(v51.11): 又平 1 手亏损(收回 1,500) → 回到负值(仍有净敞口)",
-      _d111b["closed"] == 7500.0 and _d111b["holding"] == 2500.0 and _d111b["residual"] == 5000.0,
+check("剩余风险(v51.12): 收回超过持仓成本 → 变负数(2,500 − 7,000 = -4,500), 代表已无风险",
+      _d111b["closed"] == 7000.0 and _d111b["holding"] == 2500.0 and _d111b["residual"] == -4500.0,
       str(_d111b))
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "close", "direction": "buy",
               "close_date": "2026-11-12", "close_price": 100, "close_qty": 1, "pnl": -400,
               "mode": "options", "batch": ""})
 _d111c = trade_detail(_u111, mode="options", batch="")["premium"]
-check("剩余风险(v51.11): 全平后持仓权利金归零, 剩余风险 = 已收回总额",
-      _d111c["holding"] == 0 and _d111c["closed"] == 8000.0 and _d111c["residual"] == 8000.0,
+check("剩余风险(v51.12): 全平后持仓归零, 剩余风险 = −已收回总额 (-7,500)",
+      _d111c["holding"] == 0 and _d111c["closed"] == 7500.0 and _d111c["residual"] == -7500.0,
       str(_d111c))
-check("剩余风险(v51.11): 其它模式不给这份数据(dual/futures 为 None)",
+check("剩余风险(v51.12): 其它模式不给这份数据(dual/futures 为 None)",
       trade_detail(_u111, mode="dual", batch="")["premium"] is None, '')
 
 print("\n================================")
