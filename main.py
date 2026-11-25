@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5200            # 与 README 版本号 v52.0 对齐(数值比较用于单实例接管)
+APP_VERSION = 5201            # 与 README 版本号 v52.1 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -1356,7 +1356,7 @@ def get_quote(code):
 
 # ===========================================================================
 # 资金曲线记录模块 (SQLite 持久化)
-# - 三个策略分开记录: 期权买方(原 abe) / 威科夫 / 期权双买
+# - 三个策略分开记录: 期权买方(原 abe) / 期货(原威科夫) / 期权双买
 # - 月度明细 + 年度汇总, 年度汇总由月度数据自动累加
 # - ⚠ 数据必须存在持久目录: 打包成 exe 后 __file__ 指向临时解压目录(%TEMP%\_MEI*),
 #   若按 __file__ 存数据, 程序退出后会被 bootloader 清理 → 记录丢失(已踩坑修复)
@@ -1437,10 +1437,11 @@ else:
 # ⚠ 'abe' 已改名为「期权买方」: 启动时会把老库里的 abe 批量迁移过来(见 _migrate_strategy_names),
 #   读旧备份时也用 STRATEGY_ALIASES 兜底, 保证历史数据不丢
 STRATEGY_OPTIONS_BUY = "期权买方"      # 原 abe
-STRATEGY_WYCKOFF = "威科夫"
+STRATEGY_FUTURES = "期货"              # v52.1: 原「威科夫」改名（旧名进别名表, 启动时自动迁移）
 STRATEGY_DUAL_BUY = "期权双买"
-FUND_STRATEGIES = [STRATEGY_OPTIONS_BUY, STRATEGY_WYCKOFF, STRATEGY_DUAL_BUY]
-STRATEGY_ALIASES = {"abe": STRATEGY_OPTIONS_BUY}   # 旧名 → 新名
+FUND_STRATEGIES = [STRATEGY_OPTIONS_BUY, STRATEGY_FUTURES, STRATEGY_DUAL_BUY]
+# 旧名 → 新名: 启动时据此把库里三张表的历史行批量改名(见 _db_ensure_schema)
+STRATEGY_ALIASES = {"abe": STRATEGY_OPTIONS_BUY, "威科夫": STRATEGY_FUTURES}
 
 # ---- 交易记录的三种模式(v50.59): 期权买方 / 期权双买 / 期货 ----
 TRADE_MODES = ("options", "dual", "futures")
@@ -6955,7 +6956,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div class="funds-label">策略</div>
       <div class="seg" id="stratSeg">
         <button class="active" data-strategy="期权买方">期权买方</button>
-        <button data-strategy="威科夫">威科夫</button>
+        <button data-strategy="期货">期货</button>
         <button data-strategy="期权双买">期权双买</button>
         <button data-strategy="combined">汇总</button>
       </div>
@@ -6963,7 +6964,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       <div id="withdrawBox" class="withdraw-box">
         <span class="w-lbl">提现</span>
         <span class="wchip" id="wdAbe">期权买方 ¥0</span>
-        <span class="wchip" id="wdWk">威科夫 ¥0</span>
+        <span class="wchip" id="wdWk">期货 ¥0</span>
         <span class="wchip" id="wdDual">期权双买 ¥0</span>
         <span class="wchip" id="wdAll">汇总 ¥0</span>
       </div>
@@ -7592,6 +7593,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
         <label class="tp-item"><input type="checkbox" data-ptab="tradesDual"><span class="tp-t">交易记录</span><small>期权双买</small></label>
         <label class="tp-item"><input type="checkbox" data-ptab="tradesFut"><span class="tp-t">交易记录</span><small>期货模式</small></label>
         <label class="tp-item"><input type="checkbox" data-ptab="funds"><span class="tp-t">资金曲线</span><small>多策略</small></label>
+        <label class="tp-item"><input type="checkbox" data-ptab="equity"><span class="tp-t">账户K线</span><small>日线 · 月线</small></label>
       </div>
       <div class="modal-actions">
         <button class="btn ghost" id="tpAll">全选</button>
@@ -12129,7 +12131,7 @@ const valueLabelPlugin = {
 };
 
 const FundUI = {
-  strategy: '期权买方',      // 当前选中策略: 期权买方 / 威科夫 / 期权双买 / combined(汇总)
+  strategy: '期权买方',      // 当前选中策略: 期权买方 / 期货 / 期权双买 / combined(汇总)
   monthly: [],
   yearly: [],
   chartMonthly: null,
@@ -12141,12 +12143,25 @@ const FundUI = {
   legendOff: {monthly:new Set(), yearly:new Set()},
 
   /* ---- v50.99 侧边栏显示设置 (只隐藏入口, 数据照存) ---- */
-  sideTabKeys(){ return ['calc','trades','tradesDual','tradesFut','funds']; },
+  sideTabKeys(){ return ['calc','trades','tradesDual','tradesFut','funds','equity']; },
   sideTabsOn(){
     const all = this.sideTabKeys();
     try{
-      const raw = localStorage.getItem('oc-side-tabs');
-      if (!raw) return all.slice();
+      let raw = localStorage.getItem('oc-side-tabs-v2');
+      // v52.1: 老偏好(oc-side-tabs)里没有「账户K线」这个新页面 → 迁移时默认给它打开,
+      //   否则老用户升级后永远看不到入口(applySideTabs 会把不在清单里的 tab 全隐藏)
+      if (!raw){
+        const legacy = localStorage.getItem('oc-side-tabs');
+        if (legacy){
+          const arr0 = JSON.parse(legacy);
+          if (Array.isArray(arr0) && arr0.length){
+            const migrated = all.filter(k => arr0.indexOf(k) >= 0 || k === 'equity');
+            localStorage.setItem('oc-side-tabs-v2', JSON.stringify(migrated));
+            return migrated;
+          }
+        }
+        return all.slice();
+      }
       const arr = JSON.parse(raw);
       if (!Array.isArray(arr)) return all.slice();
       const on = all.filter(k => arr.indexOf(k) >= 0);
@@ -12174,7 +12189,7 @@ const FundUI = {
     $('tpSave').addEventListener('click', ()=>{
       const on = boxes().filter(b=>b.checked).map(b=>b.dataset.ptab);
       if (!on.length){ alert('至少保留一个页面，否则左侧栏就空了'); return; }
-      localStorage.setItem('oc-side-tabs', JSON.stringify(on));
+      localStorage.setItem('oc-side-tabs-v2', JSON.stringify(on));
       this.applySideTabs();
       bg.classList.add('hidden');
       // 当前页刚好被关掉 → 落到第一个还显示的页面
@@ -12211,7 +12226,7 @@ const FundUI = {
           trades:    {t:'交易记录：期权买方', s:'期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
           tradesDual:{t:'交易记录：期权双买', s:'call + put 两腿同批次记录 · 逐笔盈亏 · 复盘'},
           tradesFut: {t:'交易记录：期货模式', s:'期货开平仓逐笔记录 · 持仓汇总 · 复盘笔记'},
-          funds:  {t:'资金曲线',        s:'期权买方 · 威科夫 · 期权双买 多策略记录'},
+          funds:  {t:'资金曲线',        s:'期权买方 · 期货 · 期权双买 多策略记录'},
           equity: {t:'账户权益K线',     s:'每日收盘权益 · 日线/月线 · 收盘价口径'}
         };
         // header logo 跟随当前 tab, 与左侧栏图标保持一致
@@ -12637,7 +12652,7 @@ const FundUI = {
   initModal(){
     const close = ()=>$('modalBg').classList.add('hidden');
     $('btnAddRecord').addEventListener('click', ()=>{
-      if (this.strategy === 'combined') { alert('汇总视图为自动计算结果，请在 期权买方 / 威科夫 / 期权双买 下录入'); return; }
+      if (this.strategy === 'combined') { alert('汇总视图为自动计算结果，请在 期权买方 / 期货 / 期权双买 下录入'); return; }
       this.openModal(null);
     });
     $('btnCancel').addEventListener('click', close);
@@ -12816,7 +12831,7 @@ const FundUI = {
       if (!d.ok) return;
       const fmt = v => '¥' + Math.round(v).toLocaleString('en-US');
       $('wdAbe').innerHTML = '期权买方 <b>' + fmt(d['期权买方'] || 0) + '</b>';
-      $('wdWk').innerHTML = '威科夫 <b>' + fmt(d['威科夫'] || 0) + '</b>';
+      $('wdWk').innerHTML = '期货 <b>' + fmt(d['期货'] || 0) + '</b>';
       if ($('wdDual')) $('wdDual').innerHTML = '期权双买 <b>' + fmt(d['期权双买'] || 0) + '</b>';
       $('wdAll').innerHTML = '汇总 <b>' + fmt(d.combined || 0) + '</b>';
     } catch (e) { /* 静默 */ }

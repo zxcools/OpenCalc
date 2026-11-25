@@ -461,15 +461,15 @@ async function main() {
   check('资金曲线页保留「清除全部」', fb.clearAll === true, fundsBtns);
 
   // ---- v50.99 侧边栏显示设置: 勾选控制入口显隐, 数据不受影响 ----
-  await evalJs(ws, `(()=>{localStorage.removeItem('oc-side-tabs'); FundUI.applySideTabs();})()`);
+  await evalJs(ws, `(()=>{localStorage.removeItem('oc-side-tabs'); localStorage.removeItem('oc-side-tabs-v2'); FundUI.applySideTabs();})()`);
   const tabAllOn = await evalJs(ws, `document.querySelectorAll('#mainTabs .maintab:not(.tab-off)').length`);
-  check('默认 5 个侧栏入口全部显示', tabAllOn === 5, 'count=' + tabAllOn);
+  check('默认 6 个侧栏入口全部显示(含账户K线)', tabAllOn === 6, 'count=' + tabAllOn);
   await evalJs(ws, `document.getElementById('btnTabPrefs').click()`);
   await sleep(300);
   const tpOpen = await evalJs(ws, `!document.getElementById('tabPrefsBg').classList.contains('hidden')`);
   check('点 ☰ 打开「侧边栏显示设置」弹窗', tpOpen === true);
   const tpBoxes = await evalJs(ws, `document.querySelectorAll('#tpList input[data-ptab]').length`);
-  check('设置弹窗列出 5 个可勾选页面', tpBoxes === 5, 'count=' + tpBoxes);
+  check('设置弹窗列出 6 个可勾选页面(含账户K线)', tpBoxes === 6, 'count=' + tpBoxes);
   // 取消 资金曲线 + 期权双买, 保存
   await evalJs(ws, `(()=>{
     document.querySelectorAll('#tpList input[data-ptab]').forEach(b=>{ b.checked = (b.dataset.ptab!=='funds' && b.dataset.ptab!=='tradesDual'); });
@@ -478,13 +478,13 @@ async function main() {
   await sleep(500);
   const tpState = await evalJs(ws, `JSON.stringify({
     vis: [...document.querySelectorAll('#mainTabs .maintab:not(.tab-off)')].map(t=>t.dataset.tab),
-    stored: localStorage.getItem('oc-side-tabs'),
+    stored: localStorage.getItem('oc-side-tabs-v2'),
     active: document.querySelector('#mainTabs .maintab.active')?.dataset.tab,
     closed: !document.getElementById('tabPrefsBg').classList.contains('hidden')
   })`);
   const ts = JSON.parse(tpState);
-  check('取消勾选后侧栏只剩 3 个入口', ts.vis.join(',') === 'calc,trades,tradesFut', tpState);
-  check('偏好写入 localStorage(oc-side-tabs)', ts.stored === '["calc","trades","tradesFut"]', String(ts.stored));
+  check('取消勾选后侧栏只剩 4 个入口(含账户K线)', ts.vis.join(',') === 'calc,trades,tradesFut,equity', tpState);
+  check('偏好写入 localStorage(oc-side-tabs-v2)', ts.stored === '["calc","trades","tradesFut","equity"]', String(ts.stored));
   check('保存后弹窗关闭', ts.closed === false, tpState);
   check('当前页被关掉 → 自动落到第一个可见页', ts.active === 'calc', 'active=' + ts.active);
   // 隐藏页仍可程序跳转(「加入记录」跳交易记录·双买): 页面切过去 + 入口临时显示
@@ -504,10 +504,10 @@ async function main() {
     document.getElementById('tpSave').click();
   })()`);
   await sleep(200);
-  const guard = await evalJs(ws, `JSON.stringify({msg: window.__alertMsg, kept: localStorage.getItem('oc-side-tabs'), open: !document.getElementById('tabPrefsBg').classList.contains('hidden')})`);
+  const guard = await evalJs(ws, `JSON.stringify({msg: window.__alertMsg, kept: localStorage.getItem('oc-side-tabs-v2'), open: !document.getElementById('tabPrefsBg').classList.contains('hidden')})`);
   const gd = JSON.parse(guard);
   check('一个都不勾时拒绝保存并提示', !!gd.msg && gd.open === true, guard);
-  check('拒绝保存不污染已存偏好', gd.kept === '["calc","trades","tradesFut"]', String(gd.kept));
+  check('拒绝保存不污染已存偏好', gd.kept === '["calc","trades","tradesFut","equity"]', String(gd.kept));
   // 恢复默认(后续用例依赖侧栏完整)
   await evalJs(ws, `(()=>{document.getElementById('tpCancel').click();localStorage.removeItem('oc-side-tabs');FundUI.applySideTabs();document.querySelector('#mainTabs .maintab[data-tab="calc"]').click();})()`);
   await sleep(400);
@@ -3088,7 +3088,7 @@ async function main() {
 
     // 换策略重渲染后仍保持"被点掉"
     await click(2);
-    document.querySelector('#stratSeg button[data-strategy="威科夫"]').click(); await w(900);
+    document.querySelector('#stratSeg button[data-strategy="期货"]').click(); await w(900);
     document.querySelector('#stratSeg button[data-strategy="期权买方"]').click(); await w(1200);
     const t6 = {vis2: FundUI.chartMonthly.isDatasetVisible(2),
                 off: items[2].classList.contains('off'),
@@ -6343,6 +6343,11 @@ async function main() {
       q('btnEqDelete').click();
       await w(1200);
       out.afterDelAll = /还没有任何记录/.test(q('eqBody').textContent);
+      // v52.1: 老用户的侧栏偏好里没有「账户K线」→ 迁移时要默认打开(否则升级后看不到入口)
+      try {
+        localStorage.setItem('oc-side-tabs', JSON.stringify(['calc','trades','tradesDual','tradesFut','funds']));
+        localStorage.removeItem('oc-side-tabs-v2');
+      } catch (e) {}
       return JSON.stringify(out);
     } finally { window.alert = _al; window.confirm = _cf; }
   })()`));
@@ -6362,6 +6367,26 @@ async function main() {
         /106,717/.test(v52.afterDel || '') && v52.afterDelAll === true,
         JSON.stringify({afterDel: (v52.afterDel || '').slice(0, 60), allEmpty: v52.afterDelAll}));
   check('账户K线(v52.0): 全程无报错弹窗', (v52.alerts || []).length === 0, JSON.stringify(v52.alerts));
+
+  // reload 后验证: 老偏好迁移 + 侧栏入口可见
+  await evalJs(ws, `location.reload(); 'ok'`).catch(() => {});
+  let sideOk = null;
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 250));
+    try {
+      const t = await evalJs(ws, `(() => {
+        const el = document.querySelector('#mainTabs .maintab[data-tab="equity"]');
+        if (!el || document.readyState !== 'complete') return '';
+        return JSON.stringify({off: el.classList.contains('tab-off'),
+                               small: el.querySelector('small').textContent});
+      })()`);
+      if (!t) continue;
+      sideOk = JSON.parse(t);
+      if (sideOk.off === false) break;
+    } catch (e) { /* 重载瞬间上下文不可用 */ }
+  }
+  check('侧栏(v52.1): 老偏好只有 5 项时, 「账户K线」迁移后默认可见(不是被 tab-off 藏掉)',
+        !!sideOk && sideOk.off === false, JSON.stringify(sideOk));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

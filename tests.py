@@ -931,25 +931,25 @@ y2026 = [x for x in y2 if x["year"] == 2026][0]
 check("2026 年初 = 105000", y2026["initial_equity"] == 105000)
 check("2026 盈亏 = 120000-105000+0 = 15000", y2026["yearly_pnl"] == 15000)
 
-# 威科夫账户独立
-fund_upsert("威科夫", 2026, 1, 50000, 55000, 0, "")
-check("威科夫独立数据", [x for x in fund_list_records("威科夫") if x["year"] == 2026 and x["month"] == 1][0]["end_equity"] == 55000)
-check("abe 3条 + 威科夫 1条 = 4", len(fund_list_records()) == 4)
+# 期货账户独立
+fund_upsert("期货", 2026, 1, 50000, 55000, 0, "")
+check("期货独立数据", [x for x in fund_list_records("期货") if x["year"] == 2026 and x["month"] == 1][0]["end_equity"] == 55000)
+check("abe 3条 + 期货 1条 = 4", len(fund_list_records()) == 4)
 
 # 汇总：把两个账户相同月合一起
 combined = fund_combined_summary()
 c_jan = [x for x in combined if x["year"] == 2026 and x["month"] == 1][0]
 check("汇总 2026/1: 月初=105000+50000=155000", c_jan["initial_equity"] == 155000)
 check("汇总 2026/1: 月末=120000+55000=175000", c_jan["end_equity"] == 175000)
-check("汇总包含两个策略", set(c_jan["strategies"]) == {"期权买方", "威科夫"})
+check("汇总包含两个策略", set(c_jan["strategies"]) == {"期权买方", "期货"})
 
 # 汇总缺失延续测试: abe 8月月末延续到 9月 (用户截图 case)
-# 清空重置场景: abe 8月(60000->70000)、威科夫 8月(50000->60000)、威科夫 9月(60000->50000)
+# 清空重置场景: abe 8月(60000->70000)、期货 8月(50000->60000)、期货 9月(60000->50000)
 _conn = sqlite3.connect(_main_mod.FUND_DB_PATH)
 _conn.execute("DELETE FROM records"); _conn.commit(); _conn.close()
 fund_upsert("期权买方", 2025, 8, 60000, 70000, 1000, "")
-fund_upsert("威科夫", 2025, 8, 50000, 60000, 10000, "")
-fund_upsert("威科夫", 2025, 9, 60000, 50000, 0, "")
+fund_upsert("期货", 2025, 8, 50000, 60000, 10000, "")
+fund_upsert("期货", 2025, 9, 60000, 50000, 0, "")
 combined2 = fund_combined_summary()
 c_aug = [x for x in combined2 if x["year"] == 2025 and x["month"] == 8][0]
 c_sep = [x for x in combined2 if x["year"] == 2025 and x["month"] == 9][0]
@@ -958,11 +958,11 @@ check("汇总8月: 月末=70000+60000=130000", c_aug["end_equity"] == 130000)
 check("汇总8月: 出金=1000+10000=11000", c_aug["cash_flow"] == 11000)
 check("汇总8月: 盈亏=+31000", c_aug["monthly_pnl"] == 31000)
 check("汇总8月: 收益率=28.18%", abs(c_aug["month_return_rate"] - 0.2818) < 0.001)
-check("汇总9月: abe延续(月初=abe 8月月末70000+威科夫60000)=130000", c_sep["initial_equity"] == 130000)
-check("汇总9月: 月末=abe延续70000+威科夫50000=120000", c_sep["end_equity"] == 120000)
+check("汇总9月: abe延续(月初=abe 8月月末70000+期货60000)=130000", c_sep["initial_equity"] == 130000)
+check("汇总9月: 月末=abe延续70000+期货50000=120000", c_sep["end_equity"] == 120000)
 check("汇总9月: 盈亏=-10000", c_sep["monthly_pnl"] == -10000)
 check("汇总9月: 收益率=-7.69%(修正后)", abs(c_sep["month_return_rate"] - (-0.0769)) < 0.001)
-check("汇总9月: 参与=[威科夫], 延续=[abe]", set(c_sep["strategies"]) == {"威科夫"} and "期权买方" in c_sep["carried_strategies"])
+check("汇总9月: 参与=[期货], 延续=[abe]", set(c_sep["strategies"]) == {"期货"} and "期权买方" in c_sep["carried_strategies"])
 
 # 删除 (延续测试后数据库中 abe 只有 2025/8 一条)
 fund_delete("期权买方", 2025, 8)
@@ -996,7 +996,7 @@ for t in ("records", "trade_records", "trade_pool_snapshots"):
     _conn3.execute(f"DELETE FROM {t}")
 _conn3.commit(); _conn3.close()
 fund_upsert("期权买方", 2025, 8, 60000, 70000, 1000, "8月")
-fund_upsert("威科夫", 2025, 9, 60000, 50000, 0, "9月")
+fund_upsert("期货", 2025, 9, 60000, 50000, 0, "9月")
 
 backup = fund_export_backup()
 check("导出包含 records 数组", isinstance(backup.get("records"), list) and len(backup["records"]) == 2)
@@ -1009,13 +1009,13 @@ for t in ("records", "trade_records", "trade_pool_snapshots"):
 _conn3.commit(); _conn3.close()
 n, strategies, _f1 = fund_import_backup(backup)
 check("导入条数 = 2", n == 2)
-check("导入策略 = [abe, 威科夫]", set(strategies) == {"期权买方", "威科夫"})
+check("导入策略 = [abe, 期货]", set(strategies) == {"期权买方", "期货"})
 restored = fund_list_records()
 check("导入后数据完整", len(restored) == 2 and any(r["strategy"] == "期权买方" and r["end_equity"] == 70000 for r in restored), str([(r["strategy"], r["year"], r["month"], r["end_equity"]) for r in restored]))
 check("导入重算盈亏(abe 8月=70000-60000+1000=11000)", [r for r in restored if r["strategy"]=="期权买方"][0]["monthly_pnl"] == 11000)
 
 # 合并导入: 已有数据时导入新增
-fund_upsert("威科夫", 2025, 10, 50000, 55000, 0, "10月")
+fund_upsert("期货", 2025, 10, 50000, 55000, 0, "10月")
 n2, _f2s, _f2 = fund_import_backup(backup)
 check("合并导入不丢已有记录(3条)", len(fund_list_records()) == 3)
 
@@ -1455,8 +1455,11 @@ print("\n== 策略改名与期权双买 (v50.59) ==")
 from main import (norm_strategy, calc_dual, FUND_STRATEGIES, STRATEGY_OPTIONS_BUY,
                   STRATEGY_DUAL_BUY, TRADE_MODES)
 
-check("策略列表 = 期权买方 / 威科夫 / 期权双买",
-      FUND_STRATEGIES == ["期权买方", "威科夫", "期权双买"], str(FUND_STRATEGIES))
+check("策略改名(v52.1): 旧名「威科夫」自动归一到「期货」(老库/老备份读进来不丢)",
+      norm_strategy("威科夫") == "期货" and norm_strategy("期货") == "期货" and "威科夫" not in FUND_STRATEGIES,
+      str(FUND_STRATEGIES))
+check("策略列表 = 期权买方 / 期货 / 期权双买",
+      FUND_STRATEGIES == ["期权买方", "期货", "期权双买"], str(FUND_STRATEGIES))
 check("旧名 abe 自动归一为「期权买方」", norm_strategy("abe") == STRATEGY_OPTIONS_BUY)
 check("未知策略名原样返回(调用方再判)", norm_strategy("随便") == "随便")
 check("交易模式三值", TRADE_MODES == ("options", "dual", "futures"), str(TRADE_MODES))
