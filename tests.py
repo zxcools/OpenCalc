@@ -2774,10 +2774,12 @@ check("账户K线(v52.0): 本月统计 月初=首根开 / 高 133,555 / 低 106,
 _c = _ov["cum"]
 check("账户K线(v52.0): 累计盈亏 = 期末 − 期初 − 净出入金(剔除出入金)",
       _c["pnl"] == round(106446.75 - _c["base_equity"] - _c["net_flow"], 2), str(_c))
-check("账户K线(v52.0): 月线聚合(1 个月, 开=首根开 / 收 106,446.75, 高低取月内极值)",
-      len(_ov["months"]) == 1 and _ov["months"][0]["open"] == _anchor_exp
-      and _ov["months"][0]["close"] == 106446.75 and _ov["months"][0]["high"] == 133555.0,
-      str(_ov["months"]))
+_m11 = [x for x in _ov["months"] if x["ym"] == "2026-11"]
+check("账户K线(v52.0): 月线有日数据的月份用日聚合(开=首根开 / 收 106,446.75 / 高 133,555)",
+      len(_m11) == 1 and _m11[0]["open"] == _anchor_exp
+      and _m11[0]["close"] == 106446.75 and _m11[0]["high"] == 133555.0
+      and _m11[0]["src"] == "day",
+      str(_m11))
 check("账户K线(v52.0): 最大回撤取最深那次(100→120→90 = -25%)",
       _eq_mdd([100, 120, 90, 130, 104]) == -0.25,
       str(_eq_mdd([100, 120, 90, 130, 104])))
@@ -2791,8 +2793,19 @@ check("账户K线(v52.0): 删除某天", len(equity_days()) == 4
       and all(x["d"] != "2026-11-20" for x in equity_days()), str(len(equity_days())))
 for _d in ("2026-11-19", "2026-11-21", "2026-11-24", "2026-11-25"):
     equity_delete(_d)
-check("账户K线(v52.0): 清空后 overview 返回 empty",
-      equity_overview()["empty"] is True, str(equity_days()))
+_ov_after = equity_overview()
+check("账户K线(v52.1): 清空日记录后日线为空, 但月线从资金曲线月度记录兜底",
+      len(_ov_after["days"]) == 0 and len(_ov_after["months"]) >= 1
+      and all(m["src"] == "fund" for m in _ov_after["months"]),
+      'days=%d months=%d' % (len(_ov_after["days"]), len(_ov_after["months"])))
+check("账户K线(v52.1): 无日记录时 today 用最近月末兜底(不是空)",
+      _ov_after["today"] is not None and _ov_after["today"]["equity"] > 0,
+      str(_ov_after["today"]))
+_rows = [m for m in _ov_after["months"]]
+check("账户K线(v52.1): 月线开=月初权益 / 收=月末权益(资金曲线口径)",
+      bool(_rows) and _rows[0]["open"] > 0 and _rows[0]["close"] > 0
+      and _rows[0]["high"] == max(_rows[0]["open"], _rows[0]["close"]),
+      str(_rows[:1]))
 
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

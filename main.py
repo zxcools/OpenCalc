@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5201            # 与 README 版本号 v52.1 对齐(数值比较用于单实例接管)
+APP_VERSION = 5202            # 与 README 版本号 v52.2 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -2975,80 +2975,132 @@ def _eq_hold_cost_series():
     return out
 
 
+def _fund_month_equities():
+    """资金曲线的月度权益，按 YYYY-MM 合并所有策略 → {ym: {initial, end}}
+    ⚠ 用来给月线图打底：日记录只有最近这些天，历史月份只能从资金曲线的月度记录来"""
+    db = _fund_db()
+    rows = db.execute("SELECT year, month, initial_equity, end_equity FROM records").fetchall()
+    out = {}
+    for r in rows:
+        try:
+            ym = "%04d-%02d" % (int(r["year"]), int(r["month"]))
+        except (TypeError, ValueError):
+            continue
+        m = out.setdefault(ym, {"initial": 0.0, "end": 0.0})
+        m["initial"] += float(r["initial_equity"] or 0)
+        m["end"] += float(r["end_equity"] or 0)
+    return out
+
+
 def equity_overview(today=None):
-    """账户权益总览：日线/月线 K 序列 + 当前状态 + 月度统计 + 回撤 + 仓位占比"""
+    """账户权益总览：日线/月线 K 序列 + 当前状态 + 月度统计 + 回撤 + 仓位占比
+    ⚠ 月线 = 日记录聚合(有日记录的月份优先) ∪ 资金曲线月度记录(历史月份兜底)"""
     days = equity_days()
     base = _equity_base()
     today = (today or datetime.now().strftime("%Y-%m-%d"))[:10]
+    fund_m = _fund_month_equities()
     empty = {
         "ok": True, "empty": True, "base": base, "today": None, "cum": None,
         "month": None, "account_mdd": 0.0, "days": [], "months": [], "pos": [],
+        "pos_now": 0.0,
     }
-    if not days:
+    if not days and not fund_m:
         return empty
 
-    # ---- 日线：开 = 上一条收盘(第一条用期初权益)，无影线 ----
+    # ---- 日线：开 = 上一条收盘(第一条用上月末权益)，无影线 ----
     series = []
-    # 首根的「开」= 该月之前最近的月末权益(资金曲线)；查不到才退回期初基准
-    anchor_eq = _eq_equity_before(days[0]["d"][:7])
-    if anchor_eq is None:
-        anchor_eq = base["equity"] if base["equity"] > 0 else days[0]["equity"]
-    prev = anchor_eq
-    for x in days:
-        o, c = prev, x["equity"]
-        series.append({
-            "d": x["d"], "open": round(o, 2), "close": round(c, 2),
-            "chg": round(c - o, 2),
-            "pct": round((c - o) / o, 6) if o else 0.0,
-            "available": x["available"], "note": x["note"],
-        })
-        prev = c
+    anchor_eq = None
+    if days:
+        anchor_eq = _eq_equity_before(days[0]["d"][:7])
+        if anchor_eq is None:
+            anchor_eq = base["equity"] if base["equity"] > 0 else days[0]["equity"]
+        prev = anchor_eq
+        for x in days:
+            o, c = prev, x["equity"]
+            series.append({
+                "d": x["d"], "open": round(o, 2), "close": round(c, 2),
+                "chg": round(c - o, 2),
+                "pct": round((c - o) / o, 6) if o else 0.0,
+                "available": x["available"], "note": x["note"],
+            })
+            prev = c
 
-    # ---- 月线：开=当月首根的 open，收=当月末根，高/低=月内日权益极值(有影线) ----
-    months, order = {}, []
+    # ---- 按日记录聚合出「有日数据的月份」 ----
+    dsum = {}
     for x in series:
         ym = x["d"][:7]
-        m = months.get(ym)
+        m = dsum.get(ym)
         if m is None:
-            m = months[ym] = {"ym": ym, "open": x["open"], "close": x["close"],
-                              "high": x["close"], "low": x["close"], "days": 0}
-            order.append(ym)
+            m = dsum[ym] = {"ym": ym, "open": x["open"], "close": x["close"],
+                            "high": x["close"], "low": x["close"], "days": 0}
         m["close"] = x["close"]
         m["high"] = max(m["high"], x["close"])
         m["low"] = min(m["low"], x["close"])
         m["days"] += 1
+
+    # ---- 月线：有日数据 → 日聚合；没有 → 资金曲线月度记录(开=月初权益/收=月末权益) ----
+    order = sorted(set(dsum) | set(fund_m))
     month_list = []
     for ym in order:
-        m = months[ym]
-        o, c = m["open"], m["close"]
-        month_list.append({
-            "ym": ym, "open": round(o, 2), "close": round(c, 2),
-            "high": round(m["high"], 2), "low": round(m["low"], 2),
-            "chg": round(c - o, 2), "pct": round((c - o) / o, 6) if o else 0.0,
-            "days": m["days"],
-            "mdd": _eq_mdd([o] + [x["close"] for x in series if x["d"][:7] == ym]),
-        })
+        if ym in dsum:
+            m = dsum[ym]
+            o, c = m["open"], m["close"]
+            month_list.append({
+                "ym": ym, "open": round(o, 2), "close": round(c, 2),
+                "high": round(m["high"], 2), "low": round(m["low"], 2),
+                "chg": round(c - o, 2), "pct": round((c - o) / o, 6) if o else 0.0,
+                "days": m["days"], "src": "day",
+                "mdd": _eq_mdd([o] + [x["close"] for x in series if x["d"][:7] == ym]),
+            })
+        else:
+            fm = fund_m[ym]
+            o, c = fm["initial"], fm["end"]
+            if o <= 0 and c <= 0:
+                continue
+            month_list.append({
+                "ym": ym, "open": round(o, 2), "close": round(c, 2),
+                "high": round(max(o, c), 2), "low": round(min(o, c), 2),
+                "chg": round(c - o, 2), "pct": round((c - o) / o, 6) if o else 0.0,
+                "days": 0, "src": "fund", "mdd": _eq_mdd([o, c]),
+            })
 
-    # ---- 当前状态 ----
-    last = series[-1]
-    prev_close = series[-2]["close"] if len(series) >= 2 else last["open"]
-    chg = round(last["close"] - prev_close, 2)
-    cur = months.get(today[:7])
-    month_info = None
-    if cur:
+    # ---- 当前状态(没有日记录时用最近月末兜底, 保证月线还能看) ----
+    if series:
+        last = series[-1]
+        last_close, last_d, last_av = last["close"], last["d"], last["available"]
+        prev_close = series[-2]["close"] if len(series) >= 2 else last["open"]
+    else:
+        last_m = month_list[-1]
+        last_close, last_d, last_av = last_m["close"], last_m["ym"], None
+        prev_close = month_list[-2]["close"] if len(month_list) >= 2 else last_m["open"]
+    chg = round(last_close - prev_close, 2)
+
+    cur = dsum.get(today[:7])
+    if cur is None and month_list:
+        cur = month_list[-1]
+        cur_ym = cur["ym"]
+        month_info = {
+            "ym": cur_ym, "first": cur["open"], "last": cur["close"],
+            "chg": cur["chg"], "pct": cur["pct"],
+            "high": cur["high"], "low": cur["low"],
+            "days": cur["days"], "mdd": cur["mdd"], "src": cur.get("src", "fund"),
+        }
+    elif cur is not None:
         o, c = cur["open"], cur["close"]
         month_info = {
             "ym": today[:7], "first": round(o, 2), "last": round(c, 2),
             "chg": round(c - o, 2), "pct": round((c - o) / o, 6) if o else 0.0,
             "high": round(cur["high"], 2), "low": round(cur["low"], 2),
-            "days": cur["days"],
+            "days": cur["days"], "src": "day",
             "mdd": _eq_mdd([o] + [x["close"] for x in series if x["d"][:7] == today[:7]]),
         }
+    else:
+        month_info = None
 
     # ---- 累计盈亏(剔除出入金) ----
     cum = None
     if base["equity"] > 0:
-        pnl = last["close"] - base["equity"] - base["net_flow"]
+        pnl = last_close - base["equity"] - base["net_flow"]
         cum = {"pnl": round(pnl, 2), "pct": round(pnl / base["equity"], 6),
                "base_equity": base["equity"], "base_date": base["date"],
                "net_flow": base["net_flow"]}
@@ -3065,21 +3117,28 @@ def equity_overview(today=None):
         pos.append({"d": x["d"], "cost": round(cur_cost, 2),
                     "ratio": round(cur_cost / x["close"], 6) if x["close"] else 0.0})
 
+    # ---- 账户最大回撤：按月线时间轴(有日数据用日收盘, 否则用月末) ----
+    seq = []
+    for ym in order:
+        if ym in dsum:
+            seq += [x["close"] for x in series if x["d"][:7] == ym]
+        elif ym in fund_m:
+            seq.append(fund_m[ym]["end"])
+
     return {
         "ok": True, "empty": False, "base": base, "cum": cum,
         "today": {
-            "d": last["d"], "equity": last["close"], "available": last["available"],
+            "d": last_d, "equity": last_close, "available": last_av,
             "prev": round(prev_close, 2), "chg": chg,
             "pct": round(chg / prev_close, 6) if prev_close else 0.0,
         },
         "month": month_info,
-        "account_mdd": _eq_mdd([anchor_eq] + [x["close"] for x in series]),
+        "account_mdd": _eq_mdd(seq),
         "days": series,
         "months": month_list,
         "pos": pos,
         "pos_now": pos[-1]["ratio"] if pos else 0.0,
     }
-
 
 def fund_combined_summary():
     """汇总: 各策略按月合并, 缺失月份用最近月末权益延续
@@ -6142,7 +6201,6 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .eq-top{display:flex;align-items:center;gap:12px;margin:0 0 14px;flex-wrap:wrap}
 .eq-title{font-size:15px;font-weight:600;color:var(--text)}
 .eq-title small{font-size:11px;font-weight:400;color:var(--sub);margin-left:8px}
-.eq-seg{display:flex;gap:2px;padding:2px;background:var(--panel);border:1px solid var(--border);border-radius:10px}
 .eq-hero{display:grid;grid-template-columns:1.15fr 1fr 1fr 1.1fr;gap:16px;align-items:start;
   padding:16px 18px;background:var(--panel2);border:1px solid var(--border);
   border-radius:14px;margin-bottom:12px}
@@ -7049,10 +7107,12 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="wrap">
       <div class="eq-top">
         <div class="eq-title">账户权益<small>收盘价口径</small></div>
-        <div class="seg eq-seg" id="eqPeriodSeg" role="group" aria-label="周期">
-          <button type="button" class="fee-opt active" data-p="day" aria-pressed="true">日线</button>
-          <button type="button" class="fee-opt" data-p="month" aria-pressed="false">月线</button>
-        </div>
+        <span class="segbar" title="周期：日线看本月每个交易日，月线看历史每月">
+          <span class="seg" id="eqPeriodSeg" role="group" aria-label="周期">
+            <button type="button" class="fee-opt active" data-p="day" aria-pressed="true">日线</button>
+            <button type="button" class="fee-opt" data-p="month" aria-pressed="false">月线</button>
+          </span>
+        </span>
         <span class="spacer"></span>
         <button class="btn xs ghost" id="btnEqDelete" title="删除当前选中那一天的记录">删除当天</button>
         <button class="btn xs" id="btnEqRecord">录入收盘</button>
@@ -13330,7 +13390,9 @@ const EqUI = {
     const mdd = isDay ? (m.mdd || 0) : (d.account_mdd || 0);
     const mddLabel = isDay ? '本月最大回撤' : '账户最大回撤';
     const rangeLabel = isDay
-      ? ('本月 · ' + (d.days.length ? d.days[0].d.slice(5) : '') + ' 至 ' + (d.today ? d.today.d.slice(5) : ''))
+      ? (d.days.length
+          ? ('本月 · ' + d.days[0].d.slice(5) + ' 至 ' + d.days[d.days.length - 1].d.slice(5))
+          : '本月 · 还没有日线记录')
       : ('共 ' + (d.months || []).length + ' 个月');
 
     box.innerHTML = `
@@ -13358,8 +13420,8 @@ const EqUI = {
       <div class="eq-monthbar">
         <span>${escHtml(rangeLabel)}</span>
         <span>月初权益 <b>${escHtml(this.fmtMoney(m.first).replace('¥ ', ''))}</b></span>
-        <span>本月涨跌 <b class="${this.clsOf(m.chg)}">${this.fmtSigned(m.chg)}</b></span>
-        <span>本月涨幅 <b class="${this.clsOf(m.pct)}">${this.fmtPct(m.pct)}</b></span>
+        <span>${isDay ? '本月' : '该月'}涨跌 <b class="${this.clsOf(m.chg)}">${this.fmtSigned(m.chg)}</b></span>
+        <span>${isDay ? '本月' : '该月'}涨幅 <b class="${this.clsOf(m.pct)}">${this.fmtPct(m.pct)}</b></span>
         <span class="eq-mdd">${escHtml(mddLabel)} <b>${this.fmtPct(mdd)}</b></span>
       </div>
 
@@ -13407,7 +13469,18 @@ const EqUI = {
     const g = cv.getContext('2d');
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, W, H);
-    if (!bars.length) return;
+    const cs0 = getComputedStyle(document.documentElement);
+    const cSub0 = cs0.getPropertyValue('--sub').trim() || '#8a9a8f';
+    if (!bars.length){
+      g.fillStyle = cSub0;
+      g.font = '13px -apple-system, Segoe UI, Microsoft YaHei, sans-serif';
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(this.period === 'day'
+        ? '本月还没有日线记录 —— 点右上角「录入收盘」；要看历史请切「月线」'
+        : '还没有任何记录 —— 先录入一天收盘权益', W / 2, H / 2);
+      this.drawPos(this.geo(W, H, [{open: 0, close: 1, high: 1, low: 0}]));
+      return;
+    }
 
     const cs = getComputedStyle(document.documentElement);
     const cSub = cs.getPropertyValue('--sub').trim() || '#8a9a8f';
@@ -13579,8 +13652,9 @@ const EqUI = {
   },
 
   async del(){
-    const d = this.selDate || (this.data && this.data.today && this.data.today.d);
-    if (!d) { alert('还没有可删除的记录'); return; }
+    const d = this.selDate || (this.data && this.data.today && this.data.today.d) || '';
+    // 没有日记录时 today.d 是月份(YYYY-MM)，删不掉 —— 明确提示，别让后端抛日期格式错误
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) { alert('当前没有可删除的日线记录（历史月份来自资金曲线，请去资金曲线里改）'); return; }
     if (!confirm('删除 ' + d + ' 这一天的收盘权益？')) return;
     try {
       const r = await fetchT('/api/equity/delete', {

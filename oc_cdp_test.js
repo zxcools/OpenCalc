@@ -6333,6 +6333,9 @@ async function main() {
       out.posCanvas = (() => { const c = q('eqPosChart'); return c ? c.clientWidth + 'x' + c.clientHeight : 'none'; })();
       document.querySelector('#eqPeriodSeg .fee-opt[data-p="month"]').click();
       await w(800);
+      out.monthCount = (EqUI.data && EqUI.data.months) ? EqUI.data.months.length : 0;
+      out.monthSrcs = (EqUI.data && EqUI.data.months)
+        ? EqUI.data.months.map(m => m.src).filter((v, i, a) => a.indexOf(v) === i).join('/') : '';
       const mb = q('eqBody').querySelector('.eq-monthbar');
       out.monthBar = mb ? mb.textContent.replace(/\s+/g, ' ').trim() : '';
       document.querySelector('#eqPeriodSeg .fee-opt[data-p="day"]').click();
@@ -6363,6 +6366,9 @@ async function main() {
         JSON.stringify({chart: v52.canvas, pos: v52.posCanvas}));
   check('账户K线(v52.0): 切月线 → 回撤标签变「账户最大回撤」',
         /账户最大回撤/.test(v52.monthBar || ''), v52.monthBar);
+  check('账户K线(v52.2): 月线至少有一根柱子(日聚合或资金曲线月度兜底)',
+        v52.monthCount >= 1 && /^(day|fund)(\/(day|fund))*$/.test(v52.monthSrcs || ''),
+        JSON.stringify({n: v52.monthCount, src: v52.monthSrcs}));
   check('账户K线(v52.0): 删除当天后回到前一天(106,717), 删空后回到空态',
         /106,717/.test(v52.afterDel || '') && v52.afterDelAll === true,
         JSON.stringify({afterDel: (v52.afterDel || '').slice(0, 60), allEmpty: v52.afterDelAll}));
