@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5203            # 与 README 版本号 v52.3 对齐(数值比较用于单实例接管)
+APP_VERSION = 5204            # 与 README 版本号 v52.4 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -6208,17 +6208,23 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .eq-hero{display:grid;grid-template-columns:1.15fr 1fr 1fr 1.1fr;gap:16px;align-items:start;
   padding:16px 18px;background:var(--panel2);border:1px solid var(--border);
   border-radius:14px;margin-bottom:12px}
-.eq-hero .k{display:block;font-size:11px;color:var(--sub);margin-bottom:4px;letter-spacing:.2px}
-.eq-hero .v{font-size:13.5px;font-weight:700;color:var(--text)}
-.eq-big{font-size:27px;font-weight:800;line-height:1.12;color:var(--text);letter-spacing:-.3px}
-.eq-chg{font-size:12.5px;font-weight:700;margin-left:9px}
-.eq-2r{display:grid;gap:10px}
+.eq-hero .k{display:block;font-size:12.5px;color:var(--sub);margin-bottom:5px;letter-spacing:.2px}
+.eq-hero .v{font-size:15px;font-weight:700;color:var(--text)}
+.eq-big{font-size:29px;font-weight:800;line-height:1.12;color:var(--text);letter-spacing:-.3px}
+.eq-chg{font-size:13.5px;font-weight:700;margin-left:9px}
+.eq-2r{display:grid;gap:11px}
 .eq-monthbar{display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;padding:2px 2px 10px;
-  font-size:12px;color:var(--sub)}
-.eq-monthbar b{color:var(--text);font-size:13px;font-weight:700}
+  font-size:13px;color:var(--sub)}
+.eq-monthbar b{color:var(--text);font-size:14px;font-weight:700}
 .eq-mdd{margin-left:auto;display:flex;align-items:center;gap:8px;padding:5px 11px;border-radius:9px;
-  background:rgba(255,107,107,.10);border:1px solid rgba(255,107,107,.35);font-size:11px;color:var(--sub)}
-.eq-mdd b{color:var(--bad);font-size:13px}
+  background:rgba(255,107,107,.10);border:1px solid rgba(255,107,107,.35);font-size:12px;color:var(--sub)}
+.eq-mdd b{color:var(--bad);font-size:14px}
+/* v52.4: 涨跌配色 —— 账户K线区内的数字统一 涨=红 / 跌=绿
+   ⚠ .eq-hero .v / .eq-monthbar b 本来就写了 color:var(--text)(特异性 0,2,0 / 0,1,1),
+     单靠 .pos 覆盖不住 → 必须写同权重或更高权重的规则 */
+#equityArea .pos,.eq-hero .v.pos,.eq-hero .eq-big.pos,.eq-monthbar b.pos{color:var(--bad) !important}
+#equityArea .neg,.eq-hero .v.neg,.eq-hero .eq-big.neg,.eq-monthbar b.neg{color:var(--good) !important}
+.eq-hero .v.pos,.eq-hero .v.neg{font-weight:800}
 #eqChart{width:100%;display:block;background:var(--panel2);border:1px solid var(--border);border-radius:12px}
 .eq-pos{margin-top:14px;padding:12px 14px;background:var(--panel2);border:1px solid var(--border);border-radius:12px}
 .eq-pos .hd{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;font-size:12px;color:var(--text)}
@@ -6226,6 +6232,23 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .eq-pos .hd .now{margin-left:auto;font-size:12px;color:var(--sub)}
 .eq-pos .hd .now b{color:var(--text);font-size:13px}
 #eqPosChart{width:100%;display:block;height:92px}
+/* v52.4: 每日记录表(可改历史) */
+.eq-daily{margin-top:14px;padding:12px 14px;background:var(--panel2);border:1px solid var(--border);border-radius:12px}
+.eq-daily .hd{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px;color:var(--text)}
+.eq-daily .hd small{color:var(--sub);font-size:12px}
+.eq-daily .hd .r{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--sub)}
+.eq-daily .scroll{max-height:308px;overflow:auto;border:1px solid var(--border);border-radius:9px}
+.eq-daily .tbl{margin-top:0}
+.eq-daily .tbl th{padding:8px 10px;font-size:12px;background:var(--panel)}
+.eq-daily .tbl td{padding:8px 10px;font-size:13px}
+.eq-daily .tbl td.mono{font-variant-numeric:tabular-nums}
+.eq-daily .tbl td.note{color:var(--sub);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.eq-daily .tbl tr.today td{background:rgba(122,167,255,.07)}
+.eq-daily .rowbtn{background:transparent;border:1px solid var(--border);color:var(--sub);cursor:pointer;
+  font-size:12px;padding:3px 9px;border-radius:7px;margin-left:6px}
+.eq-daily .rowbtn:hover{color:var(--text);border-color:var(--accent)}
+.eq-daily .rowbtn.del:hover{color:var(--bad);border-color:var(--bad)}
+.eq-daily .tag.lat{background:rgba(122,167,255,.16);color:#8fb8ff;font-size:10.5px;padding:1px 6px}
 .eq-empty{padding:44px 20px;text-align:center;color:var(--sub);font-size:13px;line-height:1.9}
 
 /* v51.13: 主表「开仓状态」列只在期权买方出现 */
@@ -13304,6 +13327,18 @@ const EqUI = {
     if ($('eqModalBg')) $('eqModalBg').addEventListener('click', e => {
       if (e.target === $('eqModalBg')) this.closeModal();
     });
+    // v52.4: 每日记录表的「修改 / 删除 / 录入一天」走事件委托(表格是 innerHTML 渲染的)
+    const body = $('eqBody');
+    if (body) body.addEventListener('click', e => {
+      const b = e.target.closest('[data-eqact]');
+      if (b){
+        const ds = b.dataset.d || '';
+        if (b.dataset.eqact === 'edit') this.openModal(ds);
+        else if (b.dataset.eqact === 'del') this.delDate(ds);
+        return;
+      }
+      if (e.target.closest('#btnEqAddRow')) this.openModal('', true);
+    });
     // 悬停看数值
     const cv = $('eqChart');
     if (cv) {
@@ -13409,7 +13444,7 @@ const EqUI = {
       <div class="eq-hero">
         <div>
           <span class="k">今日收盘（CNY）</span>
-          <div class="eq-big">${escHtml(this.fmtMoney(t.equity).replace('¥ ', ''))}</div>
+          <div class="eq-big ${this.clsOf(t.chg)}">${escHtml(this.fmtMoney(t.equity).replace('¥ ', ''))}</div>
           <span class="eq-chg ${this.clsOf(t.chg)}">${this.fmtSigned(t.chg)}</span>
           <span class="eq-chg ${this.clsOf(t.pct)}">${this.fmtPct(t.pct)}</span>
         </div>
@@ -13418,8 +13453,8 @@ const EqUI = {
           <div><span class="k">可用资金</span><span class="v">${escHtml(this.fmtMoney(t.available).replace('¥ ', ''))}</span></div>
         </div>
         <div class="eq-2r">
-          <div><span class="k">月内高</span><span class="v">${escHtml(this.fmtMoney(m.high).replace('¥ ', ''))}</span></div>
-          <div><span class="k">月内低</span><span class="v">${escHtml(this.fmtMoney(m.low).replace('¥ ', ''))}</span></div>
+          <div><span class="k">月内高</span><span class="v pos">${escHtml(this.fmtMoney(m.high).replace('¥ ', ''))}</span></div>
+          <div><span class="k">月内低</span><span class="v neg">${escHtml(this.fmtMoney(m.low).replace('¥ ', ''))}</span></div>
         </div>
         <div class="eq-2r">
           <div><span class="k" title="${escHtml(cumTip)}">累计盈亏</span>
@@ -13443,7 +13478,9 @@ const EqUI = {
         <div class="hd">仓位占比 <small>按持仓成本 / 权益</small>
           <span class="now">当前 <b>${this.fmtPct(d.pos_now, 2).replace('+', '')}</b></span></div>
         <canvas id="eqPosChart"></canvas>
-      </div>`;
+      </div>
+
+      <div id="eqDaily"></div>`;
 
     // 容器刚显示出来时 clientWidth 可能还是 0 → 下一帧再画一次
     if (!($('eqChart') && $('eqChart').clientWidth)) {
@@ -13451,6 +13488,43 @@ const EqUI = {
     } else {
       this.draw();
     }
+    this.renderDaily();
+  },
+
+  /* v52.4: 每日记录表 —— 过去的记录也能点「修改」，不用重新录一遍 */
+  renderDaily(){
+    const box = $('eqDaily');
+    if (!box) return;
+    const d = this.data;
+    const rows = ((d && d.days) || []).slice().reverse();   // 最新在上
+    if (!rows.length){
+      box.innerHTML = '<div class="eq-daily"><div class="hd">每日记录<small>还没有日线记录</small></div></div>';
+      return;
+    }
+    const n = rows.length;
+    const body = rows.map((x, i) => {
+      const isToday = (i === 0);
+      return '<tr class="' + (isToday ? 'today' : '') + '" data-d="' + escHtml(x.d) + '">'
+        + '<td class="mono">' + escHtml(x.d) + (isToday ? ' <span class="tag lat">最新</span>' : '') + '</td>'
+        + '<td class="mono">' + escHtml(this.fmtMoney(x.close).replace('¥ ', '')) + '</td>'
+        + '<td class="mono ' + this.clsOf(x.chg) + '">' + this.fmtSigned(x.chg) + '</td>'
+        + '<td class="mono ' + this.clsOf(x.pct) + '">' + this.fmtPct(x.pct) + '</td>'
+        + '<td class="mono">' + (x.available == null ? '—' : escHtml(this.fmtMoney(x.available).replace('¥ ', ''))) + '</td>'
+        + '<td class="note" title="' + escHtml(x.note || '') + '">' + escHtml(x.note || '—') + '</td>'
+        + '<td class="actions" style="text-align:right;white-space:nowrap">'
+        + '<button class="rowbtn" data-eqact="edit" data-d="' + escHtml(x.d) + '">修改</button>'
+        + '<button class="rowbtn del" data-eqact="del" data-d="' + escHtml(x.d) + '">删除</button>'
+        + '</td></tr>';
+    }).join('');
+    box.innerHTML =
+      '<div class="eq-daily">'
+      + '<div class="hd">每日记录<small>共 ' + n + ' 天 · 点「修改」可直接改历史</small>'
+      + '<span class="r"><button class="btn xs ghost" id="btnEqAddRow">＋ 补录一天</button></span></div>'
+      + '<div class="scroll"><table class="tbl"><thead><tr>'
+      + '<th>日期</th><th class="num">收盘权益</th><th class="num">日涨跌</th><th class="num">日涨跌幅</th>'
+      + '<th class="num">可用资金</th><th>备注</th><th style="text-align:right">操作</th>'
+      + '</tr></thead><tbody>' + body + '</tbody></table></div>'
+      + '</div>';
   },
 
   geo(W, H, bars){
@@ -13623,20 +13697,32 @@ const EqUI = {
     g.beginPath(); g.moveTo(geo.padL, baseY + 0.5); g.lineTo(W - geo.padR, baseY + 0.5); g.stroke();
   },
 
-  openModal(date){
-    const t = this.data && this.data.today;
-    const fallback = t && t.d ? t.d : new Date().toISOString().slice(0, 10);
-    if ($('eqDate')) $('eqDate').value = date || fallback;
-    if ($('eqEquity')) $('eqEquity').value = (t && t.equity != null) ? t.equity : '';
-    if ($('eqAvailable')) $('eqAvailable').value = (t && t.available != null) ? t.available : '';
-    if ($('eqNote')) $('eqNote').value = '';
-    if ($('eqModalTitle')) $('eqModalTitle').textContent = '录入收盘权益';
+  /* v52.4: 三个入口共用这个弹窗
+     - openModal()            顶栏「录入收盘」：默认今天，今天已有值就带出来(改今天)
+     - openModal('2026-11-20') 记录表「修改」：载入那天的值来改
+     - openModal('', true)     记录表「补录一天」：空表单，日期默认今天可改
+     ⚠ 日期用本地 _ymd()，别用 toISOString()（UTC 会让凌晨那天差一天） */
+  openModal(date, blank){
+    const days = (this.data && this.data.days) || [];
+    const today = _ymd(new Date());
+    const target = date || today;
+    const rec = blank ? null : days.find(x => x.d === target);
+    if ($('eqDate')) $('eqDate').value = target;
+    if ($('eqEquity')) $('eqEquity').value = rec ? rec.close : '';
+    if ($('eqAvailable')) $('eqAvailable').value = (rec && rec.available != null) ? rec.available : '';
+    if ($('eqNote')) $('eqNote').value = rec ? (rec.note || '') : '';
+    if ($('eqModalTitle')) $('eqModalTitle').textContent =
+      rec ? ('修改 ' + target + ' 的收盘权益') : (blank ? '补录一天的收盘权益' : '录入收盘权益');
+    this._origDate = rec ? target : '';     // 编辑时改日期 → 要把原来那天删掉
+    this._editD = rec ? target : '';
     $('eqModalBg').classList.remove('hidden');
     setTimeout(() => { if ($('eqEquity')) $('eqEquity').focus(); }, 30);
   },
 
   closeModal(){
     if ($('eqModalBg')) $('eqModalBg').classList.add('hidden');
+    this._origDate = '';
+    this._editD = '';
   },
 
   async save(){
@@ -13644,6 +13730,8 @@ const EqUI = {
     const eq = ($('eqEquity').value || '').trim();
     if (!d) { alert('请选择日期'); return; }
     if (!(parseFloat(eq) > 0)) { alert('请填写有效的收盘权益'); return; }
+    const exists = ((this.data && this.data.days) || []).some(x => x.d === d);
+    if (!this._editD && exists && !confirm(d + ' 已有记录，保存会覆盖，继续？')) return;
     try {
       const r = await fetchT('/api/equity/upsert', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -13656,6 +13744,14 @@ const EqUI = {
       });
       const j = await r.json();
       if (!j.ok) { alert(j.error || '保存失败'); return; }
+      // 改了日期 → 把原来那天删掉，不然会多出一条旧的
+      if (this._origDate && this._origDate !== j.d){
+        await fetchT('/api/equity/delete', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({d: this._origDate})
+        });
+      }
+      this._origDate = '';
       this.closeModal();
       await this.reload();
     } catch (e) {
@@ -13663,10 +13759,8 @@ const EqUI = {
     }
   },
 
-  async del(){
-    const d = this.selDate || (this.data && this.data.today && this.data.today.d) || '';
-    // 没有日记录时 today.d 是月份(YYYY-MM)，删不掉 —— 明确提示，别让后端抛日期格式错误
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) { alert('当前没有可删除的日线记录（历史月份来自资金曲线，请去资金曲线里改）'); return; }
+  async delDate(d){
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d || '')) { alert('没有可删除的日线记录（历史月份来自资金曲线，请去资金曲线里改）'); return; }
     if (!confirm('删除 ' + d + ' 这一天的收盘权益？')) return;
     try {
       const r = await fetchT('/api/equity/delete', {
@@ -13680,6 +13774,11 @@ const EqUI = {
     } catch (e) {
       alert('删除失败：' + e);
     }
+  },
+
+  async del(){
+    const d = this.selDate || (this.data && this.data.today && this.data.today.d) || '';
+    return this.delDate(d);
   }
 };
 EqUI.init();

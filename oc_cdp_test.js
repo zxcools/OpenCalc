@@ -6394,6 +6394,144 @@ async function main() {
   check('侧栏(v52.1): 老偏好只有 5 项时, 「账户K线」迁移后默认可见(不是被 tab-off 藏掉)',
         !!sideOk && sideOk.off === false, JSON.stringify(sideOk));
 
+  // ===== v52.4: 每日记录表(可改历史) + 字号放大 + 涨跌配色 =====
+  const v524 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const out = {alerts: []};
+    const _al = window.alert;
+    window.alert = m => out.alerts.push(String(m));
+    window.confirm = () => true;
+    const post = (b) => fetch('/api/equity/upsert', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(b)}).then(r=>r.json());
+    const del = d => fetch('/api/equity/delete', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({d})});
+    try {
+      document.querySelector('#mainTabs .maintab[data-tab="equity"]').click();
+      await w(1200);
+      for (const x of ((EqUI.data && EqUI.data.days) || [])) await del(x.d);
+      await post({d:'2026-11-21', equity:131500, available:99000, note:'跌一天'});
+      await post({d:'2026-11-24', equity:134353, available:100000, note:'回升'});
+      await post({d:'2026-11-25', equity:146426.12, available:111234.03, note:'大阳'});
+      await EqUI.reload(); await w(900);
+
+      const rows = [...document.querySelectorAll('#eqDaily tbody tr')];
+      out.n = rows.length;
+      out.dates = rows.map(tr => tr.children[0].textContent.trim().slice(0, 10));
+      out.cols = [...document.querySelectorAll('#eqDaily thead th')].map(t => t.textContent.trim());
+      out.hasEdit = document.querySelectorAll('#eqDaily button[data-eqact="edit"]').length;
+      out.hasDel = document.querySelectorAll('#eqDaily button[data-eqact="del"]').length;
+
+      // 字号（用户反馈"小字太小"）
+      const k = document.querySelector('.eq-hero .k');
+      const v = document.querySelector('.eq-hero .v');
+      out.kFont = parseFloat(getComputedStyle(k).fontSize);
+      out.vFont = parseFloat(getComputedStyle(v).fontSize);
+
+      // 涨跌配色：今日收盘 / 累计盈亏 都要有颜色
+      const big = document.querySelector('.eq-big');
+      out.bigCls = big.className;
+      out.bigColor = getComputedStyle(big).color;
+      const _dys = (EqUI.data && EqUI.data.days) || [];
+      out.lastChg = _dys.length ? _dys[_dys.length - 1].chg : 0;
+      // .eq-2r 的顺序: 0/1=昨收·可用, 2/3=月内高低, 4/5=累计盈亏·累计涨幅
+      const hiCell = document.querySelectorAll('.eq-hero .eq-2r .v')[2];
+      const loCell = document.querySelectorAll('.eq-hero .eq-2r .v')[3];
+      out.hiColor = getComputedStyle(hiCell).color;
+      out.loColor = getComputedStyle(loCell).color;
+      const cumPnl = document.querySelectorAll('.eq-hero .eq-2r .v')[4];
+      const cumPct = document.querySelectorAll('.eq-hero .eq-2r .v')[5];
+      out.cumColor = getComputedStyle(cumPnl).color;
+      out.cumPctColor = getComputedStyle(cumPct).color;
+      out.cumCls = cumPnl.className;
+      out.cumVal = (EqUI.data && EqUI.data.cum) ? EqUI.data.cum.pnl : null;
+      out.cumText = (cumPnl.textContent || '').trim();
+
+      // 点「修改」→ 载入历史那天的值
+      const btn = [...document.querySelectorAll('#eqDaily button[data-eqact="edit"]')]
+        .find(b => b.dataset.d === '2026-11-21');
+      btn.click(); await w(500);
+      out.editTitle = q('eqModalTitle').textContent;
+      out.editEq = q('eqEquity').value;
+      out.editAv = q('eqAvailable').value;
+      out.editNote = q('eqNote').value;
+      q('eqEquity').value = '132222';
+      q('eqModalSave').click(); await w(1400);
+      out.afterEdit = [...document.querySelectorAll('#eqDaily tbody tr')]
+        .map(tr => tr.children[0].textContent.trim().slice(0,10) + '=' + tr.children[1].textContent.trim());
+
+      // 「补录一天」→ 空表单，可写历史日期
+      q('btnEqAddRow').click(); await w(400);
+      out.addTitle = q('eqModalTitle').textContent;
+      out.addEqEmpty = (q('eqEquity').value === '');
+      q('eqDate').value = '2026-11-20'; q('eqEquity').value = '130000';
+      q('eqModalSave').click(); await w(1400);
+      out.afterAdd = document.querySelectorAll('#eqDaily tbody tr').length;
+
+      // 编辑时改日期 → 原来那天消失
+      const b25 = [...document.querySelectorAll('#eqDaily button[data-eqact="edit"]')]
+        .find(b => b.dataset.d === '2026-11-25');
+      b25.click(); await w(400);
+      q('eqDate').value = '2026-11-26'; q('eqEquity').value = '150000';
+      q('eqModalSave').click(); await w(1500);
+      out.moved = [...document.querySelectorAll('#eqDaily tbody tr')]
+        .map(tr => tr.children[0].textContent.trim().slice(0,10)).sort();
+
+      // 表格里删一行
+      const db = [...document.querySelectorAll('#eqDaily button[data-eqact="del"]')]
+        .find(b => b.dataset.d === '2026-11-20');
+      db.click(); await w(1400);
+      out.afterDel = document.querySelectorAll('#eqDaily tbody tr').length;
+
+      // 清干净
+      for (const x of ((EqUI.data && EqUI.data.days) || [])) await del(x.d);
+      await EqUI.reload(); await w(600);
+      out.cleaned = document.querySelectorAll('#eqDaily tbody tr').length;
+      return JSON.stringify(out);
+    } catch (e) { out.err = String(e && e.stack || e); return JSON.stringify(out); }
+    finally { window.alert = _al; }
+  })()`));
+
+  check('每日记录表(v52.4): 每天的记录列成表(日期/收盘权益/涨跌/涨跌幅/可用/备注/操作)',
+        v524.n === 3 && JSON.stringify(v524.cols) === JSON.stringify(['日期','收盘权益','日涨跌','日涨跌幅','可用资金','备注','操作']),
+        JSON.stringify({n: v524.n, cols: v524.cols}));
+  check('每日记录表(v52.4): 最新的排最上面, 每行都有「修改」「删除」',
+        JSON.stringify(v524.dates) === JSON.stringify(['2026-11-25','2026-11-24','2026-11-21'])
+        && v524.hasEdit === 3 && v524.hasDel === 3,
+        JSON.stringify(v524.dates));
+  check('小字放大(v52.4): 顶部标签 12.5px(原 11px) / 数值 15px(原 13.5px)',
+        v524.kFont >= 12.4 && v524.vFont >= 14.9, JSON.stringify({k: v524.kFont, v: v524.vFont}));
+  check('涨跌配色(v52.4): 今日收盘大数字按当日涨跌上色(涨红跌绿, 原来是中性白字)',
+        (v524.lastChg > 0 ? /pos/.test(v524.bigCls) && /255, 107, 107/.test(v524.bigColor || '')
+                          : /neg/.test(v524.bigCls) && /46, 204, 143/.test(v524.bigColor || '')),
+        JSON.stringify({chg: v524.lastChg, cls: v524.bigCls, color: v524.bigColor}));
+  check('涨跌配色(v52.4): .eq-hero 里的数字不再被 color:var(--text) 吃掉 —— 月内高红 / 月内低绿',
+        /255, 107, 107/.test(v524.hiColor || '') && /46, 204, 143/.test(v524.loColor || ''),
+        JSON.stringify({hi: v524.hiColor, lo: v524.loColor}));
+  check('涨跌配色(v52.4): 累计盈亏/累计涨幅的 class 与数值同号(盈利红 / 亏损绿 / 0 中性)',
+        v524.cumVal > 0 ? (/pos/.test(v524.cumCls) && /255, 107, 107/.test(v524.cumColor || ''))
+          : (v524.cumVal < 0 ? (/neg/.test(v524.cumCls) && /46, 204, 143/.test(v524.cumColor || ''))
+             : !/pos|neg/.test(v524.cumCls)),
+        JSON.stringify({val: v524.cumVal, cls: v524.cumCls, color: v524.cumColor, pct: v524.cumPctColor}));
+  check('改历史(v52.4): 点「修改」载入那天原来的值(不是当前最新)', 
+        /2026-11-21/.test(v524.editTitle || '') && v524.editEq === '131500'
+        && v524.editAv === '99000' && v524.editNote === '跌一天',
+        JSON.stringify({t: v524.editTitle, eq: v524.editEq, av: v524.editAv, note: v524.editNote}));
+  check('改历史(v52.4): 改完保存, 那天变成 132,222 且不新增行',
+        v524.afterEdit.length === 3 && v524.afterEdit.some(x => x.indexOf('2026-11-21=132,222') === 0),
+        JSON.stringify(v524.afterEdit));
+  check('补录(v52.4): 「补录一天」给空表单, 能填历史日期 → 多出一条',
+        /补录/.test(v524.addTitle || '') && v524.addEqEmpty === true && v524.afterAdd === 4,
+        JSON.stringify({t: v524.addTitle, empty: v524.addEqEmpty, n: v524.afterAdd}));
+  check('改历史(v52.4): 编辑时把日期改到另一天 → 原来那天消失(不会留重复)',
+        JSON.stringify(v524.moved) === JSON.stringify(['2026-11-20','2026-11-21','2026-11-24','2026-11-26']),
+        JSON.stringify(v524.moved));
+  check('改历史(v52.4): 表格里点「删除」能删掉那天, 数据清空后表也空',
+        v524.afterDel === 3 && v524.cleaned === 0,
+        JSON.stringify({afterDel: v524.afterDel, cleaned: v524.cleaned}));
+  check('改历史(v52.4): 全程无报错弹窗', (v524.alerts || []).length === 0 && !v524.err,
+        JSON.stringify({alerts: v524.alerts, err: v524.err || ''}));
+
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
   ws.close();
