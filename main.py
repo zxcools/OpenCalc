@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5114            # 与 README 版本号 v51.14 对齐(数值比较用于单实例接管)
+APP_VERSION = 5200            # 与 README 版本号 v52.0 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -1763,6 +1763,7 @@ _DIFF_TABLES = (
     ("trade_records", "交易记录"),
     ("trade_pool_snapshots", "监控池"),
     ("trade_reviews", "复盘笔记"),
+    ("equity_daily", "账户日线"),
 )
 
 
@@ -2011,10 +2012,13 @@ def update_check():
 
 
 def _version_name(v):
-    """5040 → v50.40 (与 README 的版本号写法对齐)"""
+    """5040 → v50.40 (与 README 的版本号写法对齐)；整版号 5200 → v52.0"""
     s = str(int(v))
     if len(s) > 2:
-        return "v%s.%s" % (s[:-2], s[-2:])
+        major, minor = s[:-2], s[-2:]
+        if minor == "00":
+            return "v%s.0" % major      # v52.0 这种整版，不写成 v52.00
+        return "v%s.%s" % (major, minor)
     return "v" + s
 
 
@@ -2558,6 +2562,19 @@ def _db_ensure_schema(conn):
         ("close_reason", "TEXT"),                       # v51.02 平仓原因(止损触发/阶段止盈/跟踪止损/换月/到期…)
         ("open_state", "TEXT"),                         # v51.07 开仓状态: normal 正常 / trail 移动止损触发后
     ])
+    # v51.15: 账户权益日线(收盘价口径) —— 每天手工录一条「收盘权益 + 可用资金」
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS equity_daily (
+            d          TEXT PRIMARY KEY,     -- YYYY-MM-DD
+            equity     REAL NOT NULL,        -- 当日收盘权益(收盘价口径, 非结算价)
+            available  REAL,                 -- 当日可用资金
+            note       TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
     _ensure_cols("trade_pool_snapshots", [("mode", "TEXT NOT NULL DEFAULT 'options'")])
     _ensure_cols("trade_reviews", [
         ("mode", "TEXT NOT NULL DEFAULT 'options'"),
@@ -2801,6 +2818,266 @@ def fund_yearly_summary(strategy):
             "month_count": len(recs),
         })
     return summary
+
+
+# ===== v51.15: 账户权益日线(收盘价口径) =====
+#   数据源：用户每天收盘后手录一条「收盘权益 + 可用资金」(15:00~15:30 券商 App 上的动态权益)
+#   ⚠ 口径是**收盘价**，不是结算价：与资金曲线的月末权益(结算口径)会有零点几的差，展示时要标清楚
+#   出入金：不在这里录，统一从资金曲线的 records.cash_flow 取(用户定的口径)
+
+def _eq_date(s):
+    """日期归一成 YYYY-MM-DD；接受 2026-11-25 / 2026/11/25 / 20261125"""
+    raw = str(s or "").strip()
+    if not raw:
+        raise ValueError("请填写日期")
+    raw = raw.replace("/", "-").replace(".", "-")
+    parts = [x for x in raw.split("-") if x != ""]
+    if len(parts) == 3:
+        y, m, d = parts
+        out = "%04d-%02d-%02d" % (int(y), int(m), int(d))
+    elif len(raw) == 8 and raw.isdigit():
+        out = "%s-%s-%s" % (raw[:4], raw[4:6], raw[6:])
+    else:
+        raise ValueError("日期格式请用 2026-11-25")
+    datetime.strptime(out, "%Y-%m-%d")      # 非法日期(如 2-30)直接抛错
+    return out
+
+
+def _eq_float(v, label):
+    if v in (None, ""):
+        raise ValueError("请填写%s" % label)
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("%s 必须是数字" % label)
+    if not (abs(f) < 1e12):
+        raise ValueError("%s 超出合理范围" % label)
+    return f
+
+
+def equity_upsert(d, equity, available=None, note=""):
+    """录/改某一天的收盘权益。同一天重复录 → 覆盖"""
+    d = _eq_date(d)
+    eq = _eq_float(equity, "收盘权益")
+    if eq <= 0:
+        raise ValueError("收盘权益必须大于 0")
+    av = None if available in (None, "") else _eq_float(available, "可用资金")
+    now = datetime.now().isoformat(timespec="seconds")
+    db = _fund_db()
+    db.execute(
+        "INSERT INTO equity_daily (d, equity, available, note, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?) "
+        "ON CONFLICT(d) DO UPDATE SET equity=excluded.equity, available=excluded.available, "
+        "note=excluded.note, updated_at=excluded.updated_at",
+        (d, round(eq, 2), None if av is None else round(av, 2), (note or "").strip(), now, now),
+    )
+    return d
+
+
+def equity_delete(d):
+    d = _eq_date(d)
+    db = _fund_db()
+    db.execute("DELETE FROM equity_daily WHERE d=?", (d,))
+    return True
+
+
+def equity_days():
+    """全部日权益，按日期升序"""
+    db = _fund_db()
+    rows = db.execute("SELECT d, equity, available, note FROM equity_daily ORDER BY d ASC").fetchall()
+    return [{"d": r["d"], "equity": round(r["equity"], 2),
+             "available": (None if r["available"] is None else round(r["available"], 2)),
+             "note": r["note"] or ""} for r in rows]
+
+
+def _equity_base():
+    """期初基准 = 资金曲线最早一条月度记录的月初权益；净出入金 = 全部 cash_flow 之和
+    ⚠ 用月度现金流的合计，不按天摊 —— 日线里不记出入金(用户订的口径)"""
+    db = _fund_db()
+    row = db.execute(
+        "SELECT strategy, year, month, initial_equity FROM records ORDER BY year ASC, month ASC LIMIT 1"
+    ).fetchone()
+    if not row:
+        return {"date": "", "equity": 0.0, "net_flow": 0.0}
+    flow = db.execute("SELECT IFNULL(SUM(cash_flow), 0) FROM records").fetchone()[0] or 0.0
+    return {"date": "%04d-%02d" % (row["year"], row["month"]),
+            "equity": round(row["initial_equity"], 2),
+            "net_flow": round(flow, 2)}
+
+
+def _eq_equity_before(ym):
+    """某月(YYYY-MM)之前最近一条资金曲线月末权益；没有则返回 None
+    ⚠ 日线第一根的「开」必须用它(而不是期初基准 2025-11)，否则第一根会凭空暴涨几十个点"""
+    db = _fund_db()
+    row = db.execute(
+        "SELECT end_equity FROM records WHERE (year * 100 + month) < ? "
+        "ORDER BY year DESC, month DESC LIMIT 1",
+        (int(ym[:4]) * 100 + int(ym[5:7]),),
+    ).fetchone()
+    return round(row["end_equity"], 2) if row and row["end_equity"] else None
+
+
+def _eq_mdd(values):
+    """最大回撤(负数，如 -0.0842)；峰值按历史最高权益走"""
+    peak, mdd = None, 0.0
+    for v in values:
+        if v is None:
+            continue
+        if peak is None or v > peak:
+            peak = v
+        if peak and peak > 0:
+            dd = (v - peak) / peak
+            if dd < mdd:
+                mdd = dd
+    return round(mdd, 6)
+
+
+def _eq_hold_cost_series():
+    """按日期重放期权持仓成本(仅 options/dual)，返回 {日期: 当日收盘时持仓成本合计}
+    成本口径：买入开仓 +权利金；卖出开仓 −权利金；平仓按 FIFO 扣掉对应成本
+    ⚠ 这个「成本」只用来算仓位占比(成本口径)，不影响权益"""
+    db = _fund_db()
+    rows = db.execute(
+        "SELECT id, contract, op_type, direction, open_date, close_date, qty, close_qty, premium "
+        "FROM trade_records WHERE IFNULL(mode, 'options') IN ('options', 'dual') ORDER BY id ASC"
+    ).fetchall()
+    events = []
+    for r in rows:
+        raw = (r["open_date"] or "") if r["op_type"] == "open" else (r["close_date"] or "")
+        raw = str(raw).strip()[:10]
+        if not raw:
+            continue
+        events.append((raw, r["id"], r))
+    events.sort(key=lambda x: (x[0], x[1]))
+    lots, out = {}, {}
+    for day, _rid, r in events:
+        key = (r["contract"] or "").strip().upper()
+        if r["op_type"] == "open":
+            q = int(r["qty"] or 0)
+            if q <= 0:
+                continue
+            per = (r["premium"] or 0) / q
+            if (r["direction"] or "buy") == "sell":
+                per = -per          # 卖出开仓收钱 → 成本为负
+            lots.setdefault(key, []).append([q, per])
+        else:
+            q = int(r["close_qty"] or 0)
+            queue = lots.get(key) or []
+            while q > 0 and queue:
+                lot = queue[0]
+                take = min(q, lot[0])
+                lot[0] -= take
+                q -= take
+                if lot[0] <= 0:
+                    queue.pop(0)
+        out[day] = round(sum(l[0] * l[1] for v in lots.values() for l in v), 2)
+    return out
+
+
+def equity_overview(today=None):
+    """账户权益总览：日线/月线 K 序列 + 当前状态 + 月度统计 + 回撤 + 仓位占比"""
+    days = equity_days()
+    base = _equity_base()
+    today = (today or datetime.now().strftime("%Y-%m-%d"))[:10]
+    empty = {
+        "ok": True, "empty": True, "base": base, "today": None, "cum": None,
+        "month": None, "account_mdd": 0.0, "days": [], "months": [], "pos": [],
+    }
+    if not days:
+        return empty
+
+    # ---- 日线：开 = 上一条收盘(第一条用期初权益)，无影线 ----
+    series = []
+    # 首根的「开」= 该月之前最近的月末权益(资金曲线)；查不到才退回期初基准
+    anchor_eq = _eq_equity_before(days[0]["d"][:7])
+    if anchor_eq is None:
+        anchor_eq = base["equity"] if base["equity"] > 0 else days[0]["equity"]
+    prev = anchor_eq
+    for x in days:
+        o, c = prev, x["equity"]
+        series.append({
+            "d": x["d"], "open": round(o, 2), "close": round(c, 2),
+            "chg": round(c - o, 2),
+            "pct": round((c - o) / o, 6) if o else 0.0,
+            "available": x["available"], "note": x["note"],
+        })
+        prev = c
+
+    # ---- 月线：开=当月首根的 open，收=当月末根，高/低=月内日权益极值(有影线) ----
+    months, order = {}, []
+    for x in series:
+        ym = x["d"][:7]
+        m = months.get(ym)
+        if m is None:
+            m = months[ym] = {"ym": ym, "open": x["open"], "close": x["close"],
+                              "high": x["close"], "low": x["close"], "days": 0}
+            order.append(ym)
+        m["close"] = x["close"]
+        m["high"] = max(m["high"], x["close"])
+        m["low"] = min(m["low"], x["close"])
+        m["days"] += 1
+    month_list = []
+    for ym in order:
+        m = months[ym]
+        o, c = m["open"], m["close"]
+        month_list.append({
+            "ym": ym, "open": round(o, 2), "close": round(c, 2),
+            "high": round(m["high"], 2), "low": round(m["low"], 2),
+            "chg": round(c - o, 2), "pct": round((c - o) / o, 6) if o else 0.0,
+            "days": m["days"],
+            "mdd": _eq_mdd([o] + [x["close"] for x in series if x["d"][:7] == ym]),
+        })
+
+    # ---- 当前状态 ----
+    last = series[-1]
+    prev_close = series[-2]["close"] if len(series) >= 2 else last["open"]
+    chg = round(last["close"] - prev_close, 2)
+    cur = months.get(today[:7])
+    month_info = None
+    if cur:
+        o, c = cur["open"], cur["close"]
+        month_info = {
+            "ym": today[:7], "first": round(o, 2), "last": round(c, 2),
+            "chg": round(c - o, 2), "pct": round((c - o) / o, 6) if o else 0.0,
+            "high": round(cur["high"], 2), "low": round(cur["low"], 2),
+            "days": cur["days"],
+            "mdd": _eq_mdd([o] + [x["close"] for x in series if x["d"][:7] == today[:7]]),
+        }
+
+    # ---- 累计盈亏(剔除出入金) ----
+    cum = None
+    if base["equity"] > 0:
+        pnl = last["close"] - base["equity"] - base["net_flow"]
+        cum = {"pnl": round(pnl, 2), "pct": round(pnl / base["equity"], 6),
+               "base_equity": base["equity"], "base_date": base["date"],
+               "net_flow": base["net_flow"]}
+
+    # ---- 仓位占比(成本口径) ----
+    cost_map = _eq_hold_cost_series()
+    keys = sorted(cost_map)
+    j, cur_cost = 0, 0.0
+    pos = []
+    for x in series:
+        while j < len(keys) and keys[j] <= x["d"]:
+            cur_cost = cost_map[keys[j]]
+            j += 1
+        pos.append({"d": x["d"], "cost": round(cur_cost, 2),
+                    "ratio": round(cur_cost / x["close"], 6) if x["close"] else 0.0})
+
+    return {
+        "ok": True, "empty": False, "base": base, "cum": cum,
+        "today": {
+            "d": last["d"], "equity": last["close"], "available": last["available"],
+            "prev": round(prev_close, 2), "chg": chg,
+            "pct": round(chg / prev_close, 6) if prev_close else 0.0,
+        },
+        "month": month_info,
+        "account_mdd": _eq_mdd([anchor_eq] + [x["close"] for x in series]),
+        "days": series,
+        "months": month_list,
+        "pos": pos,
+        "pos_now": pos[-1]["ratio"] if pos else 0.0,
+    }
 
 
 def fund_combined_summary():
@@ -4608,6 +4885,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/funds/export":
             self._send(200, _json({"ok": True, **fund_export_backup()}))
 
+        # ---- v51.15: 账户权益日线 ----
+        elif path == "/api/equity/overview":
+            qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            today = (qs.get("today") or [None])[0]
+            self._send(200, _json(equity_overview(today)))
+
         # ---- 期权交易记录 ----
         elif path == "/api/trades/groups":
             qs = urllib.parse.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
@@ -4814,6 +5097,19 @@ class Handler(BaseHTTPRequestHandler):
                 # 用 backup 目录里的某个 .db 快照恢复当前库(恢复前会给当前库再存一份)
                 cnt = fund_restore_backup(params.get("name", ""))
                 self._send(200, _json({"ok": True, **cnt, "msg": "已恢复"}))
+                return
+
+            # ---- v51.15: 账户权益日线 (POST) ----
+            elif path == "/api/equity/upsert":
+                d = equity_upsert(params.get("d"), params.get("equity"),
+                                  params.get("available"), params.get("note", ""))
+                fund_auto_backup("账户日线-保存", detail="账户日线 %s" % d)
+                self._send(200, _json({"ok": True, "d": d, "msg": "已保存"}))
+                return
+            elif path == "/api/equity/delete":
+                d = equity_delete(params.get("d"))
+                fund_auto_backup("账户日线-删除", detail="删除账户日线 %s" % d)
+                self._send(200, _json({"ok": True, "msg": "已删除"}))
                 return
 
             # ---- 期权交易记录 (POST) ----
@@ -5841,6 +6137,34 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .risk-strip .rs-main .sub{display:block;font-size:10.5px;color:var(--sub);margin-top:2px}
 .risk-strip .rs-cell b{font-size:13.5px;font-weight:700;color:var(--text)}
 @media (max-width:1180px){ .risk-strip{grid-template-columns:1fr 1fr;row-gap:12px} }
+/* ===== v51.15: 账户K线(日线/月线) ===== */
+.eq-top{display:flex;align-items:center;gap:12px;margin:0 0 14px;flex-wrap:wrap}
+.eq-title{font-size:15px;font-weight:600;color:var(--text)}
+.eq-title small{font-size:11px;font-weight:400;color:var(--sub);margin-left:8px}
+.eq-seg{display:flex;gap:2px;padding:2px;background:var(--panel);border:1px solid var(--border);border-radius:10px}
+.eq-hero{display:grid;grid-template-columns:1.15fr 1fr 1fr 1.1fr;gap:16px;align-items:start;
+  padding:16px 18px;background:var(--panel2);border:1px solid var(--border);
+  border-radius:14px;margin-bottom:12px}
+.eq-hero .k{display:block;font-size:11px;color:var(--sub);margin-bottom:4px;letter-spacing:.2px}
+.eq-hero .v{font-size:13.5px;font-weight:700;color:var(--text)}
+.eq-big{font-size:27px;font-weight:800;line-height:1.12;color:var(--text);letter-spacing:-.3px}
+.eq-chg{font-size:12.5px;font-weight:700;margin-left:9px}
+.eq-2r{display:grid;gap:10px}
+.eq-monthbar{display:flex;align-items:baseline;gap:24px;flex-wrap:wrap;padding:2px 2px 10px;
+  font-size:12px;color:var(--sub)}
+.eq-monthbar b{color:var(--text);font-size:13px;font-weight:700}
+.eq-mdd{margin-left:auto;display:flex;align-items:center;gap:8px;padding:5px 11px;border-radius:9px;
+  background:rgba(255,107,107,.10);border:1px solid rgba(255,107,107,.35);font-size:11px;color:var(--sub)}
+.eq-mdd b{color:var(--bad);font-size:13px}
+#eqChart{width:100%;display:block;background:var(--panel2);border:1px solid var(--border);border-radius:12px}
+.eq-pos{margin-top:14px;padding:12px 14px;background:var(--panel2);border:1px solid var(--border);border-radius:12px}
+.eq-pos .hd{display:flex;align-items:baseline;gap:10px;margin-bottom:8px;font-size:12px;color:var(--text)}
+.eq-pos .hd small{color:var(--sub);font-size:11px}
+.eq-pos .hd .now{margin-left:auto;font-size:12px;color:var(--sub)}
+.eq-pos .hd .now b{color:var(--text);font-size:13px}
+#eqPosChart{width:100%;display:block;height:92px}
+.eq-empty{padding:44px 20px;text-align:center;color:var(--sub);font-size:13px;line-height:1.9}
+
 /* v51.13: 主表「开仓状态」列只在期权买方出现 */
 [data-tm="futures"] .col-openstate,
 [data-tm="dual"] .col-openstate{display:none !important}
@@ -6149,6 +6473,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
     <div class="maintab" data-tab="tradesDual"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="22" y="36" width="26" height="11" rx="3" fill="var(--mk-main)"/><rect x="52" y="36" width="26" height="11" rx="3" fill="var(--mk-acc)"/><rect x="22" y="53" width="56" height="11" rx="3" fill="var(--mk-base)" opacity=".55"/></svg></span><span class="mt">交易记录</span><small>期权双买</small></div>
     <div class="maintab" data-tab="tradesFut"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><rect x="26" y="36" width="30" height="11" rx="3" fill="var(--mk-acc)"/><rect x="26" y="53" width="48" height="11" rx="3" fill="var(--mk-main)"/></svg></span><span class="mt">交易记录</span><small>期货模式</small></div>
     <div class="maintab" data-tab="funds"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="var(--mk-base)"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="var(--mk-main)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="var(--mk-acc)"/></svg></span><span class="mt">资金曲线</span><small>多策略</small></div>
+    <div class="maintab" data-tab="equity"><span class="mi"><svg viewBox="0 0 100 100" aria-hidden="true"><rect x="20" y="30" width="12" height="34" rx="2" fill="none" stroke="var(--mk-main)" stroke-width="7"/><rect x="44" y="18" width="12" height="46" rx="2" fill="var(--mk-acc)"/><rect x="68" y="40" width="12" height="24" rx="2" fill="none" stroke="var(--mk-main)" stroke-width="7"/><rect x="16" y="76" width="68" height="7" rx="3.5" fill="var(--mk-base)"/></svg></span><span class="mt">账户K线</span><small>日线 · 月线</small></div>
     <div class="side-extras">
       <button class="side-btn" id="btnTabPrefs" title="侧边栏显示设置：勾选要显示的页面（没勾的只是隐藏入口，数据照常保存）">☰</button>
       <button class="side-btn" id="btnExport" title="导出全部数据（资金曲线 + 期货/期权交易记录（含开平仓时间）+ 监控池 + 复盘笔记 + 计算器最近方案 + 手续费口径 / 统计区间设置）">⬆</button>
@@ -6717,6 +7042,42 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
       </div>
     </div>
   </div><!-- /fundsArea -->
+
+  <!-- ============================ 账户K线 v51.15 ============================ -->
+  <div id="equityArea" class="hidden">
+    <div class="wrap">
+      <div class="eq-top">
+        <div class="eq-title">账户权益<small>收盘价口径</small></div>
+        <div class="seg eq-seg" id="eqPeriodSeg" role="group" aria-label="周期">
+          <button type="button" class="fee-opt active" data-p="day" aria-pressed="true">日线</button>
+          <button type="button" class="fee-opt" data-p="month" aria-pressed="false">月线</button>
+        </div>
+        <span class="spacer"></span>
+        <button class="btn xs ghost" id="btnEqDelete" title="删除当前选中那一天的记录">删除当天</button>
+        <button class="btn xs" id="btnEqRecord">录入收盘</button>
+      </div>
+      <div id="eqBody"></div>
+    </div>
+  </div>
+
+  <!-- 录入弹窗 -->
+  <div class="modal-bg hidden" id="eqModalBg">
+    <div class="modal" style="max-width:420px">
+      <div class="m-hd"><b id="eqModalTitle">录入今日收盘</b>
+        <button class="xbtn" id="eqModalX" aria-label="关闭">×</button></div>
+      <div class="m-body" style="display:grid;gap:10px">
+        <label>日期<input id="eqDate" type="date"></label>
+        <label>收盘权益（元）<input id="eqEquity" type="number" step="0.01" min="0" inputmode="decimal" placeholder="券商 App 上的动态权益"></label>
+        <label>可用资金（元）<input id="eqAvailable" type="number" step="0.01" min="0" inputmode="decimal" placeholder="可留空"></label>
+        <label>备注<input id="eqNote" placeholder="选填"></label>
+        <div class="tip" style="margin:0">只录 <b>15:00~15:30</b> 之间 App 上显示的动态权益，那是收盘价口径；过了 16:00 结算后会变成结算价口径。</div>
+      </div>
+      <div class="m-ft">
+        <button class="btn ghost" id="eqModalCancel">取消</button>
+        <button class="btn" id="eqModalSave">保存</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ============================ 期权交易记录 ============================ -->
   <div id="tradesArea" class="hidden">
@@ -11836,6 +12197,8 @@ const FundUI = {
         $('calcArea').classList.toggle('hidden', tab !== 'calc');
         if (typeof syncFavCol === 'function') syncFavCol(tab);   // v51.09: 自选列只在开仓计算页出现
         $('fundsArea').classList.toggle('hidden', tab !== 'funds');
+        $('equityArea').classList.toggle('hidden', tab !== 'equity');   // v52.0
+        if (tab === 'equity' && typeof EqUI !== 'undefined') EqUI.reload();
         const isTradeTab = (tab === 'trades' || tab === 'tradesDual' || tab === 'tradesFut');
         $('tradesArea').classList.toggle('hidden', !isTradeTab);
         // 两个交易记录 tab 共用同一套界面, 靠 mode 切换字段与标签
@@ -11848,7 +12211,8 @@ const FundUI = {
           trades:    {t:'交易记录：期权买方', s:'期权买方代替期货开仓 · 逐笔记录 + 自动汇总'},
           tradesDual:{t:'交易记录：期权双买', s:'call + put 两腿同批次记录 · 逐笔盈亏 · 复盘'},
           tradesFut: {t:'交易记录：期货模式', s:'期货开平仓逐笔记录 · 持仓汇总 · 复盘笔记'},
-          funds:  {t:'资金曲线',        s:'期权买方 · 威科夫 · 期权双买 多策略记录'}
+          funds:  {t:'资金曲线',        s:'期权买方 · 威科夫 · 期权双买 多策略记录'},
+          equity: {t:'账户权益K线',     s:'每日收盘权益 · 日线/月线 · 收盘价口径'}
         };
         // header logo 跟随当前 tab, 与左侧栏图标保持一致
         const logos = {
@@ -11856,7 +12220,8 @@ const FundUI = {
           trades:    '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="48" height="11" rx="3" fill="#7FA8CC"/><rect x="26" y="53" width="30" height="11" rx="3" fill="#E8B255"/></svg>',
           tradesDual:'<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="22" y="36" width="26" height="11" rx="3" fill="#7FA8CC"/><rect x="52" y="36" width="26" height="11" rx="3" fill="#E8B255"/><rect x="22" y="53" width="56" height="11" rx="3" fill="#7FA8CC" opacity=".55"/></svg>',
           tradesFut: '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><rect x="26" y="36" width="30" height="11" rx="3" fill="#E8B255"/><rect x="26" y="53" width="48" height="11" rx="3" fill="#7FA8CC"/></svg>',
-          funds:  '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="#7FA8CC" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="#E8B255"/></svg>'
+          funds:  '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="16" y="74" width="68" height="8" rx="4" fill="#E8EDF2"/><path d="M25 62 L42 48 L57 57 L74 31" fill="none" stroke="#7FA8CC" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/><circle cx="75" cy="30" r="7" fill="#E8B255"/></svg>',
+          equity: '<svg viewBox="0 0 100 100" aria-hidden="true"><rect x="20" y="30" width="12" height="34" rx="2" fill="none" stroke="#7FA8CC" stroke-width="7"/><rect x="44" y="18" width="12" height="46" rx="2" fill="#E8B255"/><rect x="68" y="40" width="12" height="24" rx="2" fill="none" stroke="#7FA8CC" stroke-width="7"/><rect x="16" y="76" width="68" height="7" rx="3.5" fill="#E8EDF2"/></svg>'
         };
         const ti = titles[tab];
         if (ti) { $('appTitle').textContent = ti.t; $('appSubtitle').textContent = ti.s; }
@@ -12831,6 +13196,393 @@ const FundUI = {
     this.bindLegend(this.legendEl('yearly'),  'yearly');
   },
 };
+
+/* ============================================================
+   v51.15 账户K线（日线/月线）
+   · 数据 = 每天手录的「收盘权益」（收盘价口径，非结算价）
+   · 指标 = 今日/昨收/可用/月内高低/累计盈亏(剔除出入金)/最大回撤/仓位占比(成本口径)
+   · 图 = Canvas 自绘：日线无影线(实体=昨收→今收)、月线带影线(高低=月内极值)
+   ============================================================ */
+const EqUI = {
+  period: 'day',
+  data: null,
+  selDate: '',
+  hover: -1,
+  _loading: false,
+
+  init(){
+    const seg = $('eqPeriodSeg');
+    if (seg) seg.addEventListener('click', e => {
+      const b = e.target.closest('.fee-opt');
+      if (!b) return;
+      this.setPeriod(b.dataset.p);
+    });
+    if ($('btnEqRecord')) $('btnEqRecord').addEventListener('click', () => this.openModal());
+    if ($('btnEqDelete')) $('btnEqDelete').addEventListener('click', () => this.del());
+    if ($('eqModalX')) $('eqModalX').addEventListener('click', () => this.closeModal());
+    if ($('eqModalCancel')) $('eqModalCancel').addEventListener('click', () => this.closeModal());
+    if ($('eqModalSave')) $('eqModalSave').addEventListener('click', () => this.save());
+    if ($('eqModalBg')) $('eqModalBg').addEventListener('click', e => {
+      if (e.target === $('eqModalBg')) this.closeModal();
+    });
+    // 悬停看数值
+    const cv = $('eqChart');
+    if (cv) {
+      cv.addEventListener('mousemove', e => {
+        const bars = this.bars();
+        if (!bars.length) return;
+        const r = cv.getBoundingClientRect();
+        const geo = this.geo(cv.clientWidth, cv.clientHeight, bars);
+        const idx = Math.floor((e.clientX - r.left - geo.padL) / geo.step);
+        const i = Math.max(0, Math.min(bars.length - 1, idx));
+        if (i !== this.hover) { this.hover = i; this.draw(); }
+      });
+      cv.addEventListener('mouseleave', () => { this.hover = -1; this.draw(); });
+      cv.addEventListener('click', () => {
+        const bars = this.bars();
+        if (this.hover >= 0 && bars[this.hover]) this.selDate = this.keyOf(bars[this.hover]);
+      });
+    }
+    window.addEventListener('resize', () => { if (this.data) this.draw(); });
+  },
+
+  async reload(){
+    if (this._loading) return;
+    this._loading = true;
+    try {
+      const r = await fetchT('/api/equity/overview');
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || '加载失败');
+      this.data = d;
+      this.render();
+    } catch (e) {
+      const box = $('eqBody');
+      if (box) box.innerHTML = '<div class="eq-empty">账户K线数据加载失败：' + escHtml(String(e && e.message || e)) + '</div>';
+    } finally {
+      this._loading = false;
+    }
+  },
+
+  setPeriod(p){
+    this.period = (p === 'month') ? 'month' : 'day';
+    document.querySelectorAll('#eqPeriodSeg .fee-opt').forEach(b => {
+      const on = b.dataset.p === this.period;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    if (this.data) this.render();
+  },
+
+  bars(){
+    const d = this.data;
+    if (!d || d.empty) return [];
+    return this.period === 'day' ? (d.days || []) : (d.months || []);
+  },
+
+  keyOf(bar){ return this.period === 'day' ? bar.d : bar.ym; },
+
+  fmtMoney(v){
+    if (v == null) return '—';
+    return '¥ ' + Number(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+  },
+
+  fmtSigned(v, digits){
+    const n = Number(v || 0);
+    const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+    return sign + Math.abs(n).toLocaleString('en-US', {maximumFractionDigits: digits == null ? 2 : digits});
+  },
+
+  fmtPct(v, digits){
+    const n = Number(v || 0);
+    const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+    return sign + (Math.abs(n) * 100).toFixed(digits == null ? 2 : digits) + '%';
+  },
+
+  clsOf(v){ return v > 0 ? 'pos' : (v < 0 ? 'neg' : ''); },
+
+  render(){
+    const box = $('eqBody');
+    if (!box) return;
+    const d = this.data;
+    if (!d || d.empty){
+      box.innerHTML = '<div class="eq-empty">还没有任何记录。<br>点右上角「录入收盘」，把今天 15:00~15:30 看到的账户动态权益填进来，第二天起就会长出一根 K 线。</div>';
+      return;
+    }
+    const t = d.today || {};
+    const m = d.month || {};
+    const cum = d.cum || {};
+    const isDay = this.period === 'day';
+    const mdd = isDay ? (m.mdd || 0) : (d.account_mdd || 0);
+    const mddLabel = isDay ? '本月最大回撤' : '账户最大回撤';
+    const rangeLabel = isDay
+      ? ('本月 · ' + (d.days.length ? d.days[0].d.slice(5) : '') + ' 至 ' + (d.today ? d.today.d.slice(5) : ''))
+      : ('共 ' + (d.months || []).length + ' 个月');
+
+    box.innerHTML = `
+      <div class="eq-hero">
+        <div>
+          <span class="k">今日收盘（CNY）</span>
+          <div class="eq-big">${escHtml(this.fmtMoney(t.equity).replace('¥ ', ''))}</div>
+          <span class="eq-chg ${this.clsOf(t.chg)}">${this.fmtSigned(t.chg)}</span>
+          <span class="eq-chg ${this.clsOf(t.pct)}">${this.fmtPct(t.pct)}</span>
+        </div>
+        <div class="eq-2r">
+          <div><span class="k">昨收</span><span class="v">${escHtml(this.fmtMoney(t.prev).replace('¥ ', ''))}</span></div>
+          <div><span class="k">可用资金</span><span class="v">${escHtml(this.fmtMoney(t.available).replace('¥ ', ''))}</span></div>
+        </div>
+        <div class="eq-2r">
+          <div><span class="k">月内高</span><span class="v">${escHtml(this.fmtMoney(m.high).replace('¥ ', ''))}</span></div>
+          <div><span class="k">月内低</span><span class="v">${escHtml(this.fmtMoney(m.low).replace('¥ ', ''))}</span></div>
+        </div>
+        <div class="eq-2r">
+          <div><span class="k">累计盈亏</span><span class="v ${this.clsOf(cum.pnl)}">${this.fmtSigned(cum.pnl)}</span></div>
+          <div><span class="k">累计涨幅</span><span class="v ${this.clsOf(cum.pct)}">${this.fmtPct(cum.pct)}</span></div>
+        </div>
+      </div>
+
+      <div class="eq-monthbar">
+        <span>${escHtml(rangeLabel)}</span>
+        <span>月初权益 <b>${escHtml(this.fmtMoney(m.first).replace('¥ ', ''))}</b></span>
+        <span>本月涨跌 <b class="${this.clsOf(m.chg)}">${this.fmtSigned(m.chg)}</b></span>
+        <span>本月涨幅 <b class="${this.clsOf(m.pct)}">${this.fmtPct(m.pct)}</b></span>
+        <span class="eq-mdd">${escHtml(mddLabel)} <b>${this.fmtPct(mdd)}</b></span>
+      </div>
+
+      <canvas id="eqChart"></canvas>
+
+      <div class="eq-pos">
+        <div class="hd">仓位占比 <small>按持仓成本 / 权益</small>
+          <span class="now">当前 <b>${this.fmtPct(d.pos_now, 2).replace('+', '')}</b></span></div>
+        <canvas id="eqPosChart"></canvas>
+      </div>`;
+
+    // 容器刚显示出来时 clientWidth 可能还是 0 → 下一帧再画一次
+    if (!($('eqChart') && $('eqChart').clientWidth)) {
+      requestAnimationFrame(() => this.draw());
+    } else {
+      this.draw();
+    }
+  },
+
+  geo(W, H, bars){
+    const padL = 58, padR = 14, padT = 16, padB = 22;
+    const cw = Math.max(40, W - padL - padR), ch = Math.max(40, H - padT - padB);
+    let hi = -Infinity, lo = Infinity;
+    bars.forEach(b => {
+      hi = Math.max(hi, b.high != null ? b.high : Math.max(b.open, b.close));
+      lo = Math.min(lo, b.low != null ? b.low : Math.min(b.open, b.close));
+    });
+    if (!isFinite(hi) || !isFinite(lo)) { hi = 1; lo = 0; }
+    const span = hi - lo;
+    const pad = span > 0 ? span * 0.1 : Math.max(1, hi * 0.02);
+    hi += pad; lo -= pad;
+    const step = cw / Math.max(1, bars.length);
+    return {padL, padR, padT, padB, cw, ch, hi, lo, step};
+  },
+
+  draw(){
+    const cv = $('eqChart');
+    if (!cv) return;
+    const bars = this.bars();
+    const W = cv.clientWidth || cv.parentElement.clientWidth || 720;
+    const H = 300;
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cv.style.height = H + 'px';
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    if (!bars.length) return;
+
+    const cs = getComputedStyle(document.documentElement);
+    const cSub = cs.getPropertyValue('--sub').trim() || '#8a9a8f';
+    const cGrid = 'rgba(255,255,255,0.07)';
+    const cBad = cs.getPropertyValue('--bad').trim() || '#ff6b6b';
+    const cGood = cs.getPropertyValue('--good').trim() || '#2ecc8f';
+    const geo = this.geo(W, H, bars);
+    const y = v => geo.padT + geo.ch - (v - geo.lo) / (geo.hi - geo.lo) * geo.ch;
+
+    // 网格 + 左侧刻度
+    g.font = '11px -apple-system, Segoe UI, Microsoft YaHei, sans-serif';
+    g.textBaseline = 'middle';
+    const lines = 4;
+    for (let i = 0; i <= lines; i++) {
+      const v = geo.lo + (geo.hi - geo.lo) * i / lines;
+      const yy = y(v);
+      g.strokeStyle = cGrid; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(geo.padL, yy); g.lineTo(W - geo.padR, yy); g.stroke();
+      g.fillStyle = cSub; g.textAlign = 'right';
+      g.fillText((v / 1000).toFixed(0) + 'k', geo.padL - 8, yy);
+    }
+
+    // K 线
+    const bw = Math.min(15, Math.max(3, geo.step * 0.62));
+    bars.forEach((b, i) => {
+      const cx = geo.padL + geo.step * (i + 0.5);
+      const up = b.close >= b.open;
+      const col = up ? cBad : cGood;
+      const y1 = y(b.open), y2 = y(b.close);
+      const top = Math.min(y1, y2), h = Math.max(2, Math.abs(y2 - y1));
+      if (this.period === 'month') {
+        g.strokeStyle = col; g.lineWidth = 1.2;
+        g.beginPath(); g.moveTo(cx, y(b.high)); g.lineTo(cx, y(b.low)); g.stroke();
+      }
+      if (up) {
+        g.strokeStyle = col; g.lineWidth = 1.6;
+        g.strokeRect(cx - bw / 2, top, bw, h);
+      } else {
+        g.fillStyle = col;
+        g.fillRect(cx - bw / 2, top, bw, h);
+      }
+      if (i === this.hover) {
+        g.strokeStyle = 'rgba(255,255,255,.45)'; g.lineWidth = 1;
+        g.strokeRect(cx - bw / 2 - 3, geo.padT, bw + 6, geo.ch);
+      }
+    });
+
+    // 当前值虚线
+    const last = bars[bars.length - 1];
+    const ly = y(last.close);
+    g.save();
+    g.setLineDash([4, 4]);
+    g.strokeStyle = 'rgba(120,170,255,.55)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(geo.padL, ly); g.lineTo(W - geo.padR, ly); g.stroke();
+    g.restore();
+    g.fillStyle = '#7aa7ff'; g.textAlign = 'left';
+    g.fillText((last.close / 1000).toFixed(1) + 'k', W - geo.padR - 34, Math.max(geo.padT + 8, ly - 9));
+
+    // X 轴日期
+    const n = bars.length;
+    const every = Math.max(1, Math.ceil(n / 6));
+    g.fillStyle = cSub; g.textAlign = 'center'; g.textBaseline = 'top';
+    bars.forEach((b, i) => {
+      if (i % every !== 0 && i !== n - 1) return;
+      const cx = geo.padL + geo.step * (i + 0.5);
+      const label = this.period === 'day' ? b.d.slice(5) : b.ym.slice(2);
+      g.fillText(label, Math.min(W - geo.padR - 14, Math.max(geo.padL + 14, cx)), H - 16);
+    });
+
+    // 悬停提示
+    if (this.hover >= 0 && bars[this.hover]) {
+      const b = bars[this.hover];
+      const cx = geo.padL + geo.step * (this.hover + 0.5);
+      const txt = this.period === 'day'
+        ? (b.d + '  收 ' + Number(b.close).toLocaleString('en-US', {maximumFractionDigits: 2})
+           + '  ' + this.fmtPct(b.pct))
+        : (b.ym + '  开 ' + Number(b.open).toLocaleString('en-US', {maximumFractionDigits: 0})
+           + '  收 ' + Number(b.close).toLocaleString('en-US', {maximumFractionDigits: 0})
+           + '  ' + this.fmtPct(b.pct));
+      g.font = '11.5px -apple-system, Segoe UI, Microsoft YaHei, sans-serif';
+      const w = g.measureText(txt).width + 16;
+      let bx = Math.min(W - geo.padR - w, Math.max(geo.padL, cx - w / 2));
+      g.fillStyle = 'rgba(10,14,20,.92)';
+      g.strokeStyle = 'rgba(255,255,255,.16)';
+      g.beginPath();
+      if (g.roundRect) g.roundRect(bx, geo.padT + 2, w, 22, 6); else g.rect(bx, geo.padT + 2, w, 22);
+      g.fill(); g.stroke();
+      g.fillStyle = '#e6edf3'; g.textAlign = 'left'; g.textBaseline = 'middle';
+      g.fillText(txt, bx + 8, geo.padT + 13);
+    }
+
+    this.drawPos(geo);
+  },
+
+  drawPos(geo){
+    const cv = $('eqPosChart');
+    if (!cv) return;
+    const d = this.data;
+    const pos = (d && d.pos) || [];
+    const W = cv.clientWidth || cv.parentElement.clientWidth || 720;
+    const H = 92;
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    cv.style.height = H + 'px';
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    if (!pos.length) return;
+    const cs = getComputedStyle(document.documentElement);
+    const cSub = cs.getPropertyValue('--sub').trim() || '#8a9a8f';
+    const cBad = cs.getPropertyValue('--bad').trim() || '#ff6b6b';
+    const cGood = cs.getPropertyValue('--good').trim() || '#2ecc8f';
+    const baseY = H - 16, maxH = H - 30;
+    const maxRatio = Math.max(0.4, ...pos.map(p => Math.abs(p.ratio || 0))) || 0.4;
+    const bw = Math.min(15, Math.max(3, geo.step * 0.62));
+    pos.forEach((p, i) => {
+      const cx = geo.padL + geo.step * (i + 0.5);
+      const h = Math.max(1, Math.abs(p.ratio || 0) / maxRatio * maxH);
+      g.fillStyle = (p.ratio || 0) >= 0 ? 'rgba(255,107,107,.62)' : 'rgba(46,204,143,.62)';
+      g.fillRect(cx - bw / 2, baseY - h, bw, h);
+      if (i === pos.length - 1) {
+        g.fillStyle = cSub; g.font = '11px -apple-system, Segoe UI, Microsoft YaHei, sans-serif';
+        g.textAlign = 'center'; g.textBaseline = 'bottom';
+        g.fillText((Math.abs(p.ratio || 0) * 100).toFixed(1) + '%', cx, baseY - h - 2);
+      }
+    });
+    g.strokeStyle = 'rgba(255,255,255,.10)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(geo.padL, baseY + 0.5); g.lineTo(W - geo.padR, baseY + 0.5); g.stroke();
+  },
+
+  openModal(date){
+    const t = this.data && this.data.today;
+    const fallback = t && t.d ? t.d : new Date().toISOString().slice(0, 10);
+    if ($('eqDate')) $('eqDate').value = date || fallback;
+    if ($('eqEquity')) $('eqEquity').value = (t && t.equity != null) ? t.equity : '';
+    if ($('eqAvailable')) $('eqAvailable').value = (t && t.available != null) ? t.available : '';
+    if ($('eqNote')) $('eqNote').value = '';
+    if ($('eqModalTitle')) $('eqModalTitle').textContent = '录入收盘权益';
+    $('eqModalBg').classList.remove('hidden');
+    setTimeout(() => { if ($('eqEquity')) $('eqEquity').focus(); }, 30);
+  },
+
+  closeModal(){
+    if ($('eqModalBg')) $('eqModalBg').classList.add('hidden');
+  },
+
+  async save(){
+    const d = ($('eqDate').value || '').trim();
+    const eq = ($('eqEquity').value || '').trim();
+    if (!d) { alert('请选择日期'); return; }
+    if (!(parseFloat(eq) > 0)) { alert('请填写有效的收盘权益'); return; }
+    try {
+      const r = await fetchT('/api/equity/upsert', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          d: d,
+          equity: parseFloat(eq),
+          available: ($('eqAvailable').value || '').trim(),
+          note: ($('eqNote').value || '').trim()
+        })
+      });
+      const j = await r.json();
+      if (!j.ok) { alert(j.error || '保存失败'); return; }
+      this.closeModal();
+      await this.reload();
+    } catch (e) {
+      alert('保存失败：' + e);
+    }
+  },
+
+  async del(){
+    const d = this.selDate || (this.data && this.data.today && this.data.today.d);
+    if (!d) { alert('还没有可删除的记录'); return; }
+    if (!confirm('删除 ' + d + ' 这一天的收盘权益？')) return;
+    try {
+      const r = await fetchT('/api/equity/delete', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({d: d})
+      });
+      const j = await r.json();
+      if (!j.ok) { alert(j.error || '删除失败'); return; }
+      this.selDate = '';
+      await this.reload();
+    } catch (e) {
+      alert('删除失败：' + e);
+    }
+  }
+};
+EqUI.init();
+
 FundUI.init();
 // 启动时检查数据是否落在软件目录内(更新软件会删数据) → 亮红点 + 提示一次
 try { FundUI.checkDataSafety(); } catch (e) { /* 启动检查失败不影响使用 */ }

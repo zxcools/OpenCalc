@@ -501,8 +501,9 @@ _id_extra = _mk_open("extra78", "extra782701", 1, 100)
 _d78 = fund_backup_diff(os.path.basename(_bk78))
 _tr78 = [t for t in _d78["tables"] if t["key"] == "trade_records"][0]
 check("备份差异(v50.78): 备份比现在少 1 条交易记录(delta=−1)", _tr78["delta"] == -1, str(_tr78))
-check("备份差异(v50.78): 四张表都给条数(备份/当前/差值)",
-      len(_d78["tables"]) == 4 and all(("backup" in t and "current" in t) for t in _d78["tables"]),
+check("备份差异(v52.0): 五张表都给条数(备份/当前/差值, 含账户日线)",
+      len(_d78["tables"]) == 5 and all(("backup" in t and "current" in t) for t in _d78["tables"])
+      and any(t["key"] == "equity_daily" for t in _d78["tables"]),
       str(_d78["tables"]))
 check("备份差异(v50.78): 给出可读差异行(含「交易记录」与「现在」)",
       any("交易记录" in x and "现在" in x for x in _d78["lines"]), str(_d78["lines"]))
@@ -2727,6 +2728,68 @@ trade_upsert({"underlying": _u113, "contract": "cu2612C72000", "op_type": "open"
 _g113d = [g for g in trade_groups(mode="dual") if g["underlying"] == _u113]
 check("开仓状态列(v51.13): 期权双买分组也留空", bool(_g113d) and _g113d[0]["open_state"] == "",
       str(_g113d and _g113d[0].get("open_state")))
+
+# ===== v52.0: 账户权益日线(收盘价口径) =====
+print("\n== 账户K线 v52.0 ==")
+from main import (equity_upsert, equity_delete, equity_days, equity_overview,
+                  _eq_date, _eq_mdd, _eq_equity_before)  # noqa: E402
+
+check("账户K线(v52.0): 日期归一(2026/11/25 · 20261125 → 2026-11-25)",
+      _eq_date("2026/11/25") == "2026-11-25" and _eq_date("20261125") == "2026-11-25", '')
+try:
+    _eq_date("2026-02-30"); check("账户K线(v52.0): 非法日期被拒", False, "未拒绝")
+except ValueError:
+    check("账户K线(v52.0): 非法日期被拒", True, '')
+try:
+    equity_upsert("2026-11-25", 0); check("账户K线(v52.0): 权益 ≤0 被拒", False, "未拒绝")
+except ValueError:
+    check("账户K线(v52.0): 权益 ≤0 被拒", True, '')
+
+equity_upsert("2026-11-19", 132500, 101000)
+equity_upsert("2026-11-20", 133000, 100000)
+equity_upsert("2026-11-21", 131500, 99000)
+equity_upsert("2026-11-24", 106717, 93000)
+equity_upsert("2026-11-25", 106446.75, 93726.75)
+equity_upsert("2026-11-20", 133555, 100000)   # 同一天重录 → 覆盖
+_ds = {x["d"]: x for x in equity_days()}
+check("账户K线(v52.0): 同一天重复录 → 覆盖不新增",
+      len(equity_days()) == 5 and _ds["2026-11-20"]["equity"] == 133555.0,
+      str(len(equity_days())))
+
+_ov = equity_overview("2026-11-25")
+_t = _ov["today"]
+check("账户K线(v52.0): 今日/昨收/涨跌 = 106,446.75 / 106,717 / -270.25",
+      _t["equity"] == 106446.75 and _t["prev"] == 106717.0 and _t["chg"] == -270.25, str(_t))
+_anchor = _eq_equity_before("2026-11")
+_anchor_exp = _anchor if _anchor is not None else _ov["base"]["equity"]
+check("账户K线(v52.0): 首根 K 线的「开」= 上月末权益(资金曲线)，查不到才用期初基准",
+      _ov["days"][0]["open"] == _anchor_exp, str(_ov["days"][0]) + ' anchor=' + str(_anchor_exp))
+_m = _ov["month"]
+check("账户K线(v52.0): 本月统计 月初=首根开 / 高 133,555 / 低 106,446.75 / 5 根",
+      _m["first"] == _anchor_exp and _m["high"] == 133555.0 and _m["low"] == 106446.75
+      and _m["days"] == 5, str(_m))
+_c = _ov["cum"]
+check("账户K线(v52.0): 累计盈亏 = 期末 − 期初 − 净出入金(剔除出入金)",
+      _c["pnl"] == round(106446.75 - _c["base_equity"] - _c["net_flow"], 2), str(_c))
+check("账户K线(v52.0): 月线聚合(1 个月, 开=首根开 / 收 106,446.75, 高低取月内极值)",
+      len(_ov["months"]) == 1 and _ov["months"][0]["open"] == _anchor_exp
+      and _ov["months"][0]["close"] == 106446.75 and _ov["months"][0]["high"] == 133555.0,
+      str(_ov["months"]))
+check("账户K线(v52.0): 最大回撤取最深那次(100→120→90 = -25%)",
+      _eq_mdd([100, 120, 90, 130, 104]) == -0.25,
+      str(_eq_mdd([100, 120, 90, 130, 104])))
+check("账户K线(v52.0): 仓位占比(成本口径) 0 < 值 < 1",
+      0 < _ov["pos_now"] < 1, str(_ov["pos_now"]))
+check("账户K线(v52.0): 日线与仓位占比一一对应",
+      len(_ov["days"]) == len(_ov["pos"]), '%d/%d' % (len(_ov["days"]), len(_ov["pos"])))
+
+equity_delete("2026-11-20")
+check("账户K线(v52.0): 删除某天", len(equity_days()) == 4
+      and all(x["d"] != "2026-11-20" for x in equity_days()), str(len(equity_days())))
+for _d in ("2026-11-19", "2026-11-21", "2026-11-24", "2026-11-25"):
+    equity_delete(_d)
+check("账户K线(v52.0): 清空后 overview 返回 empty",
+      equity_overview()["empty"] is True, str(equity_days()))
 
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

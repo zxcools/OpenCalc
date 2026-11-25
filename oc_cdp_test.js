@@ -321,7 +321,7 @@ async function main() {
   // 侧边栏导入导出按钮存在
   const sideBtns = await evalJs(ws, `JSON.stringify({ex: !!document.getElementById('btnExport'), im: !!document.getElementById('btnImport'), tabs: document.querySelectorAll('#mainTabs .maintab').length})`);
   const sb = JSON.parse(sideBtns);
-  check('侧边栏导出/导入按钮 + 5个tab(计算器/期权买方/期货/期权双买/资金曲线)', sb.ex === true && sb.im === true && sb.tabs === 5, sideBtns);
+  check('侧边栏导出/导入按钮 + 6个tab(计算器/期权买方/期货/期权双买/资金曲线/账户K线)', sb.ex === true && sb.im === true && sb.tabs === 6, sideBtns);
   // 箭头方向: 导出 ⬆(出去) / 导入 ⬇(进来)
   const arrowDir = await evalJs(ws, `JSON.stringify({ex: document.getElementById('btnExport').textContent.trim(), im: document.getElementById('btnImport').textContent.trim()})`);
   const ad = JSON.parse(arrowDir);
@@ -2399,8 +2399,8 @@ async function main() {
                            metaHasIv: /IV/.test(meta), apiIv, apiIvPct, keepIv});
   })()`);
   const v61 = JSON.parse(v61Run);
-  check('侧栏顺序(v50.61): 计算器 / 期权买方 / 期权双买 / 期货 / 资金曲线',
-        JSON.stringify(v61.order) === JSON.stringify(['calc', 'trades', 'tradesDual', 'tradesFut', 'funds']),
+  check('侧栏顺序(v52.0): 计算器 / 期权买方 / 期权双买 / 期货 / 资金曲线 / 账户K线',
+        JSON.stringify(v61.order) === JSON.stringify(['calc', 'trades', 'tradesDual', 'tradesFut', 'funds', 'equity']),
         JSON.stringify(v61.order));
   check('联系作者(v50.61): 只保留一个按钮(左下角浮动按钮已删)',
         v61.floatBtn === false && v61.sideContact === true,
@@ -4144,8 +4144,8 @@ async function main() {
   check('风险汇总(v50.78): 期权买方换成「占用权利金」口径',
         /占用权利金/.test(v78.riskBarOpt.text) && v78.riskBarOpt.positions >= 1
         && v78.riskBarOpt.maxLoss > 0, JSON.stringify(v78.riskBarOpt));
-  check('备份差异(v50.78): 接口返回四张表的备份/当前条数',
-        v78.diff.ok === true && v78.diff.nTables === 4 && v78.diff.hasTrade === true,
+  check('备份差异(v52.0): 接口返回五张表的备份/当前条数(含账户日线)',
+        v78.diff.ok === true && v78.diff.nTables === 5 && v78.diff.hasTrade === true,
         JSON.stringify(v78.diff));
   check('备份差异(v50.78): 差异行写明「备份 N 条 / 现在 N 条」',
         /交易记录：备份 \d+ 条 \/ 现在 \d+ 条/.test(v78.diff.lines), v78.diff.lines);
@@ -5404,10 +5404,10 @@ async function main() {
     return out;
   })()`);
 
-  check('侧栏: 五个 tab 小字已去掉冒号',
-        v541.sideSmall.length === 5 && !v541.sideHasColon, JSON.stringify(v541.sideSmall));
-  check('侧栏: 小字内容为 期货 · 期权 / 期权买方 / 期权双买 / 期货模式 / 多策略',
-        JSON.stringify(v541.sideSmall) === JSON.stringify(['期货 · 期权','期权买方','期权双买','期货模式','多策略']),
+  check('侧栏: 六个 tab 小字已去掉冒号',
+        v541.sideSmall.length === 6 && !v541.sideHasColon, JSON.stringify(v541.sideSmall));
+  check('侧栏: 小字内容为 期货 · 期权 / 期权买方 / 期权双买 / 期货模式 / 多策略 / 日线 · 月线',
+        JSON.stringify(v541.sideSmall) === JSON.stringify(['期货 · 期权','期权买方','期权双买','期货模式','多策略','日线 · 月线']),
         JSON.stringify(v541.sideSmall));
   check('测算结果: 期货明细改为两列网格',
         v541.fGrid && v541.fCols === 2 && v541.fPerRow === 2,
@@ -5489,7 +5489,7 @@ async function main() {
   })()`);
   check('接口: /api/update/backups 返回 200 + 列表 + 版本名(与 /api/version 同源)',
         updBk.status === 200 && updBk.ok && updBk.isArr
-        && /^v\d+\.\d+$/.test(updBk.vname || '') && updBk.vname === 'v' + String(updBk.ver).slice(0, -2) + '.' + String(updBk.ver).slice(-2),
+        && /^v\d+\.\d+$/.test(updBk.vname || '') && updBk.vname === updApi.curName,
         JSON.stringify(updBk));
   // ⚠ 这条别写死 false: 跑源码服务时 frozen=false, 跑打包 exe 时必须是 true(本身就是 exe)。
   //   对 exe 实例跑同一套 E2E 时用 OC_E2E_FROZEN=1 声明期望值。
@@ -6306,6 +6306,62 @@ async function main() {
   check('统计口径(v51.14): 切回全部后数字还原 + 双买模式下整个选项条隐藏',
         /1,300/.test(v113.pnlBackAll) && v113.dualStateBar === 'none',
         JSON.stringify({back: v113.pnlBackAll, dual: v113.dualStateBar}));
+
+  // ===== v52.0: 账户权益K线（日线/月线） =====
+  const v52 = JSON.parse(await evalJs(ws, `(async () => {
+    const w = ms => new Promise(r => setTimeout(r, ms));
+    const q = id => document.getElementById(id);
+    const out = {alerts: []};
+    const _al = window.alert, _cf = window.confirm;
+    window.alert = m => out.alerts.push(String(m));
+    window.confirm = () => true;
+    try {
+      document.querySelector('#mainTabs .maintab[data-tab="equity"]').click();
+      await w(1400);
+      out.hidden = q('equityArea').classList.contains('hidden');
+      out.empty = /还没有任何记录/.test(q('eqBody').textContent);
+      out.title = q('appTitle').textContent;
+      const add = async (d, eq, av) => {
+        q('btnEqRecord').click(); await w(400);
+        q('eqDate').value = d; q('eqEquity').value = eq; q('eqAvailable').value = av;
+        q('eqModalSave').click(); await w(1400);
+      };
+      await add('2026-11-24', '106717', '93000');
+      await add('2026-11-25', '106446.75', '93726.75');
+      out.hero = q('eqBody').textContent.replace(/\s+/g, ' ').trim().slice(0, 220);
+      out.canvas = (() => { const c = q('eqChart'); return c ? c.clientWidth + 'x' + c.clientHeight : 'none'; })();
+      out.posCanvas = (() => { const c = q('eqPosChart'); return c ? c.clientWidth + 'x' + c.clientHeight : 'none'; })();
+      document.querySelector('#eqPeriodSeg .fee-opt[data-p="month"]').click();
+      await w(800);
+      const mb = q('eqBody').querySelector('.eq-monthbar');
+      out.monthBar = mb ? mb.textContent.replace(/\s+/g, ' ').trim() : '';
+      document.querySelector('#eqPeriodSeg .fee-opt[data-p="day"]').click();
+      await w(600);
+      q('btnEqDelete').click();
+      await w(1400);
+      out.afterDel = q('eqBody').textContent.replace(/\s+/g, ' ').trim().slice(0, 140);
+      q('btnEqDelete').click();
+      await w(1200);
+      out.afterDelAll = /还没有任何记录/.test(q('eqBody').textContent);
+      return JSON.stringify(out);
+    } finally { window.alert = _al; window.confirm = _cf; }
+  })()`));
+  check('账户K线(v52.0): 侧栏新增页面, 首次进入是空态引导',
+        v52.hidden === false && v52.empty === true && /账户权益K线/.test(v52.title || ''),
+        JSON.stringify({hidden: v52.hidden, empty: v52.empty, title: v52.title}));
+  check('账户K线(v52.0): 录入两条后显示 收盘 106,446.75 / 昨收 106,717 / 可用 93,726.75',
+        /106,446.75/.test(v52.hero || '') && /106,717/.test(v52.hero || '')
+        && /93,726.75/.test(v52.hero || ''), v52.hero);
+  check('账户K线(v52.0): 蜡烛图与仓位占比都画出来了(有实际尺寸)',
+        v52.canvas && v52.canvas !== 'none' && parseInt(v52.canvas) > 300
+        && v52.posCanvas && parseInt(v52.posCanvas) > 300,
+        JSON.stringify({chart: v52.canvas, pos: v52.posCanvas}));
+  check('账户K线(v52.0): 切月线 → 回撤标签变「账户最大回撤」',
+        /账户最大回撤/.test(v52.monthBar || ''), v52.monthBar);
+  check('账户K线(v52.0): 删除当天后回到前一天(106,717), 删空后回到空态',
+        /106,717/.test(v52.afterDel || '') && v52.afterDelAll === true,
+        JSON.stringify({afterDel: (v52.afterDel || '').slice(0, 60), allEmpty: v52.afterDelAll}));
+  check('账户K线(v52.0): 全程无报错弹窗', (v52.alerts || []).length === 0, JSON.stringify(v52.alerts));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');
