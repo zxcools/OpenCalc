@@ -2735,7 +2735,7 @@ check("开仓状态列(v51.13): 期权双买分组也留空", bool(_g113d) and _
 # ===== v52.0: 账户权益日线(收盘价口径) =====
 print("\n== 账户K线 v52.0 ==")
 from main import (equity_upsert, equity_delete, equity_days, equity_overview,
-                  _eq_date, _eq_mdd, _eq_equity_before)  # noqa: E402
+                  _eq_date, _eq_mdd, _eq_equity_before, _fund_db)  # noqa: E402
 
 check("账户K线(v52.0): 日期归一(2026/11/25 · 20261125 → 2026-11-25)",
       _eq_date("2026/11/25") == "2026-11-25" and _eq_date("20261125") == "2026-11-25", '')
@@ -2772,8 +2772,8 @@ check("账户K线(v52.0): 本月统计 月初=首根开 / 高 133,555 / 低 106,
       _m["first"] == _anchor_exp and _m["high"] == 133555.0 and _m["low"] == 106446.75
       and _m["days"] == 5, str(_m))
 _c = _ov["cum"]
-check("账户K线(v52.0): 累计盈亏 = 期末 − 期初 − 净出入金(剔除出入金)",
-      _c["pnl"] == round(106446.75 - _c["base_equity"] - _c["net_flow"], 2), str(_c))
+check("账户K线(v52.3): 累计盈亏 = 期末 − 期初 + 出入金(cash_flow 正=出金, 要加回来)",
+      _c["pnl"] == round(106446.75 - _c["base_equity"] + _c["net_flow"], 2), str(_c))
 _m11 = [x for x in _ov["months"] if x["ym"] == "2026-11"]
 check("账户K线(v52.0): 月线有日数据的月份用日聚合(开=首根开 / 收 106,446.75 / 高 133,555)",
       len(_m11) == 1 and _m11[0]["open"] == _anchor_exp
@@ -2794,6 +2794,9 @@ check("账户K线(v52.0): 删除某天", len(equity_days()) == 4
 for _d in ("2026-11-19", "2026-11-21", "2026-11-24", "2026-11-25"):
     equity_delete(_d)
 _ov_after = equity_overview()
+check("账户K线(v52.3): 累计盈亏与「月末−月初+出入金」同一公式(出金加回, 不是减掉)",
+      _c["pnl"] == round(_ov["days"][-1]["close"] - _c["base_equity"] + _c["net_flow"], 2), str(_c))
+
 check("账户K线(v52.1): 清空日记录后日线为空, 但月线从资金曲线月度记录兜底",
       len(_ov_after["days"]) == 0 and len(_ov_after["months"]) >= 1
       and all(m["src"] == "fund" for m in _ov_after["months"]),

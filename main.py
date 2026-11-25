@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5202            # 与 README 版本号 v52.2 对齐(数值比较用于单实例接管)
+APP_VERSION = 5203            # 与 README 版本号 v52.3 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -2892,7 +2892,9 @@ def equity_days():
 
 
 def _equity_base():
-    """期初基准 = 资金曲线最早一条月度记录的月初权益；净出入金 = 全部 cash_flow 之和
+    """期初基准 = 资金曲线最早一条月度记录的月初权益；cash_flow 合计(正=出金/提现, 负=入金)
+    ⚠ cash_flow 的口径与资金曲线一致: **正数 = 出金(提现)**, 负数 = 入金
+      (见 _calc_record_metrics: 本月盈亏 = 月末 − 月初 + cash_flow)
     ⚠ 用月度现金流的合计，不按天摊 —— 日线里不记出入金(用户订的口径)"""
     db = _fund_db()
     row = db.execute(
@@ -3100,7 +3102,9 @@ def equity_overview(today=None):
     # ---- 累计盈亏(剔除出入金) ----
     cum = None
     if base["equity"] > 0:
-        pnl = last_close - base["equity"] - base["net_flow"]
+        # v52.3: cash_flow 正=出金 → 累计盈亏要把它加回来
+        #   (与资金曲线 monthly_pnl 同一口径: 期末 − 期初 + 出入金; 否则提现会被当成亏损)
+        pnl = last_close - base["equity"] + base["net_flow"]
         cum = {"pnl": round(pnl, 2), "pct": round(pnl / base["equity"], 6),
                "base_equity": base["equity"], "base_date": base["date"],
                "net_flow": base["net_flow"]}
@@ -13387,6 +13391,12 @@ const EqUI = {
     const m = d.month || {};
     const cum = d.cum || {};
     const isDay = this.period === 'day';
+    // v52.3: 累计口径提示(出金为正, 要加回来)
+    const cumTip = '累计盈亏 = 当前收盘权益 − 期初权益 '
+      + Number((d.base && d.base.equity) || 0).toLocaleString('en-US', {maximumFractionDigits: 2})
+      + ' + 累计出入金 '
+      + Number((cum && cum.net_flow) || 0).toLocaleString('en-US', {maximumFractionDigits: 2})
+      + '（出金为正，会加回）；起点 ' + ((d.base && d.base.date) || '—');
     const mdd = isDay ? (m.mdd || 0) : (d.account_mdd || 0);
     const mddLabel = isDay ? '本月最大回撤' : '账户最大回撤';
     const rangeLabel = isDay
@@ -13412,8 +13422,10 @@ const EqUI = {
           <div><span class="k">月内低</span><span class="v">${escHtml(this.fmtMoney(m.low).replace('¥ ', ''))}</span></div>
         </div>
         <div class="eq-2r">
-          <div><span class="k">累计盈亏</span><span class="v ${this.clsOf(cum.pnl)}">${this.fmtSigned(cum.pnl)}</span></div>
-          <div><span class="k">累计涨幅</span><span class="v ${this.clsOf(cum.pct)}">${this.fmtPct(cum.pct)}</span></div>
+          <div><span class="k" title="${escHtml(cumTip)}">累计盈亏</span>
+            <span class="v ${this.clsOf(cum.pnl)}">${this.fmtSigned(cum.pnl)}</span></div>
+          <div><span class="k" title="${escHtml(cumTip)}">累计涨幅</span>
+            <span class="v ${this.clsOf(cum.pct)}">${this.fmtPct(cum.pct)}</span></div>
         </div>
       </div>
 
