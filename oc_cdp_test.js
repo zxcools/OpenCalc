@@ -4455,7 +4455,10 @@ async function main() {
     out.stAsc = { order: order() };
     // 表头文本不能被污染(箭头是 CSS ::after, 不写进 textContent)
     out.headers = [...document.querySelectorAll('#tradesTable thead th')].map(t => t.textContent.trim());
-    out.opSortable = !!document.querySelector('#tradesTable thead th:nth-child(8)').dataset.sort;
+    // v51.13: 按文字找「操作」列(加了「开仓状态」列后下标会漂, 不能再写死 nth-child)
+    const opTh = [...document.querySelectorAll('#tradesTable thead th')]
+      .find(t => t.textContent.trim() === '操作');
+    out.opSortable = !!(opTh && opTh.dataset.sort);
     // 恢复默认 + 清理造的数据
     TradeUI.sortKey = ''; TradeUI.sortState = 0; TradeUI.showAll = false;
     TradeUI.syncSortHead(); TradeUI.renderMain(); await w(300);
@@ -4723,7 +4726,14 @@ async function main() {
       extra.underlying = mine.underlying;
       extra.tpTargets = (det.tp_targets || []).length;
       extra.tpFirst = (det.tp_targets && det.tp_targets[0]) ? det.tp_targets[0].targets.map(t => t.price_unit) : null;
-      extra.tpBox = (document.getElementById('tdTpTargets') || {}).textContent || '';
+      // v51.13: 详情是异步渲染的, 直接读会偶发读到空文本 → 轮询到板块出现(最多 3s)
+      extra.tpBox = '';
+      for (let _i = 0; _i < 12; _i++){
+        const _el = document.getElementById('tdTpTargets');
+        extra.tpBox = _el ? _el.textContent : '';
+        if (/期权止盈目标价位/.test(extra.tpBox)) break;
+        await new Promise(r => setTimeout(r, 250));
+      }
     }
     out.added = Object.assign({n0, n1: (g1.groups || []).length, found: !!mine, tab: '', op: op0}, extra);
     const act = document.querySelector('#mainTabs .maintab.active');
@@ -5714,7 +5724,10 @@ async function main() {
     const w = ms => new Promise(r => setTimeout(r, ms));
     const q = id => document.getElementById(id);
     const U = 'e2edte2611';
-    const C = 'cu2612C72000';
+    // v51.13: 合约月份改成「距今 +3 个月」—— 原来写死 2612, 过了 2026-11-24 到期日就变成「已到期」,
+    //   这条用例会因跨天自然过期而假失败
+    const _fd = new Date(); _fd.setMonth(_fd.getMonth() + 3);
+    const C = 'cu' + String(_fd.getFullYear()).slice(2) + String(_fd.getMonth() + 1).padStart(2, '0') + 'C72000';
     const post = (p, b) => fetch(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b)}).then(r=>r.json());
     const out = {alerts: []};
     // ⚠ 打桩 alert/confirm: 原生对话框会阻塞渲染线程 → CDP 全部超时(整个套件无声挂死)
@@ -5796,7 +5809,7 @@ async function main() {
     }
   })()`));
   check('到期日(v51.02): /api/options/expiry 返回到期日与剩余天数',
-        !!(v102.expiry && /^2026-\d{2}-\d{2}$/.test(v102.expiry.expiry) && v102.expiry.dte !== null),
+        !!(v102.expiry && /^20\d{2}-\d{2}-\d{2}$/.test(v102.expiry.expiry) && v102.expiry.dte !== null),
         JSON.stringify(v102.expiry));
   check('到期日(v51.02): 主表标的旁有「剩 N 天」徽标, 数值 = 接口 dte',
         !!v102.chip && v102.chip.txt === ('剩 ' + v102.expiry.dte + ' 天'),
@@ -6178,8 +6191,8 @@ async function main() {
         !!favFirst && favFirst.hidden === false && favFirst.tab === 'calc',
         JSON.stringify(favFirst));
 
-  // ===== v51.11/12: 期权买方详情「当前剩余风险」= 持仓权利金 − 已平仓权利金 =====
-  const v111 = JSON.parse(await evalJs(ws, `(async () => {
+  // ===== v51.13: 剩余风险新公式 / 详情乘数 / 主表开仓状态列 / 统计拆分 =====
+  const v113 = JSON.parse(await evalJs(ws, `(async () => {
     const w = ms => new Promise(r=>setTimeout(r,ms));
     const q = id => document.getElementById(id);
     const post = (p,b) => fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -6188,57 +6201,77 @@ async function main() {
       const d = await (await fetch('/api/trades/detail?mode=options&underlying=' + U + '&batch=')).json();
       for (const op of (d.operations || [])) await fetch('/api/trades/delete', {method:'POST',
         headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: op.id})});
-      const d2 = await (await fetch('/api/trades/detail?mode=options&underlying=' + U + '&batch=')).json();
-      return (d2.premium || {}).residual;
     };
     const out = {};
-    const A = 'e2eriska', B = 'e2eriskb';
-    // A: 开 4 手 @500, 平 2 手 @600 → 持仓 5,000 − 已平 6,000 = −1,000(已无风险)
+    const A = 'e2erisk13a', B = 'e2erisk13b', C = 'e2erisk13c';
+    // A: 开 4@500 平 2@600(+1000) → 5,000 − 6,000 + 0 = −1,000 → 已无风险
     await post('/api/trades/upsert', {underlying:A, contract:'cu2612C72000', op_type:'open', direction:'buy',
       open_date:'2026-11-02', open_price:500, qty:4, premium:10000, call_put:'C', mode:'options', batch:''});
     await post('/api/trades/upsert', {underlying:A, contract:'cu2612C72000', op_type:'close', direction:'buy',
       close_date:'2026-11-06', close_price:600, close_qty:2, pnl:1000, mode:'options', batch:''});
-    // B: 开 4 手 @500, 平 1 手 @200 → 持仓 7,500 − 已平 1,000 = +6,500(仍有风险)
+    // B: 开 4@500 平 1@200(亏 300), 开仓状态=移动止损触发后 → 7,500 − 1,000 + 300 = 6,800 → 仍有风险
     await post('/api/trades/upsert', {underlying:B, contract:'cu2612C72000', op_type:'open', direction:'buy',
-      open_date:'2026-11-02', open_price:500, qty:4, premium:10000, call_put:'C', mode:'options', batch:''});
+      open_date:'2026-11-03', open_price:500, qty:4, premium:10000, call_put:'C', mode:'options', batch:'',
+      open_state:'trail'});
     await post('/api/trades/upsert', {underlying:B, contract:'cu2612C72000', op_type:'close', direction:'buy',
-      close_date:'2026-11-06', close_price:200, close_qty:1, pnl:-300, mode:'options', batch:''});
+      close_date:'2026-11-07', close_price:200, close_qty:1, pnl:-300, mode:'options', batch:''});
+    // C: 开 1@500 平 1@100(亏 2,000) → 全平亏损 → 显示亏 2,000
+    await post('/api/trades/upsert', {underlying:C, contract:'cu2612C72000', op_type:'open', direction:'buy',
+      open_date:'2026-11-04', open_price:500, qty:1, premium:2500, call_put:'C', mode:'options', batch:''});
+    await post('/api/trades/upsert', {underlying:C, contract:'cu2612C72000', op_type:'close', direction:'buy',
+      close_date:'2026-11-08', close_price:100, close_qty:1, pnl:-2000, mode:'options', batch:''});
     TradeUI.setMode('options');
     document.querySelector('#mainTabs .maintab[data-tab="trades"]').click(); await w(700);
-    await TradeUI.refresh();
-    TradeUI.loadDetail(A, ''); await w(1400);
-    const boxA = q('tdRisk');
-    out.safeTxt = boxA ? boxA.textContent.replace(/\\s+/g, ' ').trim() : '';
-    out.safeClass = boxA && boxA.querySelector('.rs-main .v') ? boxA.querySelector('.rs-main .v').className : '';
-    out.shown = !!boxA && boxA.offsetParent !== null;
-    TradeUI.loadDetail(B, ''); await w(1400);
-    const boxB = q('tdRisk');
-    out.riskTxt = boxB ? boxB.textContent.replace(/\\s+/g, ' ').trim() : '';
-    out.riskClass = boxB && boxB.querySelector('.rs-main .v') ? boxB.querySelector('.rs-main .v').className : '';
-    // 切到双买模式后再渲染一次: 这块必须被清空(双买没有这个口径)
+    await TradeUI.refresh(); await w(600);
+    const read = async U => {
+      TradeUI.loadDetail(U, ''); await w(1300);
+      const box = q('tdRisk');
+      return {txt: box ? box.textContent.replace(/\s+/g, ' ').trim() : '',
+              cls: box && box.querySelector('.rs-main .v') ? box.querySelector('.rs-main .v').className : '',
+              meta: (q('tdMeta') || {}).textContent.replace(/\s+/g, ' ').trim()};
+    };
+    out.a = await read(A);
+    out.b = await read(B);
+    out.c = await read(C);
+    // 主表: 开仓状态列 + 标签
+    const ths = [...document.querySelectorAll('#tradesTable thead th')]
+      .filter(t => getComputedStyle(t).display !== 'none').map(t => t.textContent.trim());
+    out.ths = ths;
+    const rowB = [...document.querySelectorAll('#tradesTable tbody tr')]
+      .find(x => x.textContent.indexOf(B) >= 0);
+    out.rowB = rowB ? rowB.textContent.replace(/\s+/g, ' ').trim() : '';
+    // 统计拆分表
+    const sp = document.querySelector('.stat-split');
+    out.split = sp ? sp.textContent.replace(/\s+/g, ' ').trim() : '';
+    out.splitRows = sp ? [...sp.querySelectorAll('tbody tr')].map(r => r.textContent.replace(/\s+/g, ' ').trim()) : [];
+    // 双买模式: 该列隐藏
     TradeUI.setMode('dual');
     document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]').click(); await w(800);
-    TradeUI.renderRiskStrip({premium:{open:1, closed:2, holding:3, residual:-1}});
-    await w(200);
-    out.dualHtml = (q('tdRisk') || {}).innerHTML || '';
-    out.cleanedA = await del(A);
-    out.cleanedB = await del(B);
+    const thd = [...document.querySelectorAll('#tradesTable thead th')]
+      .find(t => t.textContent.trim() === '开仓状态');
+    out.dualColDisplay = thd ? getComputedStyle(thd).display : 'missing';
+    await del(A); await del(B); await del(C);
     return JSON.stringify(out);
   })()`));
-  check('剩余风险(v51.12): 收回比持仓多 → 显示「已无风险」, 并写明多收回 1,000',
-        v111.shown === true && /当前剩余风险/.test(v111.safeTxt) && /已无风险/.test(v111.safeTxt)
-        && /已多收回 ¥ 1,000/.test(v111.safeTxt) && /¥ 6,000/.test(v111.safeTxt)
-        && /¥ 5,000/.test(v111.safeTxt) && /safe/.test(v111.safeClass),
-        v111.safeTxt);
-  check('剩余风险(v51.12): 持仓比已平仓多 → 正数 = 仍有风险 (7,500 − 1,000 = 6,500, 橙字)',
-        /¥ 6,500/.test(v111.riskTxt) && /还剩这么多权利金裸风险/.test(v111.riskTxt)
-        && /warn/.test(v111.riskClass),
-        v111.riskTxt);
-  check('剩余风险(v51.12): 只在期权买方出现(双买模式渲染时整块清空)',
-        (v111.dualHtml || '').indexOf('当前剩余风险') < 0, String(v111.dualHtml).slice(0, 120));
-  check('剩余风险(v51.12): 用例记录清理干净(删完详情回到 0)',
-        v111.cleanedA === 0 && v111.cleanedB === 0,
-        JSON.stringify({a: v111.cleanedA, b: v111.cleanedB}));
+  check('剩余风险(v51.13): 收回>持仓 → 已无风险 + 已多收回 1,000',
+        /已无风险/.test(v113.a.txt) && /已多收回 ¥ 1,000/.test(v113.a.txt) && /safe/.test(v113.a.cls),
+        v113.a.txt);
+  check('剩余风险(v51.13): 持仓−已平仓+亏损 = 7,500−1,000+300 = 6,800(橙字, 仍有风险)',
+        /¥ 6,800/.test(v113.b.txt) && /还剩这么多权利金裸风险/.test(v113.b.txt)
+        && /warn/.test(v113.b.cls) && /平仓亏损（已亏掉）¥ 300/.test(v113.b.txt),
+        v113.b.txt);
+  check('剩余风险(v51.13): 全平且整笔亏损 → 直接显示亏了 2,000',
+        /¥ 2,000/.test(v113.c.txt) && /整笔已亏/.test(v113.c.txt), v113.c.txt);
+  check('详情乘数(v51.13): 顶部显示「乘数 ×5」(cu 期权乘数)', /乘数 ×5/.test(v113.a.meta), v113.a.meta);
+  check('主表列(v51.13): 期权买方多一列「开仓状态」, 行里 trail 显示「移动止损」',
+        v113.ths.indexOf('开仓状态') >= 0 && /移动止损/.test(v113.rowB),
+        JSON.stringify({ths: v113.ths, row: (v113.rowB || '').slice(0, 60)}));
+  check('主表列(v51.13): 期权双买下该列隐藏', v113.dualColDisplay === 'none', String(v113.dualColDisplay));
+  check('统计拆分(v51.13): 统计区间下方有 全部/正常/移动止损 三行独立统计',
+        v113.splitRows.length === 3
+        && /全部开仓/.test(v113.splitRows[0]) && /正常开仓/.test(v113.splitRows[1])
+        && /移动止损触发后开仓/.test(v113.splitRows[2]),
+        JSON.stringify(v113.splitRows));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

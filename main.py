@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5112            # 与 README 版本号 v51.12 对齐(数值比较用于单实例接管)
+APP_VERSION = 5113            # 与 README 版本号 v51.13 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -3509,9 +3509,18 @@ def trade_groups(strategy=None, mode="options", fee_mode=FEE_MODE_DEFAULT):
         else:
             close_status = "未平仓"
         _fee = group_fee(items, opens, closes, mode, fee_mode)
+        # v51.13: 开仓状态(仅期权买方) —— 该组最早一条带状态的记录; 其它模式留空
+        _ost = ""
+        if mode == "options":
+            _ost = OPEN_STATE_NORMAL
+            for _x in sorted(opens, key=lambda y: ((y.get("open_date") or ""), y.get("id") or 0)):
+                if _x.get("open_state"):
+                    _ost = norm_open_state(_x.get("open_state"))
+                    break
         groups.append({
             "underlying": u,
             "batch": batch,
+            "open_state": _ost,
             "direction": direction,
             "call_put": call_put,
             "open_date": first_open,
@@ -4057,11 +4066,14 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             _state = norm_open_state(x.get("open_state"))
             break
 
-    # v51.11/v51.12: 期权买方「当前剩余风险」
-    #   已平仓权利金 = 平仓时**收回**的权利金(平仓价 × 手数 × 乘数, 只算期权)
+    # v51.11/13: 期权买方「当前剩余风险」
     #   持仓权利金   = 剩余持仓还压着的权利金成本(holdings 的 premium 合计)
-    #   当前剩余风险 = 持仓权利金 − 已平仓权利金
-    #     正数 → 还有这么多裸风险; 0 或负数 → 已经无风险(负数=多收回的部分)
+    #   已平仓权利金 = 平仓时**收回**的权利金(平仓价 × 手数 × 乘数, 只算期权)
+    #   平仓亏损     = 亏损那几笔的亏损额合计(正数; 盈利笔不计)
+    #   当前剩余风险 = 持仓权利金 − 已平仓权利金 + 平仓亏损
+    #     ⚠ 加亏损是因为"收回的钱"里没有体现亏掉的部分(亏着平仓时收回额照样不小),
+    #       不加就会把还亏着的记录算成"已无风险"
+    #   全平(没有持仓)时这个指标没有意义 → residual 归 0, 前端改按整笔盈亏显示
     _open_premium = round(sum((x.get("premium") or 0) for x in opens), 2)
     _hold_premium = round(sum((h.get("premium") or 0) for h in holdings), 2)
     _closed_premium = 0.0
@@ -4071,8 +4083,19 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             _m = _option_mult(_prod) if _prod else 1.0
             _closed_premium += (x.get("close_price") or 0) * (x.get("close_qty") or 0) * _m
     _closed_premium = round(_closed_premium, 2)
+    _loss_amt = round(-sum((x.get("pnl") or 0) for x in closes if (x.get("pnl") or 0) < 0), 2)
+    # v51.13: 详情页顶部显示合约乘数(期权用 opt_mult) —— fee_product 返回的是品种代码, 期货要再查合约表
+    _mult = 1.0
+    if opens:
+        _prod0 = fee_product(underlying, opens[0].get("contract"))
+        if mode == "options":
+            _mult = _option_mult(_prod0) or 1.0
+        else:
+            _c0 = get_contract(_prod0) if _prod0 else None
+            _mult = (_c0["mult"] if _c0 else 1.0) or 1.0
 
     return {"underlying": underlying, "batch": batch or "",
+            "mult": _mult,
             "direction": direction,
             "open_date": min(open_dates) if open_dates else "",
             "close_status": close_status,
@@ -4083,12 +4106,15 @@ def trade_detail(underlying, strategy=TRADE_STRATEGY_DEFAULT, mode="options", ba
             "open_state": _state,
             "open_state_name": OPEN_STATE_NAMES[_state],
             "tp_multiples": list(tp_multiples_of(_state)),
-            # v51.11: 当前剩余风险(仅期权买方, 其它模式给 None)
+            # v51.11/13: 当前剩余风险(仅期权买方, 其它模式给 None)
             "premium": {
                 "open": _open_premium,
                 "closed": _closed_premium,
                 "holding": _hold_premium,
-                "residual": round(_hold_premium - _closed_premium, 2),
+                "loss": _loss_amt,
+                "realized": round(total_pnl, 2),
+                "full_closed": not has_pos,
+                "residual": round(_hold_premium - _closed_premium + _loss_amt, 2) if has_pos else 0.0,
             } if mode == "options" else None,
             # v50.70: 手续费合计 / 净盈亏(毛盈亏 − 手续费) / 当前手续费口径
             "fee_total": fee_total,
@@ -5813,6 +5839,20 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .risk-strip .rs-main .sub{display:block;font-size:10.5px;color:var(--sub);margin-top:2px}
 .risk-strip .rs-cell b{font-size:13.5px;font-weight:700;color:var(--text)}
 @media (max-width:1180px){ .risk-strip{grid-template-columns:1fr 1fr;row-gap:12px} }
+/* v51.13: 主表「开仓状态」列只在期权买方出现 */
+[data-tm="futures"] .col-openstate,
+[data-tm="dual"] .col-openstate{display:none !important}
+/* v51.13: 统计卡下方「按开仓状态拆分」小表 */
+.stat-split{margin-top:10px;background:var(--panel2);border:1px solid var(--border);border-radius:10px;
+  padding:10px 12px}
+.stat-split .ss-hd{font-size:11.5px;color:var(--sub);letter-spacing:.3px;margin-bottom:6px}
+.stat-split .ss-hd small{margin-left:8px;opacity:.75;font-size:10.5px}
+.stat-split .tbl{width:100%;font-size:12px}
+.stat-split .tbl th{font-size:10.5px;color:var(--sub);text-align:right;font-weight:600}
+.stat-split .tbl th:first-child{text-align:left}
+.stat-split .tbl td{text-align:right;padding:4px 6px}
+.stat-split .tbl td.bs-n{text-align:left;color:var(--text)}
+.stat-split .tbl tr.bs-all td{font-weight:700}
 .iconbtn{background:transparent;border:none;color:var(--sub);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:6px}
 .iconbtn:hover{background:var(--panel2);color:var(--accent)}
 .row-actions{display:flex;gap:4px;justify-content:flex-end}
@@ -6756,6 +6796,7 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
                   <thead><tr>
             <th class="th-sort col-name" data-sort="underlying" title="点击排序：升序 → 降序 → 恢复默认">开仓标的</th>
             <th class="th-sort" data-sort="direction" title="点击排序：升序 → 降序 → 恢复默认">方向</th>
+            <th class="th-sort col-openstate" data-sort="open_state" title="点击排序：正常开仓 / 移动止损触发后开仓（仅期权买方有）">开仓状态</th>
             <th class="th-sort" data-sort="open_date" title="点击排序：升序 → 降序 → 恢复默认">开仓时间</th>
             <th class="th-sort" data-sort="close_status" title="点击排序：升序 → 降序 → 恢复默认">是否平仓</th>
             <th class="th-sort" data-sort="total_pnl" title="点击排序：升序 → 降序 → 恢复默认">平仓盈亏</th>
@@ -9585,8 +9626,8 @@ const TradeUI = {
      已实现盈亏 = 该记录 close 记录 pnl 之和(即主表「平仓盈亏」列)。
      ⚠ 不受搜索 /「只展示未平仓」影响 —— 那俩只是表格显示过滤, 不该改变战绩口径
      ⚠ 但**受统计区间影响** —— 区间是口径本身(用户要按区间看战绩), 卡片刻意跟着走 */
-  calcStats(){
-    const gs = this.scopedGroups();
+  calcStats(gs0){
+    const gs = gs0 || this.scopedGroups();
     // ⚠ v50.77: 持仓数**始终按全量算**, 不跟着统计区间走。
     //   区间是「已实现战绩」的口径; 而「按平仓时间」那条区间会把未平仓记录整条滤掉
     //   (它们没有平仓日) → 用区间算就会恒为 0, 卡片写「持仓中: 0」而用户实际有持仓, 自相矛盾。
@@ -9819,6 +9860,35 @@ const TradeUI = {
                     : '年化口径：已平仓不足 5 笔或跨度不足 30 天，暂不年化（样本太小时 √N 会放大到失真）\n')
                 + '⚠ 笔数少 / 交易集中在几天时会高估，仅供横向参考。\n' + scopeTip)
              : ('共 ' + s.closedN + ' 笔已平仓，不足 2 笔算不出标准差。\n' + scopeTip));
+    // v51.13: 期权买方 —— 再按「开仓状态」拆一份(正常 / 移动止损触发后 / 全部), 同一统计区间
+    if (this.mode === 'options') box.innerHTML += this.renderStatsByState();
+  },
+
+  /* v51.13: 按开仓状态拆分的统计(跟统计卡同一区间、同一「已平仓」口径: 有已实现盈亏才算) */
+  renderStatsByState(){
+    const base = this.scopedGroups();
+    const of = k => (k === 'all') ? base : base.filter(g => ((g.open_state || 'normal') === k));
+    const money = v => (v > 0 ? '+CN¥' : (v < 0 ? '-CN¥' : 'CN¥'))
+      + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
+    const rows = [['all', '全部开仓'], ['normal', '正常开仓'], ['trail', '移动止损触发后开仓']]
+      .map(([k, name]) => {
+        const s = this.calcStats(of(k));
+        const rTxt = (r, win) => r != null ? r.toFixed(2) : (win > 0 ? '∞' : '—');
+        return '<tr' + (k === 'all' ? ' class="bs-all"' : '') + '>'
+          + '<td class="bs-n">' + name + '</td>'
+          + '<td>' + s.n + '</td>'
+          + '<td>' + s.closedN + '</td>'
+          + '<td class="' + (s.realized > 0 ? 'pos' : (s.realized < 0 ? 'neg' : '')) + '">'
+          + (s.closedN ? money(s.realized) : '—') + '</td>'
+          + '<td>' + (s.winRate == null ? '—' : (s.winRate * 100).toFixed(1) + '%') + '</td>'
+          + '<td>' + (s.closedN ? rTxt(s.plRatio, s.grossWin) : '—') + '</td>'
+          + '</tr>';
+      }).join('');
+    return '<div class="stat-split">'
+      + '<div class="ss-hd">按开仓状态拆分<small>同一统计区间 · 三种口径各自独立算</small></div>'
+      + '<table class="tbl"><thead><tr><th>开仓状态</th><th>条数</th><th>已平仓</th>'
+      + '<th>累计盈亏</th><th>胜率</th><th>盈亏比</th></tr></thead><tbody>' + rows + '</tbody></table>'
+      + '</div>';
   },
 
   /* ===== v50.92: 品种统计(监控池下面) =====
@@ -10052,7 +10122,8 @@ const TradeUI = {
       if (q) msg = '没有匹配「' + q + '」的记录';
       else if (this.range !== 'all') msg = '「' + this.rangeLabel() + '」区间内没有记录（点上方「全部」可查看所有记录）';
       else msg = '暂无记录，点上面「新建开仓」添加';
-      tb.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:18px;color:var(--sub)">'
+      tb.innerHTML = '<tr><td colspan="' + (this.mode === 'options' ? 9 : 8)
+        + '" style="text-align:center;padding:18px;color:var(--sub)">'
         + escHtml(msg) + '</td></tr>';
       return;
     }
@@ -10105,9 +10176,16 @@ const TradeUI = {
         if (ai) ageChip = '<span class="age' + (ai.old ? ' age-old' : '') + '" title="'
           + escHtml(ai.tip) + '">已开 ' + ai.days + ' 天</span>';
       }
+      // v51.13: 开仓状态(仅期权买方) —— 移动止损触发后单独标橙, 正常开仓只写「正常」
+      const osChip = (this.mode === 'options')
+        ? (g.open_state === 'trail'
+            ? '<span class="tag" style="background:rgba(255,180,80,.18);color:#ffb450">移动止损</span>'
+            : '<span class="dim" style="font-size:11.5px">正常</span>')
+        : '—';
       return `<tr class="clickable" data-u="${escHtml(g.underlying)}" data-b="${escHtml(g.batch || '')}">
         <td class="col-name"${nameTip ? ' title="' + escHtml(nameTip) + '"' : ''}><b>${escHtml(nameTxt)}</b>${cpBadge}${dteChip}${ageChip}${conTxt}</td>
         <td><span class="tag ${dirTag}">${dirTxt}</span></td>
+        <td class="col-openstate">${osChip}</td>
         <td>${this.fmtDateTime(g.open_date, g.open_time)}</td>
         <td><span class="tag ${statusTag}">${escHtml(g.close_status)}</span></td>
         <td class="${pnlCls}" style="font-weight:600">${pnl ? (pnl > 0 ? '+' : '') + 'CN¥' + pnl.toLocaleString('en-US',{maximumFractionDigits:2}) : '—'}</td>
@@ -10268,8 +10346,10 @@ const TradeUI = {
   /* 期权买方(单腿) v50.85: 止盈目标价位 = 当前期权价格 × 2/3/4/6
      数据来自后端 trade_detail().tp_targets —— 手动新建 / 计算器加入的记录都按**当前持仓**现算:
      老合约平完、只拿着新合约时, 目标价自然跟着新合约的价格走 */
-  /* v51.11/12: 期权买方「当前剩余风险」= 持仓权利金(还压着) − 已平仓权利金(已收回)
-     正数 → 还有这么多裸风险; 0 或负数 → 已经无风险(负数 = 多收回的部分) */
+  /* v51.11/13: 期权买方「当前剩余风险」
+     = 持仓权利金(还压着) − 已平仓权利金(已收回) + 平仓亏损金额
+     正数 → 还有这么多裸风险; 0 或负数 → 已经无风险
+     全平(没有持仓) → 改报整笔结果: 盈利=已无风险, 亏损=亏了多少钱 */
   renderRiskStrip(d){
     const box = $('tdRisk');
     if (!box) return;
@@ -10277,21 +10357,29 @@ const TradeUI = {
     if (this.mode !== 'options' || !p){ box.innerHTML = ''; return; }
     const money = v => '¥ ' + Number(v || 0).toLocaleString('en-US', {maximumFractionDigits: 2});
     const res = Number(p.residual || 0);
-    const risky = res > 0;
-    const main = risky ? money(res) : '已无风险';
-    const sub = risky
-      ? '还剩这么多权利金裸风险'
-      : (res < 0 ? '已多收回 ' + money(-res) : '正好收回成本，风险归零');
+    const realized = Number(p.realized || 0);
+    const full = !!p.full_closed;
+    let main, sub, cls;
+    if (full){
+      if (realized < 0){ main = money(-realized); sub = '整笔已亏（已无仓位）'; cls = 'warn'; }
+      else { main = '已无风险'; sub = realized > 0 ? ('整笔已盈利 ' + money(realized) + '（已无仓位）') : '整笔平手（已无仓位）'; cls = 'safe'; }
+    } else if (res > 0){
+      main = money(res); sub = '还剩这么多权利金裸风险'; cls = 'warn';
+    } else {
+      main = '已无风险'; sub = res < 0 ? ('已多收回 ' + money(-res)) : '正好收回成本，风险归零'; cls = 'safe';
+    }
     box.innerHTML =
       '<div class="risk-strip">'
       + '<div class="rs-main"><span class="k">当前剩余风险</span>'
-      + '<b class="v ' + (risky ? 'warn' : 'safe') + '">' + main + '</b>'
+      + '<b class="v ' + cls + '">' + main + '</b>'
       + '<span class="sub">' + sub + '</span></div>'
       + '<div class="rs-cell"><span class="k">已平仓权利金（收回）</span><b>' + money(p.closed) + '</b></div>'
       + '<div class="rs-cell"><span class="k">持仓权利金（还压着）</span><b>' + money(p.holding) + '</b></div>'
-      + '<div class="rs-cell"><span class="k">开仓权利金（原始成本）</span><b>' + money(p.open) + '</b></div>'
+      + '<div class="rs-cell"><span class="k">平仓亏损（已亏掉）</span><b' + (Number(p.loss || 0) > 0 ? ' class="neg"' : '') + '>'
+      + money(p.loss) + '</b></div>'
       + '</div>'
-      + '<div class="tip" style="margin-top:6px">口径：当前剩余风险 = 持仓权利金 − 已平仓权利金（正数=仍有风险，0 或负数=已无风险）</div>';
+      + '<div class="tip" style="margin-top:6px">口径：当前剩余风险 = 持仓权利金 − 已平仓权利金 + 平仓亏损金额'
+      + '（正数=仍有风险；0 或负数=已无风险）</div>';
   },
 
   renderOptTargets(d){
@@ -10518,7 +10606,11 @@ const TradeUI = {
     const dirTxt = this.dirTxt(d.direction);
     const pnl = d.total_pnl || 0;
     const pnlStr = pnl ? (pnl > 0 ? '+CN¥' : (pnl < 0 ? '-CN¥' : 'CN¥')) + Math.abs(pnl).toLocaleString('en-US',{maximumFractionDigits:2}) : '—';
-    $('tdMeta').innerHTML = `
+    // v51.13: 最上方补一个「合约乘数」徽章(期权 = 报价 × 乘数 = 每手权利金)
+    const multChip = '<span class="tag" style="background:rgba(167,139,250,.18);color:#b39dff"'
+      + ' title="合约乘数：期权价格 × 乘数 = 每手权利金；期货 = 每手多少' + escHtml(String(d.unit || '').split('/')[0] || '单位') + '">'
+      + '乘数 ×' + escHtml(String(d.mult != null ? d.mult : 1)) + '</span>&nbsp;';
+    $('tdMeta').innerHTML = multChip + `
       <span class="tag ${d.direction==='buy'?'buy':(d.direction==='sell'?'sell':'')}">${dirTxt}</span>
       &nbsp;开仓时间 <b>${this.fmtDate(d.open_date)}</b>
       &nbsp;状态 <span class="tag ${d.close_status==='已平仓'?'closed':(d.close_status==='部分平仓'?'partial':'unclosed')}">${escHtml(d.close_status||'—')}</span>

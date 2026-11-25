@@ -2672,40 +2672,61 @@ check("自选(v51.09): 期权双买单独一份, 与期权买方互不影响",
 save_settings({"frequent_dual": _orig_fd or []})
 save_settings({"frequent_options": _orig_fo or []})
 
-# ===== v51.11/12: 当前剩余风险 = 持仓权利金 − 已平仓权利金 =====
-print("\n== 剩余风险 v51.11/12 ==")
+# ===== v51.13: 当前剩余风险 = 持仓 − 已平仓 + 平仓亏损 =====
+print("\n== 剩余风险 v51.13 ==")
 _u111 = "prem111"
 # 开 4 手 @500（cu 期权乘数 5 → 每手 2,500，合计 10,000）
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "open", "direction": "buy",
               "open_date": "2026-11-02", "open_price": 500, "qty": 4, "premium": 10000,
               "call_put": "C", "mode": "options", "batch": ""})
-# 平 1 手 @200 → 收回 200 × 1 × 5 = 1,000
+# 平 1 手 @200（亏 300）→ 收回 1,000 / 持仓剩 3 手 7,500
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "close", "direction": "buy",
               "close_date": "2026-11-06", "close_price": 200, "close_qty": 1, "pnl": -300,
               "mode": "options", "batch": ""})
-_p111 = trade_detail(_u111, mode="options", batch="")["premium"]
-check("剩余风险(v51.12): 已平仓权利金 = 平仓价 × 手数 × 乘数 (200×1×5=1,000)",
-      _p111["closed"] == 1000.0 and _p111["open"] == 10000.0, str(_p111))
-check("剩余风险(v51.12): 持仓权利金 = 剩余 3 手成本 (3×2,500=7,500)",
-      _p111["holding"] == 7500.0, str(_p111["holding"]))
-check("剩余风险(v51.12): 持仓 − 已平仓 = +6,500 → 正数代表仍有这么多裸风险",
-      _p111["residual"] == 6500.0, str(_p111["residual"]))
+_d111 = trade_detail(_u111, mode="options", batch="")
+_p111 = _d111["premium"]
+check("剩余风险(v51.13): 已平仓权利金 1,000 / 持仓 7,500 / 平仓亏损 300",
+      _p111["closed"] == 1000.0 and _p111["holding"] == 7500.0 and _p111["loss"] == 300.0,
+      str(_p111))
+check("剩余风险(v51.13): 公式 = 持仓 − 已平仓 + 亏损 (7,500 − 1,000 + 300 = 6,800)",
+      _p111["residual"] == 6800.0, str(_p111["residual"]))
+check("详情乘数(v51.13): 期权用合约乘数(cu = 5)", _d111["mult"] == 5.0, str(_d111["mult"]))
+# 再平 2 手 @600（赚 2,000）→ 收回累计 7,000 / 剩 1 手 2,500 / 亏损仍是 300
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "close", "direction": "buy",
               "close_date": "2026-11-09", "close_price": 600, "close_qty": 2, "pnl": 2000,
               "mode": "options", "batch": ""})
 _d111b = trade_detail(_u111, mode="options", batch="")["premium"]
-check("剩余风险(v51.12): 收回超过持仓成本 → 变负数(2,500 − 7,000 = -4,500), 代表已无风险",
-      _d111b["closed"] == 7000.0 and _d111b["holding"] == 2500.0 and _d111b["residual"] == -4500.0,
-      str(_d111b))
+check("剩余风险(v51.13): 2,500 − 7,000 + 300 = -4,200 → 负数=已无风险",
+      _d111b["residual"] == -4200.0 and _d111b["loss"] == 300.0, str(_d111b))
+# 余下 1 手平掉 @100（亏 400）→ 全平: 持仓 0 → residual 归 0, 整笔 realized = +1,300
 trade_upsert({"underlying": _u111, "contract": "cu2612C72000", "op_type": "close", "direction": "buy",
               "close_date": "2026-11-12", "close_price": 100, "close_qty": 1, "pnl": -400,
               "mode": "options", "batch": ""})
 _d111c = trade_detail(_u111, mode="options", batch="")["premium"]
-check("剩余风险(v51.12): 全平后持仓归零, 剩余风险 = −已收回总额 (-7,500)",
-      _d111c["holding"] == 0 and _d111c["closed"] == 7500.0 and _d111c["residual"] == -7500.0,
+check("剩余风险(v51.13): 全平后 residual=0 且标 full_closed(前端改按整笔盈亏显示)",
+      _d111c["holding"] == 0 and _d111c["residual"] == 0.0 and _d111c["full_closed"] is True,
       str(_d111c))
-check("剩余风险(v51.12): 其它模式不给这份数据(dual/futures 为 None)",
+check("剩余风险(v51.13): 整笔盈亏 = 平仓盈亏合计 (-300 + 2,000 - 400 = +1,300)",
+      _d111c["realized"] == 1300.0 and _d111c["loss"] == 700.0, str(_d111c))
+check("剩余风险(v51.13): 其它模式不给这份数据(dual/futures 为 None)",
       trade_detail(_u111, mode="dual", batch="")["premium"] is None, '')
+
+# 主表: 开仓状态要能带到 groups 里(统计拆分与列表列都靠它)
+_u113 = "ostate113"
+trade_upsert({"underlying": _u113, "contract": "cu2612C72000", "op_type": "open", "direction": "buy",
+              "open_date": "2026-11-03", "open_price": 500, "qty": 1, "premium": 2500,
+              "call_put": "C", "mode": "options", "batch": "", "open_state": "trail"})
+_g113 = [g for g in trade_groups(mode="options") if g["underlying"] == _u113]
+check("开仓状态列(v51.13): 主表分组带上 open_state(trail)",
+      bool(_g113) and _g113[0]["open_state"] == "trail", str(_g113 and _g113[0].get("open_state")))
+_g113f = [g for g in trade_groups(mode="futures") if g["underlying"] == _u113]
+check("开仓状态列(v51.13): 其它模式不带这个概念(空串)", _g113f == [], '')
+trade_upsert({"underlying": _u113, "contract": "cu2612C72000", "op_type": "open", "direction": "buy",
+              "open_date": "2026-11-04", "open_price": 500, "qty": 1, "premium": 2500,
+              "call_put": "C", "mode": "dual", "batch": ""})
+_g113d = [g for g in trade_groups(mode="dual") if g["underlying"] == _u113]
+check("开仓状态列(v51.13): 期权双买分组也留空", bool(_g113d) and _g113d[0]["open_state"] == "",
+      str(_g113d and _g113d[0].get("open_state")))
 
 print("\n================================")
 print("最终通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
