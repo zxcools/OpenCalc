@@ -3958,7 +3958,13 @@ async function main() {
     const w = ms => new Promise(r => setTimeout(r, ms));
     document.querySelector('#mainTabs .maintab[data-tab="tradesFut"]').click(); await w(700);
     document.querySelector('#rangeSeg .fee-opt[data-range="all"]').click(); await w(300);
-    const all = document.querySelectorAll('#tradesTable tbody tr.clickable').length;
+    // v51.14: 切模式后主表是异步重拉的, 直接读会读到上一模式留下的空表 → 等行出来
+    let all = 0;
+    for (let i = 0; i < 16; i++) {
+      all = document.querySelectorAll('#tradesTable tbody tr.clickable').length;
+      if (all > 0) break;
+      await w(250);
+    }
     const inp = document.getElementById('tradesSearch');
     inp.value = 'e2er5'; inp.dispatchEvent(new Event('input', {bubbles:true}));
     await w(300);
@@ -6240,16 +6246,32 @@ async function main() {
     const rowB = [...document.querySelectorAll('#tradesTable tbody tr')]
       .find(x => x.textContent.indexOf(B) >= 0);
     out.rowB = rowB ? rowB.textContent.replace(/\s+/g, ' ').trim() : '';
-    // 统计拆分表
-    const sp = document.querySelector('.stat-split');
-    out.split = sp ? sp.textContent.replace(/\s+/g, ' ').trim() : '';
-    out.splitRows = sp ? [...sp.querySelectorAll('tbody tr')].map(r => r.textContent.replace(/\s+/g, ' ').trim()) : [];
+    // v51.14: 统计口径(全部/正常/移动止损) —— 切的是统计卡数字, 主表行数不变
+    const pnlCard = () => {
+      const c = document.querySelector('#tradeStats .stat-card');
+      const v = c && c.querySelector('.sv');
+      return v ? v.textContent.trim() : '';
+    };
+    out.stateSegs = [...document.querySelectorAll('#stateSeg .fee-opt')].map(b => b.textContent.trim());
+    out.stateActive0 = (document.querySelector('#stateSeg .fee-opt.active') || {}).textContent || '';
+    out.pnlAll = pnlCard();
+    out.rowsAll = document.querySelectorAll('#tradesTable tbody tr').length;
+    document.querySelector('#stateSeg .fee-opt[data-state="normal"]').click(); await w(900);
+    out.pnlNormal = pnlCard();
+    out.rowsNormal = document.querySelectorAll('#tradesTable tbody tr').length;
+    document.querySelector('#stateSeg .fee-opt[data-state="trail"]').click(); await w(900);
+    out.pnlTrail = pnlCard();
+    out.rowsTrail = document.querySelectorAll('#tradesTable tbody tr').length;
+    out.stateActiveTrail = (document.querySelector('#stateSeg .fee-opt.active') || {}).textContent || '';
+    document.querySelector('#stateSeg .fee-opt[data-state="all"]').click(); await w(800);
+    out.pnlBackAll = pnlCard();
     // 双买模式: 该列隐藏
     TradeUI.setMode('dual');
     document.querySelector('#mainTabs .maintab[data-tab="tradesDual"]').click(); await w(800);
     const thd = [...document.querySelectorAll('#tradesTable thead th')]
       .find(t => t.textContent.trim() === '开仓状态');
     out.dualColDisplay = thd ? getComputedStyle(thd).display : 'missing';
+    out.dualStateBar = getComputedStyle(q('stateSegBar')).display;
     await del(A); await del(B); await del(C);
     return JSON.stringify(out);
   })()`));
@@ -6267,11 +6289,23 @@ async function main() {
         v113.ths.indexOf('开仓状态') >= 0 && /移动止损/.test(v113.rowB),
         JSON.stringify({ths: v113.ths, row: (v113.rowB || '').slice(0, 60)}));
   check('主表列(v51.13): 期权双买下该列隐藏', v113.dualColDisplay === 'none', String(v113.dualColDisplay));
-  check('统计拆分(v51.13): 统计区间下方有 全部/正常/移动止损 三行独立统计',
-        v113.splitRows.length === 3
-        && /全部开仓/.test(v113.splitRows[0]) && /正常开仓/.test(v113.splitRows[1])
-        && /移动止损触发后开仓/.test(v113.splitRows[2]),
-        JSON.stringify(v113.splitRows));
+  check('统计口径(v51.14): 「统计区间」那一行多出三选项, 默认按全部开仓计算',
+        v113.stateSegs.length === 3 && /按全部开仓计算/.test(v113.stateSegs[0])
+        && /按正常开仓计算/.test(v113.stateSegs[1]) && /按移动止损开仓计算/.test(v113.stateSegs[2])
+        && /按全部开仓计算/.test(v113.stateActive0),
+        JSON.stringify({segs: v113.stateSegs, active: v113.stateActive0}));
+  check('统计口径(v51.14): 切「正常开仓」→ 统计卡累计盈亏变成 -1,000(原来 -1,300)',
+        /1,300/.test(v113.pnlAll) && /1,000/.test(v113.pnlNormal),
+        JSON.stringify({all: v113.pnlAll, normal: v113.pnlNormal}));
+  check('统计口径(v51.14): 切「移动止损开仓」→ 累计盈亏 -300 且按钮高亮',
+        /300/.test(v113.pnlTrail) && /按移动止损开仓计算/.test(v113.stateActiveTrail),
+        JSON.stringify({trail: v113.pnlTrail, active: v113.stateActiveTrail}));
+  check('统计口径(v51.14): 只换统计数字, 主表行数始终 3 条不受影响',
+        v113.rowsAll === 3 && v113.rowsNormal === 3 && v113.rowsTrail === 3,
+        JSON.stringify({all: v113.rowsAll, normal: v113.rowsNormal, trail: v113.rowsTrail}));
+  check('统计口径(v51.14): 切回全部后数字还原 + 双买模式下整个选项条隐藏',
+        /1,300/.test(v113.pnlBackAll) && v113.dualStateBar === 'none',
+        JSON.stringify({back: v113.pnlBackAll, dual: v113.dualStateBar}));
 
   const failed = results.filter(r => !r.ok);
   console.log('\n==== 结果: ' + (results.length - failed.length) + '/' + results.length + ' 通过 ====');

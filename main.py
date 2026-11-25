@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 APP_NAME = "期货开仓计算器"
-APP_VERSION = 5113            # 与 README 版本号 v51.13 对齐(数值比较用于单实例接管)
+APP_VERSION = 5114            # 与 README 版本号 v51.14 对齐(数值比较用于单实例接管)
 DEFAULT_MARGIN_RATE = 0.16   # 期货保证金率 16%
 FUTURES_RISK_RATIO = 0.01    # 期货默认开仓金额比例 1% (可选项 0.5/1/1.5/2/3/4/5, 默认 1%)
 # 风险额度可选档位(v50.83 加 4% / 5%): 期货、期权买方、期权双买共用同一套档位
@@ -5698,7 +5698,9 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 .eqbar input{width:76px;margin:0;padding:5px 8px;font-size:var(--fz-btn);text-align:right;border-radius:8px}
 .eqbar .eq-u{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap}
 /* v50.76: 统计区间工具条(在统计卡上方一行): 区间 + 口径 + 当前区间说明 */
-#rangeBar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px}
+#rangeBar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 6px}
+.range-note-row{margin:0 0 10px;line-height:1.5}
+.range-note-row.hidden{display:none}
 .range-note{font-size:var(--fz-btn);color:var(--sub);white-space:nowrap;line-height:1.5}
 .range-note b{color:var(--accent2);font-weight:600}
 .range-note .r-hint{opacity:.8}
@@ -5842,17 +5844,6 @@ footer{margin-top:34px;text-align:center;font-size:11.5px;color:var(--sub);opaci
 /* v51.13: 主表「开仓状态」列只在期权买方出现 */
 [data-tm="futures"] .col-openstate,
 [data-tm="dual"] .col-openstate{display:none !important}
-/* v51.13: 统计卡下方「按开仓状态拆分」小表 */
-.stat-split{margin-top:10px;background:var(--panel2);border:1px solid var(--border);border-radius:10px;
-  padding:10px 12px}
-.stat-split .ss-hd{font-size:11.5px;color:var(--sub);letter-spacing:.3px;margin-bottom:6px}
-.stat-split .ss-hd small{margin-left:8px;opacity:.75;font-size:10.5px}
-.stat-split .tbl{width:100%;font-size:12px}
-.stat-split .tbl th{font-size:10.5px;color:var(--sub);text-align:right;font-weight:600}
-.stat-split .tbl th:first-child{text-align:left}
-.stat-split .tbl td{text-align:right;padding:4px 6px}
-.stat-split .tbl td.bs-n{text-align:left;color:var(--text)}
-.stat-split .tbl tr.bs-all td{font-weight:700}
 .iconbtn{background:transparent;border:none;color:var(--sub);cursor:pointer;font-size:14px;padding:2px 6px;border-radius:6px}
 .iconbtn:hover{background:var(--panel2);color:var(--accent)}
 .row-actions{display:flex;gap:4px;justify-content:flex-end}
@@ -6774,8 +6765,18 @@ input[readonly]{background:var(--panel2);color:var(--sub);cursor:not-allowed}
             <button type="button" class="fee-opt" data-basis="close" aria-pressed="false">按平仓时间</button>
           </span>
         </span>
-        <span class="range-note" id="rangeNote"></span>
+        <!-- v51.14: 统计口径(按开仓状态) —— 只换上方统计卡与品种统计的数字, 不收窄下方主表; 仅期权买方有 -->
+        <span class="segbar" id="stateSegBar" title="统计口径：只影响上方统计卡与品种统计的数字，不收窄下方主表（仅期权买方有开仓状态）">
+          <span class="fee-lbl">统计口径</span>
+          <span class="seg" id="stateSeg" role="group" aria-label="统计口径">
+            <button type="button" class="fee-opt active" data-state="all" aria-pressed="true">按全部开仓计算</button>
+            <button type="button" class="fee-opt" data-state="normal" aria-pressed="false">按正常开仓计算</button>
+            <button type="button" class="fee-opt" data-state="trail" aria-pressed="false">按移动止损开仓计算</button>
+          </span>
+        </span>
       </div>
+      <!-- v51.14: 区间说明单独一行 —— 挤在 #rangeBar 里会让加了「统计口径」的工具条掉到第 3 行 -->
+      <div class="range-note-row" id="rangeNoteRow"><span class="range-note" id="rangeNote"></span></div>
       <!-- 交易统计卡片(v50.53): 全部按主表「记录」统计(一条记录=一笔), 不看分表逐笔操作 -->
       <div class="stat-cards" id="tradeStats"></div>
       <!-- v50.78: 未平仓头寸风险汇总(占用资金 / 理论最大亏损)。不受统计区间与搜索影响 -->
@@ -8742,6 +8743,9 @@ function plansSnapshot(){
   let tradeRange = 'all', tradeRangeBasis = 'open';
   try { tradeRange = localStorage.getItem('oc-trade-range') || 'all'; } catch(e){}
   try { tradeRangeBasis = localStorage.getItem('oc-trade-range-basis') || 'open'; } catch(e){}
+  // v51.14: 统计口径(全部/正常/移动止损) 同样存 localStorage → 一并打包
+  let tradeState = 'all';
+  try { tradeState = localStorage.getItem('oc-trade-state') || 'all'; } catch(e){}
   // v50.88/89: 交易记录工具栏的「当前权益」(万元) 也一并打包 —— 三个模式各一份(分账户)
   const eqOf = m => {
     try { const v = localStorage.getItem('oc-cur-equity-' + m); if (v != null && v !== '') return v; } catch(e){}
@@ -8753,7 +8757,8 @@ function plansSnapshot(){
            curEquity: { futures: okEq(eqOf('futures')), options: okEq(eqOf('options')),
                         dual: okEq(eqOf('dual')) },
            tradeRange: (['1m','3m','1y','ytd','all'].indexOf(tradeRange) >= 0) ? tradeRange : 'all',
-           tradeRangeBasis: (tradeRangeBasis === 'close') ? 'close' : 'open' };
+           tradeRangeBasis: (tradeRangeBasis === 'close') ? 'close' : 'open',
+           tradeState: (['all', 'normal', 'trail'].indexOf(tradeState) >= 0) ? tradeState : 'all' };
 }
 /* 备份恢复: 把备份里的方案写回 localStorage 与本进程内存, 返回恢复的组数 */
 function plansRestore(pl){
@@ -8780,7 +8785,11 @@ function plansRestore(pl){
   if (pl.tradeRangeBasis === 'open' || pl.tradeRangeBasis === 'close'){
     try { localStorage.setItem('oc-trade-range-basis', pl.tradeRangeBasis); } catch(e){}
   }
+  if (['all', 'normal', 'trail'].indexOf(pl.tradeState) >= 0){
+    try { localStorage.setItem('oc-trade-state', pl.tradeState); } catch(e){}
+  }
   if (typeof TradeUI !== 'undefined' && TradeUI.applyRangePref) TradeUI.applyRangePref();
+  if (typeof TradeUI !== 'undefined' && TradeUI.applyStateFilterPref) TradeUI.applyStateFilterPref();
   // v50.88/89: 恢复「当前权益」—— 新备份是按模式存的; 老备份只有一个字符串(→ 三个模式都写)
   const okEq2 = v => (typeof v === 'string' && /^\d*\.?\d*$/.test(v)) ? v : null;
   if (pl.curEquity && typeof pl.curEquity === 'object'){
@@ -9157,6 +9166,7 @@ const TradeUI = {
   // v50.76 统计区间: '1m'/'3m'/'1y'/'ytd'/'all'; 区间口径 'open' 开仓时间 / 'close' 最后一笔平仓时间
   range: 'all',         // 默认「全部」= 等价于原行为(不动任何数据口径)
   rangeBasis: 'open',
+  stateFilter: 'all',        // v51.14 统计口径: all / normal / trail
   RANGES: ['1m', '3m', '1y', 'ytd', 'all'],
   _closeModal: false,   // v50.72 当前弹窗是不是「平仓」(决定要不要自动算平仓盈亏)
   // v51.02: 合约 → 到期日/剩余天数 缓存(按合约号缓, 一次刷新只请求一次)
@@ -9255,6 +9265,8 @@ const TradeUI = {
     const md = $('tradeModalBg') && $('tradeModalBg').querySelector('.modal');
     if (md) md.dataset.tm = nm;
     const isDual = nm === 'dual';
+    // v51.14: 「统计口径(按开仓状态)」只有期权买方有这个概念
+    if (typeof this.syncStateSeg === 'function') this.syncStateSeg();
     if ($('mainTableTitle')) $('mainTableTitle').textContent = isFut ? '期货交易' : (isDual ? '期权双买' : '期权买方');
     if ($('poolTitle')) $('poolTitle').textContent = isFut ? '期货模式监控池' : (isDual ? '期权双买监控池' : '期权买方监控池');
     // v50.60: 期权双买不设品种监控池 → 整块隐藏(标题/列表/按钮一起)
@@ -9372,8 +9384,10 @@ const TradeUI = {
       if (!el) return;
       if (el.dataset.range) this.setRange(el.dataset.range);
       else if (el.dataset.basis) this.setRangeBasis(el.dataset.basis);
+      else if (el.dataset.state) this.setStateFilter(el.dataset.state);   // v51.14
     });
     this.applyRangePref();
+    this.applyStateFilterPref();   // v51.14
     // 主表搜索框: 输入即筛选(与「只展示未平仓」叠加生效)
     $('tradesSearch').addEventListener('input', e => {
       this.mainQuery = e.target.value;
@@ -9604,6 +9618,45 @@ const TradeUI = {
     this.syncRangeSeg();
     return this.renderMain();
   },
+
+  /* ===== v51.14: 统计口径(按开仓状态) =====
+     all = 按全部开仓计算 / normal = 按正常开仓 / trail = 按移动止损开仓
+     ⚠ 只影响**统计**(统计卡 + 品种统计), 不收窄主表 —— 主表仍按「统计区间」走 */
+  applyStateFilterPref(){
+    let v = 'all';
+    try { v = localStorage.getItem('oc-trade-state') || 'all'; } catch (e) {}
+    this.stateFilter = (v === 'normal' || v === 'trail') ? v : 'all';
+    this.syncStateSeg();
+  },
+  syncStateSeg(){
+    const box = $('stateSeg');
+    if (!box) return;
+    box.querySelectorAll('.fee-opt').forEach(el => {
+      const on = (el.dataset.state || 'all') === this.stateFilter;
+      el.classList.toggle('active', on);
+      el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const bar = $('stateSegBar');
+    if (bar) bar.classList.toggle('hidden', this.mode !== 'options');   // 双买/期货没有开仓状态
+  },
+  setStateFilter(v){
+    const nv = (v === 'normal' || v === 'trail') ? v : 'all';
+    if (nv === this.stateFilter) return;
+    this.stateFilter = nv;
+    try { localStorage.setItem('oc-trade-state', nv); } catch (e) {}
+    this.syncStateSeg();
+    return this.renderMain();     // 统计卡 + 品种统计跟着重算(主表不受影响)
+  },
+  /* 统计口径下的分组: 统计区间 + 开仓状态; 主表仍用 scopedGroups() */
+  statsGroups(){
+    const gs = this.scopedGroups();
+    if (this.mode !== 'options' || this.stateFilter === 'all') return gs;
+    return gs.filter(g => ((g.open_state || 'normal') === this.stateFilter));
+  },
+  stateFilterLabel(){
+    return this.stateFilter === 'normal' ? '按正常开仓计算'
+      : (this.stateFilter === 'trail' ? '按移动止损开仓计算' : '按全部开仓计算');
+  },
   /* 区间说明: 起算日 + 口径 + 区间内条数(未平仓不计入时提示一句) */
   renderRangeNote(scopedN){
     const box = $('rangeNote');
@@ -9627,7 +9680,7 @@ const TradeUI = {
      ⚠ 不受搜索 /「只展示未平仓」影响 —— 那俩只是表格显示过滤, 不该改变战绩口径
      ⚠ 但**受统计区间影响** —— 区间是口径本身(用户要按区间看战绩), 卡片刻意跟着走 */
   calcStats(gs0){
-    const gs = gs0 || this.scopedGroups();
+    const gs = gs0 || this.statsGroups();   // v51.14: 统计口径(全部/正常/移动止损)
     // ⚠ v50.77: 持仓数**始终按全量算**, 不跟着统计区间走。
     //   区间是「已实现战绩」的口径; 而「按平仓时间」那条区间会把未平仓记录整条滤掉
     //   (它们没有平仓日) → 用区间算就会恒为 0, 卡片写「持仓中: 0」而用户实际有持仓, 自相矛盾。
@@ -9723,6 +9776,8 @@ const TradeUI = {
     if (box) box.classList.toggle('hidden', !!this.statsHidden);
     const rb = $('rangeBar');
     if (rb) rb.classList.toggle('hidden', !!this.statsHidden);
+    const rn = $('rangeNoteRow');   // v51.14: 区间说明行跟着统计一起收起
+    if (rn) rn.classList.toggle('hidden', !!this.statsHidden);
     const btn = $('btnToggleStats');
     if (btn){
       btn.textContent = this.statsHidden ? '👁 显示统计与区间' : '🙈 隐藏统计与区间';
@@ -9813,6 +9868,9 @@ const TradeUI = {
       + (this.range === 'all' ? '' : '（' + this.rangeFrom() + ' 起 · '
          + (this.rangeBasis === 'close' ? '按最后一笔平仓时间' : '按开仓时间') + '）')
       + ' · 区间内 ' + s.n + ' 条'
+      // v51.14: 统计口径(全部/正常/移动止损) 一起写进 tooltip, 免得只看数字不知道筛的是哪批
+      + (this.mode === 'options' && this.stateFilter !== 'all'
+          ? '\n统计口径：' + this.stateFilterLabel() + '（下方主表不受影响）' : '')
       // v50.77: 持仓数不受区间影响, 说明一下免得跟"区间内 N 条"对不上
       + (this.range === 'all' ? '' : '\n持仓中 ' + s.holding + ' 条按**全部记录**算（持仓不受统计区间影响）');
     // 第 3 卡的小字: 区间非「全部」时, 「持仓中」是全量、「条数」是区间内 → 分别写明口径
@@ -9860,36 +9918,9 @@ const TradeUI = {
                     : '年化口径：已平仓不足 5 笔或跨度不足 30 天，暂不年化（样本太小时 √N 会放大到失真）\n')
                 + '⚠ 笔数少 / 交易集中在几天时会高估，仅供横向参考。\n' + scopeTip)
              : ('共 ' + s.closedN + ' 笔已平仓，不足 2 笔算不出标准差。\n' + scopeTip));
-    // v51.13: 期权买方 —— 再按「开仓状态」拆一份(正常 / 移动止损触发后 / 全部), 同一统计区间
-    if (this.mode === 'options') box.innerHTML += this.renderStatsByState();
   },
 
-  /* v51.13: 按开仓状态拆分的统计(跟统计卡同一区间、同一「已平仓」口径: 有已实现盈亏才算) */
-  renderStatsByState(){
-    const base = this.scopedGroups();
-    const of = k => (k === 'all') ? base : base.filter(g => ((g.open_state || 'normal') === k));
-    const money = v => (v > 0 ? '+CN¥' : (v < 0 ? '-CN¥' : 'CN¥'))
-      + Math.abs(v).toLocaleString('en-US', {maximumFractionDigits: 2});
-    const rows = [['all', '全部开仓'], ['normal', '正常开仓'], ['trail', '移动止损触发后开仓']]
-      .map(([k, name]) => {
-        const s = this.calcStats(of(k));
-        const rTxt = (r, win) => r != null ? r.toFixed(2) : (win > 0 ? '∞' : '—');
-        return '<tr' + (k === 'all' ? ' class="bs-all"' : '') + '>'
-          + '<td class="bs-n">' + name + '</td>'
-          + '<td>' + s.n + '</td>'
-          + '<td>' + s.closedN + '</td>'
-          + '<td class="' + (s.realized > 0 ? 'pos' : (s.realized < 0 ? 'neg' : '')) + '">'
-          + (s.closedN ? money(s.realized) : '—') + '</td>'
-          + '<td>' + (s.winRate == null ? '—' : (s.winRate * 100).toFixed(1) + '%') + '</td>'
-          + '<td>' + (s.closedN ? rTxt(s.plRatio, s.grossWin) : '—') + '</td>'
-          + '</tr>';
-      }).join('');
-    return '<div class="stat-split">'
-      + '<div class="ss-hd">按开仓状态拆分<small>同一统计区间 · 三种口径各自独立算</small></div>'
-      + '<table class="tbl"><thead><tr><th>开仓状态</th><th>条数</th><th>已平仓</th>'
-      + '<th>累计盈亏</th><th>胜率</th><th>盈亏比</th></tr></thead><tbody>' + rows + '</tbody></table>'
-      + '</div>';
-  },
+  renderStatsByState(){ return ''; },   // v51.14: 改成「统计口径」筛选, 不再单列一张表
 
   /* ===== v50.92: 品种统计(监控池下面) =====
      用户要求: **期权按开仓的期货标的统计, 不按期权合约统计**
@@ -9910,7 +9941,7 @@ const TradeUI = {
     const box = $('prodStats');
     if (!box) return;
     const map = new Map();
-    this.scopedGroups().forEach(g => {
+    this.statsGroups().forEach(g => {   // v51.14: 品种统计跟随统计口径
       const k = this.productKey(g.underlying);
       if (!k) return;
       const d = map.get(k) || {key: k, n: 0, closed: 0, wins: 0, losses: 0,
